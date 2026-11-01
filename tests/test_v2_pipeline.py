@@ -482,6 +482,24 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         )
         self.assertEqual(s2_ordered[0]["video_id"], "v_s2_partial")
 
+    def test_error_count_reset_and_orchestrator_unlimited_default(self):
+        from core.pipeline_orchestrator import build_arg_parser
+
+        # 1. Transient errors at M2 reset to 0 once M3_DIARIZED succeeds
+        self.ws.advance_micro_step("v_recover", "M2_VOCALS_CLEANED")
+        self.ws.record_error("v_recover", "AttributeError: ml_dtypes")
+        self.ws.record_error("v_recover", "AttributeError: ml_dtypes")
+        self.assertEqual(self.ws.get_video_state("v_recover")["error_count"], 2)
+
+        self.ws.advance_micro_step("v_recover", "M3_DIARIZED")
+        st_after = self.ws.get_video_state("v_recover")
+        self.assertEqual(st_after["error_count"], 0)
+        self.assertIsNone(st_after["last_error"])
+
+        # 2. Orchestrator defaults to --max-session-minutes 0 (unlimited continuous mode)
+        parsed = build_arg_parser().parse_args([])
+        self.assertEqual(parsed.max_session_minutes, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

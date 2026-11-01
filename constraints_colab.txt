@@ -1,6 +1,6 @@
-# Pin ABI-sensitive scientific packages so NeMo MSDD, ClearVoice MossFormer2,
-# Faster-Whisper, Demucs, and CTC-Forced-Aligner coexist cleanly on Google Colab T4.
-numpy<2.0.0
-scipy<1.15.0
-cython<3.1.0
+# Pin ABI & version-sensitive packages for Google Colab Python 3.12 / 3.13 + T4 GPU:
+# - Keep Colab's native NumPy 2.x & ml-dtypes>=0.5.4 intact (required by onnx>=1.20 on Python 3.13)
+# - Pin nemo_toolkit to 2.7.x (<3.0.0) so overlap-aware NeuralDiarizer (msdd_models) is preserved
+ml-dtypes>=0.5.4
+nemo_toolkit>=2.6.0,<3.0.0
 packaging>=23.0

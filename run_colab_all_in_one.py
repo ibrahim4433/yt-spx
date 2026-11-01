@@ -49,6 +49,11 @@ def setup_colab_drive() -> bool:
     from core.drive_sync import SharedWorkspace
 
     ws = SharedWorkspace()
+    if ws.is_drive:
+        torch_cache = ws.root / "models_cache" / "torch"
+        torch_cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("TORCH_HOME", str(torch_cache))
+
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")
     cookies_cand = ws.root / "cookies.txt"
@@ -84,29 +89,63 @@ def _ensure_deno_runtime() -> None:
 def _get_pip_cache_args() -> List[str]:
     """
     Returns pip arguments pointing to /content/drive/MyDrive/yt-spx/pip_cache
-    so compiled wheels (ctc-forced-aligner, numpy, nemo) are cached on 5TB Drive.
-    Subsequent runs install in seconds instead of recompiling from scratch!
+    so downloaded & built wheels (ctc-forced-aligner, nemo_toolkit) are cached on 5TB Drive
+    and indexed strictly by Python ABI & version constraints.
     """
     from core.drive_sync import SharedWorkspace
+
     ws = SharedWorkspace()
     if not ws.is_drive:
         return []
     cache_dir = ws.root / "pip_cache"
-    wheels_dir = cache_dir / "wheels"
-    wheels_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Purge any stale flat wheels from legacy runs (e.g. numpy-1.x, ml_dtypes-0.4.x, nemo_toolkit-3.x)
+    legacy_wheels_dir = cache_dir / "wheels"
+    if legacy_wheels_dir.exists():
+        for bad_glob in ("numpy-1.*.whl", "ml_dtypes-0.4*.whl", "nemo_toolkit-3.*.whl", "scipy-1.1[0-4]*.whl"):
+            for stale_whl in legacy_wheels_dir.glob(bad_glob):
+                try:
+                    stale_whl.unlink()
+                except OSError:
+                    pass
+
     return [
         f"--cache-dir={cache_dir}",
-        f"--find-links={wheels_dir}",
         "--prefer-binary",
     ]
 
 
+def _verify_stage1_runtime_health() -> bool:
+    """Fast (<0.5s) ABI & module spec check ensuring ml_dtypes>=0.5.4 and NeMo 2.x NeuralDiarizer exist."""
+    check_code = (
+        "import importlib.util, ml_dtypes; "
+        "assert hasattr(ml_dtypes, 'float4_e2m1fn'); "
+        "assert importlib.util.find_spec('nemo.collections.asr.models.msdd_models') is not None; "
+        "assert importlib.util.find_spec('clearvoice') is not None; "
+        "assert importlib.util.find_spec('faster_whisper') is not None; "
+        "assert importlib.util.find_spec('demucs') is not None"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", check_code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return res.returncode == 0
+
+
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
+    import importlib.util
+
     marker = Path("/tmp/.yt_spx_stage1_deps_ok")
     if marker.exists():
-        print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
-        _ensure_deno_runtime()
-        return
+        if _verify_stage1_runtime_health():
+            print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
+            _ensure_deno_runtime()
+            return
+        print("   -> Detected stale or mismatched runtime packages; repairing automatically...")
+        marker.unlink(missing_ok=True)
 
     _ensure_deno_runtime()
 
@@ -124,44 +163,49 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "ctc-forced-aligner",
         "deepmultilingualpunctuation",
         "soundfile",
-        "scipy",
         "huggingface_hub",
         "tqdm",
+        "ml-dtypes>=0.5.4",
     ]
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
 
-    try:
-        import nemo.collections.asr  # noqa: F401
-    except ImportError:
-        print("   -> Installing NVIDIA NeMo ASR Toolkit (MSDD + TitaNet-Large)...")
+    if importlib.util.find_spec("nemo.collections.asr.models.msdd_models") is None:
+        print("   -> Installing NVIDIA NeMo 2.x ASR Toolkit (MSDD NeuralDiarizer + TitaNet-Large)...")
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + ["cython", "nemo_toolkit[asr]"]
+            [sys.executable, "-m", "pip", "install", "-q"]
+            + pip_cache
+            + c_arg
+            + ["cython", "nemo_toolkit[asr]>=2.6.0,<3.0.0", "ml-dtypes>=0.5.4"]
         )
 
-    try:
-        import clearvoice  # noqa: F401
-    except ImportError:
+    if importlib.util.find_spec("clearvoice") is None:
         print("   -> Installing ClearerVoice-Studio (MossFormer2_SS_16K 2-speaker overlap separator)...")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + ["clearvoice"],
-            check=False,
-        )
+        # Install pure audio dependencies with constraints first, then --no-deps on clearvoice
+        # so clearvoice's legacy setup.py metadata never downgrades NumPy 2.x or ml-dtypes on Python 3.13.
+        clearvoice_deps = [
+            "einops",
+            "gdown",
+            "rotary_embedding_torch",
+            "python_speech_features",
+            "torchinfo",
+            "yamlargparse",
+            "scenedetect",
+            "pydub",
+            "librosa",
+        ]
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + clearvoice_deps)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-deps"] + pip_cache + ["clearvoice"])
 
-    # Save compiled wheels to Drive wheels directory so future runs don't rebuild
-    try:
-        from core.drive_sync import SharedWorkspace
-        ws = SharedWorkspace()
-        if ws.is_drive:
-            wheels_dir = ws.root / "pip_cache" / "wheels"
-            subprocess.run(
-                [sys.executable, "-m", "pip", "wheel", "-q", "-w", str(wheels_dir)]
-                + c_arg
-                + ["ctc-forced-aligner", "nemo_toolkit[asr]"],
-                check=False,
-            )
-    except Exception:
-        pass
+    # Final ABI guard: guarantee ml_dtypes>=0.5.4 (float4_e2m1fn required by onnx>=1.20 on Python 3.13)
+    abi_check = subprocess.run(
+        [sys.executable, "-c", "import ml_dtypes; assert hasattr(ml_dtypes, 'float4_e2m1fn')"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if abi_check.returncode != 0:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-U", "ml-dtypes>=0.5.4"] + pip_cache)
 
     marker.write_text("ok", encoding="utf-8")
 

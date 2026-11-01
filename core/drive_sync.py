@@ -207,6 +207,8 @@ class SharedWorkspace:
             raise ValueError(f"Unknown micro-step: {new_step}")
 
         state = self.get_video_state(video_id)
+        if STEP_RANK[new_step] > state["step_rank"]:
+            state["error_count"] = 0
         if STEP_RANK[new_step] >= state["step_rank"]:
             state["micro_step"] = new_step
             state["step_rank"] = STEP_RANK[new_step]

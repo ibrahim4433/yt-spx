@@ -24,6 +24,7 @@ import json
 import time
 import random
 import argparse
+import traceback
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -255,10 +256,11 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         return 0
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    budget_label = f"{args.max_session_minutes} min" if args.max_session_minutes > 0 else "unlimited (until disconnect)"
     print("=" * 72)
     print(f"[Stage 1 Audio & Diarization Worker] Worker: {workspace.worker_id}")
     print(f"  Device: {device} | Whisper: {args.whisper_model} | Max Batch: {args.batch_videos} videos")
-    print(f"  Candidates Ready: {len(candidates)} | Session Budget: {args.max_session_minutes} min")
+    print(f"  Candidates Ready: {len(candidates)} | Session Budget: {budget_label}")
     print("=" * 72, flush=True)
 
     pipeline = Stage1AudioPipeline(
@@ -270,15 +272,18 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     )
 
     t_session_start = time.time()
-    deadline = t_session_start + (args.max_session_minutes * 60.0)
+    deadline = (t_session_start + (args.max_session_minutes * 60.0)) if args.max_session_minutes > 0 else None
     completed_count = 0
+    consecutive_errors = 0
+    last_error_sig = ""
     allow_downloads = not args.offline_only
+    exit_code = 0
 
     for cand in candidates:
         if completed_count >= args.batch_videos:
             print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
             break
-        if time.time() >= deadline:
+        if deadline is not None and time.time() >= deadline:
             print(f"\n[Stage 1] Session time budget ({args.max_session_minutes}m) reached. Saving & exiting cleanly.")
             break
 
@@ -300,6 +305,8 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             scen = pipeline.process_single_video(cand, allow_youtube_download=allow_downloads)
             if scen is not None:
                 completed_count += 1
+                consecutive_errors = 0
+                last_error_sig = ""
                 elapsed = round(time.time() - t0, 1)
                 m = scen.get("metrics", {})
                 print(
@@ -319,15 +326,36 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                 extra_updates={"permanent_unavailable": True, "last_error": str(perm_err)[:300]},
             )
         except Exception as exc:
-            print(f"    [ERROR] Stage 1 error on {vid}: {exc}", flush=True)
-            workspace.record_error(vid, str(exc))
+            err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
+            print(f"    [ERROR] Stage 1 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
+            if consecutive_errors == 0:
+                print(traceback.format_exc(limit=5), flush=True)
+
+            if err_sig == last_error_sig:
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 1
+                last_error_sig = err_sig
+
+            # Do not penalize per-video error_count on repeated systemic environment/import errors
+            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError))):
+                workspace.record_error(vid, err_sig)
+
+            if consecutive_errors >= 3:
+                print(
+                    f"\n[!] ABORTING STAGE 1 BATCH: 3 consecutive identical errors ({err_sig}). "
+                    "Stopping immediately so no further videos are touched until resolved.",
+                    flush=True,
+                )
+                exit_code = 2
+                break
         finally:
             workspace.release_lock(lock_name)
 
     # Sync newly built scenarios into SQLite immediately if compactor lock is free
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 1 Summary] Completed {completed_count} scenario(s). Compactor synced: {sync_stats}", flush=True)
-    return 0
+    return exit_code
 
 
 def run_stage2_worker(args: argparse.Namespace) -> int:
@@ -343,10 +371,11 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
         print("[Stage 2] No M5 scenarios waiting for LLM extraction.")
         return 0
 
+    budget_label = f"{args.max_session_minutes} min" if args.max_session_minutes > 0 else "unlimited (until disconnect)"
     print("=" * 72)
     print(f"[Stage 2 Local LLM Extraction Worker] Worker: {workspace.worker_id}")
     print(f"  Model: {args.llm_model} (12,288 ctx) | Max Batch: {args.stage2_batch_videos} videos")
-    print(f"  M5 Scenarios Ready: {len(candidates)} | Session Budget: {args.max_session_minutes} min")
+    print(f"  M5 Scenarios Ready: {len(candidates)} | Session Budget: {budget_label}")
     print("=" * 72, flush=True)
 
     extractor = Stage2ScenarioExtractor(
@@ -355,14 +384,17 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
         context_length=args.llm_context_length,
     )
 
-    deadline = time.time() + (args.max_session_minutes * 60.0)
+    deadline = (time.time() + (args.max_session_minutes * 60.0)) if args.max_session_minutes > 0 else None
     completed_count = 0
+    consecutive_errors = 0
+    last_error_sig = ""
+    exit_code = 0
 
     for cand in candidates:
         if completed_count >= args.stage2_batch_videos:
             print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
             break
-        if time.time() >= deadline:
+        if deadline is not None and time.time() >= deadline:
             print(f"\n[Stage 2] Session time budget ({args.max_session_minutes}m) reached. Exiting cleanly.")
             break
 
@@ -375,18 +407,39 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
             units = extractor.extract_video_m6(vid, verbose=True)
             if units is not None:
                 completed_count += 1
+                consecutive_errors = 0
+                last_error_sig = ""
                 for u in units:
                     log_extracted_unit_live(u)
                 print(f"    [OK] M6_LLM_EXTRACTED [{vid}]: {len(units)} dialectical Q&A unit(s) saved.", flush=True)
         except Exception as exc:
-            print(f"    [ERROR] Stage 2 error on {vid}: {exc}", flush=True)
-            workspace.record_error(vid, str(exc))
+            err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
+            print(f"    [ERROR] Stage 2 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
+            if consecutive_errors == 0:
+                print(traceback.format_exc(limit=5), flush=True)
+
+            if err_sig == last_error_sig:
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 1
+                last_error_sig = err_sig
+
+            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError))):
+                workspace.record_error(vid, err_sig)
+
+            if consecutive_errors >= 3:
+                print(
+                    f"\n[!] ABORTING STAGE 2 BATCH: 3 consecutive identical errors ({err_sig}).",
+                    flush=True,
+                )
+                exit_code = 2
+                break
         finally:
             workspace.release_lock(lock_name)
 
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 2 Summary] Extracted {completed_count} video(s). Compactor synced: {sync_stats}", flush=True)
-    return 0
+    return exit_code
 
 
 def print_status_report(workspace: SharedWorkspace) -> None:
@@ -427,67 +480,126 @@ def print_status_report(workspace: SharedWorkspace) -> None:
     print("=" * 74 + "\n")
 
 
+def _build_stage1_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--mode", "stage1-worker",
+        "--batch-videos", str(args.batch_videos),
+        "--max-session-minutes", str(budget_min),
+        "--whisper-model", args.whisper_model,
+        "--whisper-batch-size", str(args.whisper_batch_size),
+    ]
+    if args.debates_only:
+        cmd.append("--debates-only")
+    if args.keep_raw_audio:
+        cmd.append("--keep-raw-audio")
+    if args.offline_only:
+        cmd.append("--offline-only")
+    if args.worker_id:
+        cmd += ["--worker-id", args.worker_id]
+    return cmd
+
+
+def _build_stage2_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--mode", "stage2-worker",
+        "--stage2-batch-videos", str(args.stage2_batch_videos),
+        "--max-session-minutes", str(budget_min),
+        "--llm-model", args.llm_model,
+        "--llm-context-length", str(args.llm_context_length),
+    ]
+    if args.worker_id:
+        cmd += ["--worker-id", args.worker_id]
+    return cmd
+
+
 def run_auto_orchestrator(args: argparse.Namespace) -> int:
     """
-    Runs Stage 1 smart batch in a child process (say ~60% of session budget),
-    reclaims 100% of GPU VRAM on exit, then runs Stage 2 LLM extraction in a fresh
-    child process with the remaining session budget, followed by SQLite shard compaction.
+    Coordinates Stage 1 (Audio/Diarization/Overlaps) and Stage 2 (Qwen 2.5 14B Extraction)
+    in isolated GPU child processes so 100% of T4 VRAM is reclaimed between stages.
+    - When --max-session-minutes <= 0 (default): loops continuously in smart rounds
+      (Stage 1 batch -> Stage 2 batch -> SQLite shard compaction) until Colab disconnects
+      or all candidate videos are finished.
+    - When --max-session-minutes > 0: splits the explicit session budget (~62% Stage 1 / ~38% Stage 2).
     """
     t_start = time.time()
     total_budget_min = float(args.max_session_minutes)
-    s1_budget_min = max(15, int(round(total_budget_min * 0.62)))
+    workspace = SharedWorkspace(worker_name=args.worker_id or None)
+    exit_code = 0
 
-    base_cmd = [sys.executable, str(Path(__file__).resolve())]
-    common_flags = []
-    if args.worker_id:
-        common_flags += ["--worker-id", args.worker_id]
+    if total_budget_min <= 0:
+        round_num = 0
+        while True:
+            round_num += 1
+            manifest = load_or_create_manifest(workspace)
+            s1_before = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
+            s2_before = len(select_stage2_candidates(workspace, manifest))
+            if s1_before == 0 and s2_before == 0:
+                print("\n[Orchestrator] All candidate videos have completed Stage 1 & Stage 2!", flush=True)
+                break
 
-    # 1. Spawn Isolated Stage 1 Process
-    s1_cmd = (
-        base_cmd
-        + [
-            "--mode", "stage1-worker",
-            "--batch-videos", str(args.batch_videos),
-            "--max-session-minutes", str(s1_budget_min),
-            "--whisper-model", args.whisper_model,
-            "--whisper-batch-size", str(args.whisper_batch_size),
-        ]
-        + common_flags
-    )
-    if args.debates_only:
-        s1_cmd.append("--debates-only")
-    if args.keep_raw_audio:
-        s1_cmd.append("--keep-raw-audio")
-    if args.offline_only:
-        s1_cmd.append("--offline-only")
+            print(
+                f"\n[Orchestrator] === Continuous Smart-Batch Round #{round_num} "
+                f"(Pending Stage1={s1_before}, Stage2={s2_before}) ===",
+                flush=True,
+            )
 
-    print(f"[Orchestrator] Launching Isolated Stage 1 Subprocess (budget={s1_budget_min}m)...", flush=True)
-    subprocess.run(s1_cmd, check=False)
+            if s1_before > 0:
+                print(
+                    f"[Orchestrator] Launching Isolated Stage 1 Subprocess "
+                    f"(batch={args.batch_videos}, budget=unlimited)...",
+                    flush=True,
+                )
+                s1_res = subprocess.run(_build_stage1_subcmd(args, 0), check=False)
+                if s1_res.returncode != 0:
+                    exit_code = s1_res.returncode
+                    break
 
-    # 2. Compute remaining session minutes for Stage 2 LLM Extraction
-    elapsed_min = (time.time() - t_start) / 60.0
-    rem_min = max(10, int(total_budget_min - elapsed_min))
+            s2_ready = len(select_stage2_candidates(workspace, manifest))
+            if s2_ready > 0:
+                print(
+                    f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess "
+                    f"(batch={args.stage2_batch_videos}, budget=unlimited)...",
+                    flush=True,
+                )
+                s2_res = subprocess.run(_build_stage2_subcmd(args, 0), check=False)
+                if s2_res.returncode != 0:
+                    exit_code = s2_res.returncode
+                    break
 
-    s2_cmd = (
-        base_cmd
-        + [
-            "--mode", "stage2-worker",
-            "--stage2-batch-videos", str(args.stage2_batch_videos),
-            "--max-session-minutes", str(rem_min),
-            "--llm-model", args.llm_model,
-            "--llm-context-length", str(args.llm_context_length),
-        ]
-        + common_flags
-    )
-    print(f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess (budget={rem_min}m)...", flush=True)
-    subprocess.run(s2_cmd, check=False)
+            synced = workspace.sync_completed_shards_to_sqlite()
+            print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
 
-    # 3. Final SQLite Shard Compaction & Telemetry Report
-    workspace = SharedWorkspace(worker_name=args.worker_id)
+            s1_after = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
+            s2_after = len(select_stage2_candidates(workspace, manifest))
+            if s1_after >= s1_before and s2_after >= s2_before:
+                print(
+                    "[Orchestrator] No unlocked/downloadable candidates progressed in this round "
+                    "(remaining items may be locked by another worker or offline-only). Stopping cleanly.",
+                    flush=True,
+                )
+                break
+    else:
+        s1_budget_min = max(5, int(round(total_budget_min * 0.62)))
+        print(f"[Orchestrator] Launching Isolated Stage 1 Subprocess (budget={s1_budget_min}m)...", flush=True)
+        s1_res = subprocess.run(_build_stage1_subcmd(args, s1_budget_min), check=False)
+        if s1_res.returncode != 0:
+            exit_code = s1_res.returncode
+        else:
+            elapsed_min = (time.time() - t_start) / 60.0
+            rem_min = max(5, int(total_budget_min - elapsed_min))
+            print(f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess (budget={rem_min}m)...", flush=True)
+            s2_res = subprocess.run(_build_stage2_subcmd(args, rem_min), check=False)
+            if s2_res.returncode != 0:
+                exit_code = s2_res.returncode
+
     synced = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Orchestrator] Final SQLite Shard Compaction: {synced}")
     print_status_report(workspace)
-    return 0
+    return exit_code
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

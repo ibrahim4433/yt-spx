@@ -387,31 +387,38 @@ class WarmNeMoDiarizer:
         return l2_normalize(emb.squeeze(0).detach().cpu().numpy())
 
     def run_diarization(self, wav_16k_path: Path, out_rttm_path: Path, is_short: bool = False) -> str:
-        """Runs NeMo MSDD / ClusteringDiarizer (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
+        """Runs NeMo MSDD NeuralDiarizer (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
+        import importlib
         import torch
         from omegaconf import OmegaConf
 
-        # Handle backward/forward-compatible NeMo diarizer imports across NeMo versions
+        # Prioritize overlap-aware NeuralDiarizer (NeMo 2.x msdd_models) before ClusteringDiarizer fallback.
+        # Do NOT swallow inner dependency errors (e.g. ml_dtypes / onnx AttributeError).
         DiarizerClass = None
+        last_err: Optional[Exception] = None
         for mod_path, cls_name in [
-            ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
-            ("nemo.collections.asr.models.clustering_diarizer", "NeuralDiarizer"),
-            ("nemo.collections.asr.models", "ClusteringDiarizer"),
-            ("nemo.collections.asr.models", "NeuralDiarizer"),
             ("nemo.collections.asr.models.msdd_models", "NeuralDiarizer"),
             ("nemo.collections.asr.parts.submodules.neural_diarizer", "NeuralDiarizer"),
+            ("nemo.collections.asr.models.clustering_diarizer", "NeuralDiarizer"),
+            ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
+            ("nemo.collections.asr.models", "ClusteringDiarizer"),
         ]:
             try:
-                mod = __import__(mod_path, fromlist=[cls_name])
-                DiarizerClass = getattr(mod, cls_name)
-                break
-            except (ImportError, AttributeError):
-                continue
+                mod = importlib.import_module(mod_path)
+                if hasattr(mod, cls_name):
+                    DiarizerClass = getattr(mod, cls_name)
+                    break
+            except ModuleNotFoundError as exc:
+                # Only ignore if the target NeMo module path itself does not exist in this NeMo version
+                if exc.name and mod_path.startswith(exc.name):
+                    last_err = exc
+                    continue
+                raise
 
         if DiarizerClass is None:
             raise ImportError(
-                "Could not locate NeuralDiarizer or ClusteringDiarizer in nemo.collections.asr. "
-                "Ensure nemo_toolkit[asr] is installed."
+                f"Could not locate NeuralDiarizer or ClusteringDiarizer in nemo.collections.asr "
+                f"(last error: {last_err}). Ensure 'nemo_toolkit[asr]>=2.6.0,<3.0.0' is installed."
             )
 
         with tempfile.TemporaryDirectory(prefix="yt_spx_msdd_") as tmp_dir:
