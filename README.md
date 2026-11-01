@@ -26,7 +26,7 @@ yt-spx/
 ├── clean_urls.txt                         # Canonical YouTube URL list
 ├── constraints_colab.txt                  # ABI-pinned Colab scientific constraints
 ├── run_colab_all_in_one.py                # 1-click Google Colab T4 bootstrapper
-├── dawah_knowledge_extractor_colab.ipynb  # Multi-account 2-4 hr/day Colab T4 notebook
+├── dawah_dialectics_v2_colab.ipynb  # Multi-account dynamic Colab T4 notebook (1-8 hrs variable)
 ├── download_videos.py                     # Anti-ban M1 audio staging CLI
 ├── run_app.py                             # Local launcher for the FastAPI web portal
 │
@@ -73,4 +73,4 @@ python run_app.py
 Then open `http://127.0.0.1:8000` (sync `dawah_knowledge.db` from `/content/drive/MyDrive/yt-spx/data/dawah_knowledge.db` as Colab batches complete).
 
 ### 2. Run Smart-Batch Extraction on Free Google Colab T4 (2–4 hrs/day)
-Open `dawah_knowledge_extractor_colab.ipynb` in Google Colab (T4 GPU runtime) and run **Cell 1** (`--mode auto --batch-videos 6 --max-session-minutes 165`). Multiple Colab accounts can share `/content/drive/MyDrive/yt-spx` via *"Add shortcut to My Drive"* and process safely in parallel.
+Open `dawah_dialectics_v2_colab.ipynb` in Google Colab (T4 GPU runtime) and run **Cell 1** (`--mode auto --batch-videos 6`). It runs smoothly whether Colab grants 1 hour or 8 hours, saving micro-steps continuously. Multiple Colab accounts can share `/content/drive/MyDrive/yt-spx` via *"Add shortcut to My Drive"* and process safely in parallel.

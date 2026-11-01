@@ -503,8 +503,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--max-session-minutes",
         type=int,
-        default=165,
-        help="Graceful stop timer in minutes (default 165m = 2h45m for 2-4h Free Colab T4 quota).",
+        default=0,
+        help="Graceful stop timer in minutes (default 0 = continuous until disconnect; or e.g. 165 for 2h45m).",
     )
     p.add_argument("--whisper-model", default="large-v3-turbo", help="Faster-Whisper model size.")
     p.add_argument("--whisper-batch-size", type=int, default=12, help="BatchedInferencePipeline batch size.")
