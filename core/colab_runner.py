@@ -17,6 +17,12 @@ from typing import List, Dict, Any, Optional
 
 # Prevent PyTorch CUDA memory fragmentation on Nvidia GPUs (T4 / L4 / A100)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Force Transformers to never import TensorFlow or Flax (avoids Protobuf version mismatch in Colab)
+os.environ["USE_TF"] = "0"
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["USE_TORCH"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 try:
     from core.drive_sync import resolve_drive_root
@@ -178,6 +184,54 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
+def ensure_cuda_runtime_loaded() -> None:
+    """Preloads libcudart.so.12 and sets LD_LIBRARY_PATH so llama_cpp loads cleanly on Linux."""
+    try:
+        from core.audio_diarizer import preload_cuda_libraries
+        preload_cuda_libraries()
+    except Exception:
+        pass
+
+    import sys
+    if sys.platform != "linux":
+        return
+
+    import ctypes
+    search_paths = []
+    try:
+        import torch
+        tlib = Path(torch.__file__).parent / "lib"
+        if tlib.is_dir():
+            search_paths.append(tlib)
+    except Exception:
+        pass
+
+    for p in sys.path:
+        nv_rt = Path(p) / "nvidia" / "cuda_runtime" / "lib"
+        if nv_rt.is_dir():
+            search_paths.append(nv_rt)
+
+    try:
+        for cdir in sorted(Path("/usr/local").glob("cuda*/lib64"), reverse=True):
+            if cdir.is_dir():
+                search_paths.append(cdir)
+    except Exception:
+        pass
+
+    for d in search_paths:
+        for cand_name in ("libcudart.so.12", "libcudart.so"):
+            target = d / cand_name
+            if target.exists():
+                try:
+                    ctypes.CDLL(str(target), mode=ctypes.RTLD_GLOBAL)
+                    curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
+                    if str(d) not in curr_ld.split(":"):
+                        os.environ["LD_LIBRARY_PATH"] = f"{d}:{curr_ld}" if curr_ld else str(d)
+                    return
+                except Exception:
+                    pass
+
+
 class LocalGPUClient:
     """
     Runs Qwen 2.5 14B Instruct directly on the Google Colab GPU (T4 15GB / L4 / A100).
@@ -209,6 +263,7 @@ class LocalGPUClient:
         # 1. Primary Engine: GGUF Q5_K_M (5-bit) + 8-bit KV Cache via llama-cpp-python
         if use_gguf_q5 and torch.cuda.is_available():
             try:
+                ensure_cuda_runtime_loaded()
                 from llama_cpp import Llama, llama_supports_gpu_offload
                 from huggingface_hub import hf_hub_download
 
@@ -216,16 +271,29 @@ class LocalGPUClient:
                     print(f"[+] Downloading/Loading 5-bit GGUF: {gguf_repo}/{gguf_filename} (~10.5 GB)...")
                     model_path = hf_hub_download(repo_id=gguf_repo, filename=gguf_filename)
                     # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~2.5 GB at 12,288 context)
-                    self.llm = Llama(
-                        model_path=model_path,
-                        n_gpu_layers=-1,
-                        n_ctx=context_length,
-                        n_batch=512,
-                        type_k=8,
-                        type_v=8,
-                        flash_attn=True,
-                        verbose=False,
-                    )
+                    try:
+                        self.llm = Llama(
+                            model_path=model_path,
+                            n_gpu_layers=-1,
+                            n_ctx=context_length,
+                            n_batch=512,
+                            type_k=8,
+                            type_v=8,
+                            flash_attn=True,
+                            verbose=False,
+                        )
+                    except Exception as fa_err:
+                        print(f"[-] GGUF flash_attn note ({fa_err}); retrying with standard attention...")
+                        self.llm = Llama(
+                            model_path=model_path,
+                            n_gpu_layers=-1,
+                            n_ctx=context_length,
+                            n_batch=512,
+                            type_k=8,
+                            type_v=8,
+                            flash_attn=False,
+                            verbose=False,
+                        )
                     self.backend = "gguf"
                     print(f"[+] Qwen 2.5 14B Q5_K_M + 8-bit KV Cache ({context_length} ctx) loaded into VRAM!")
                     return
@@ -235,6 +303,9 @@ class LocalGPUClient:
                 print(f"[-] GGUF Q5_K_M init note ({e}); using Transformers 14B 4-bit GPU backend.")
 
         # 2. Fallback Engine: HuggingFace Transformers 4-bit NF4 + SDPA
+        # Colab preinstalls TensorFlow which conflicts with Protobuf 5.x; ensure Transformers never references it
+        os.environ["USE_TF"] = "0"
+        os.environ["TRANSFORMERS_NO_TF"] = "1"
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -256,7 +327,7 @@ class LocalGPUClient:
         model_kwargs: Dict[str, Any] = {
             "device_map": "auto",
             "quantization_config": quant_config if torch.cuda.is_available() else None,
-            "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+            "dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
         }
         if torch.cuda.is_available():
             model_kwargs["attn_implementation"] = "sdpa"

@@ -43,7 +43,7 @@ from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episode
 
 
 def get_cuda_library_dirs() -> List[str]:
-    """Finds directories containing CUDA/cuBLAS shared libraries on Linux."""
+    """Finds directories containing CUDA/cuBLAS/cudart shared libraries on Linux."""
     import sys
     from pathlib import Path
 
@@ -57,14 +57,14 @@ def get_cuda_library_dirs() -> List[str]:
     except Exception:
         pass
 
-    # 2. Check site-packages/nvidia/cublas/lib ONLY (for CTranslate2 / faster-whisper)
+    # 2. Check site-packages/nvidia/{cublas,cuda_runtime,cuda_nvrtc}/lib
     # NEVER include nvidia/cudnn/lib as that conflicts with PyTorch's bundled cuDNN (9.19.0)
     for p in sys.path:
         nv_dir = Path(p) / "nvidia"
         if nv_dir.is_dir():
             try:
                 for sub in nv_dir.iterdir():
-                    if sub.name.lower() == "cublas":
+                    if sub.name.lower() in ("cublas", "cuda_runtime", "cuda_nvrtc"):
                         lib_p = sub / "lib"
                         if lib_p.is_dir():
                             p_str = str(lib_p.resolve())
@@ -73,7 +73,18 @@ def get_cuda_library_dirs() -> List[str]:
             except OSError:
                 pass
 
-    # 3. Standard Linux CUDA paths
+    # 3. Standard Linux CUDA paths (/usr/local/cuda*/lib64)
+    try:
+        usr_local = Path("/usr/local")
+        if usr_local.is_dir():
+            for cuda_cand in sorted(usr_local.glob("cuda*/lib64"), reverse=True):
+                if cuda_cand.is_dir():
+                    p_str = str(cuda_cand.resolve())
+                    if p_str not in dirs:
+                        dirs.append(p_str)
+    except Exception:
+        pass
+
     for cand in ("/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"):
         cp = Path(cand)
         if cp.is_dir():
@@ -86,9 +97,10 @@ def get_cuda_library_dirs() -> List[str]:
 
 def preload_cuda_libraries() -> None:
     """
-    Preloads cuBLAS (libcublas.so.12) using ctypes.CDLL(RTLD_GLOBAL)
-    so CTranslate2 / faster-whisper dynamically finds it even if LD_LIBRARY_PATH
-    was not set prior to Python process startup.
+    Preloads CUDA runtime (libcudart.so.12) and cuBLAS (libcublas.so.12) using
+    ctypes.CDLL(RTLD_GLOBAL) so CTranslate2 / faster-whisper and llama-cpp-python
+    dynamically resolve them without dlopen errors, even if LD_LIBRARY_PATH was
+    not set prior to Python process startup.
     Ensures PyTorch's bundled cuDNN is preserved without version conflicts.
     """
     import sys
@@ -109,8 +121,11 @@ def preload_cuda_libraries() -> None:
     if combined:
         os.environ["LD_LIBRARY_PATH"] = ":".join(combined)
 
-    # Priority order: cuBLAS only (for CTranslate2)
+    # Priority order: CUDA runtime (for llama_cpp) + cuBLAS (for CTranslate2)
     libs_to_load = [
+        "libcudart.so.12",
+        "libcudart.so",
+        "libnvrtc.so.12",
         "libcublasLt.so.12",
         "libcublas.so.12",
     ]

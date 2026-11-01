@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import List
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ["USE_TF"] = "0"
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["USE_TORCH"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 CURRENT_DIR = str(Path(__file__).resolve().parent)
 if CURRENT_DIR not in sys.path:
@@ -164,6 +169,23 @@ def _verify_stage1_runtime_health() -> bool:
     return res.returncode == 0
 
 
+def _purge_conflicting_tensorflow() -> None:
+    """
+    Purges Colab's pre-installed TensorFlow (built with Protobuf 6.31).
+    yt-spx exclusively uses PyTorch, CTranslate2, and GGUF/llama.cpp; removing
+    broken TensorFlow prevents any Protobuf VersionError.
+    """
+    try:
+        import importlib.util as u
+        if u.find_spec("tensorflow") is not None:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "-q", "tensorflow", "tensorflow-probability"],
+                check=False,
+            )
+    except Exception:
+        pass
+
+
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
     marker = Path("/tmp/.yt_spx_stage1_deps_ok")
     # Ensure conflicting standalone nvidia-cudnn-cu12 is removed so PyTorch uses its bundled cuDNN (9.19.0)
@@ -174,6 +196,8 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
             marker.unlink(missing_ok=True)
     except Exception:
         pass
+
+    _purge_conflicting_tensorflow()
 
     if marker.exists():
         if _verify_stage1_runtime_health():
@@ -203,6 +227,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "tqdm",
         "ml-dtypes>=0.5.4",
         "nvidia-cublas-cu12",
+        "nvidia-cuda-runtime-cu12",
         # NOTE: nvidia-cudnn-cu12 is deliberately omitted — PyTorch bundles its own matched cuDNN
     ]
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
@@ -254,18 +279,31 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         print("   -> Stage 2 Local LLM dependencies already verified in this runtime.")
         return
 
+    _purge_conflicting_tensorflow()
+
     pip_cache = _get_pip_cache_args()
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
-    llm_pkgs = ["transformers", "accelerate", "bitsandbytes", "huggingface_hub", "tqdm"]
+    llm_pkgs = [
+        "transformers",
+        "accelerate",
+        "bitsandbytes",
+        "huggingface_hub",
+        "tqdm",
+        "nvidia-cuda-runtime-cu12",
+    ]
     print("   -> Ensuring Stage 2 LLM core packages (cached on 5TB Drive)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + llm_pkgs)
 
-    try:
-        import llama_cpp
+    def _test_llama_cpp() -> bool:
+        try:
+            from core.colab_runner import ensure_cuda_runtime_loaded
+            ensure_cuda_runtime_loaded()
+            import llama_cpp
+            return bool(llama_cpp.llama_supports_gpu_offload())
+        except Exception:
+            return False
 
-        if not llama_cpp.llama_supports_gpu_offload():
-            raise ImportError("llama_cpp lacks CUDA offload")
-    except Exception:
+    if not _test_llama_cpp():
         print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Qwen 2.5 14B Q5_K_M GGUF)...")
         for cu_ver in ["cu124", "cu122", "cu121"]:
             res = subprocess.run(
@@ -275,6 +313,8 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                     "pip",
                     "install",
                     "-q",
+                    "--force-reinstall",
+                    "--no-deps",
                 ]
                 + pip_cache
                 + [
@@ -284,8 +324,8 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                 ],
                 check=False,
             )
-            if res.returncode == 0:
-                print(f"   -> Installed llama-cpp-python ({cu_ver}) GPU wheel!")
+            if res.returncode == 0 and _test_llama_cpp():
+                print(f"   -> Installed & verified llama-cpp-python ({cu_ver}) GPU wheel!")
                 break
 
     marker.write_text("ok", encoding="utf-8")

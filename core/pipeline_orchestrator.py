@@ -29,6 +29,12 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+os.environ["USE_TF"] = "0"
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["USE_TORCH"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -388,11 +394,16 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     print(f"  M5 Scenarios Ready: {len(candidates)} | Session Budget: {budget_label}")
     print("=" * 72, flush=True)
 
-    extractor = Stage2ScenarioExtractor(
-        workspace=workspace,
-        model_name=args.llm_model,
-        context_length=args.llm_context_length,
-    )
+    try:
+        extractor = Stage2ScenarioExtractor(
+            workspace=workspace,
+            model_name=args.llm_model,
+            context_length=args.llm_context_length,
+        )
+    except Exception as init_exc:
+        print(f"[!] Failed to initialize Stage 2 Local LLM ({type(init_exc).__name__}): {init_exc}", flush=True)
+        print(traceback.format_exc(limit=5), flush=True)
+        return 1
 
     deadline = (time.time() + (args.max_session_minutes * 60.0)) if args.max_session_minutes > 0 else None
     completed_count = 0
@@ -526,6 +537,29 @@ def _build_stage2_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]
     return cmd
 
 
+def _get_subprocess_env() -> Dict[str, str]:
+    """Prepares isolated subprocess environment with CUDA paths & TF-disabled guards."""
+    sub_env = os.environ.copy()
+    sub_env["USE_TF"] = "0"
+    sub_env["TRANSFORMERS_NO_TF"] = "1"
+    sub_env["TRANSFORMERS_NO_FLAX"] = "1"
+    sub_env["USE_TORCH"] = "1"
+    sub_env["TF_ENABLE_ONEDNN_OPTS"] = "0"
+    sub_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    try:
+        from core.audio_diarizer import get_cuda_library_dirs
+        lib_dirs = get_cuda_library_dirs()
+        curr_ld = sub_env.get("LD_LIBRARY_PATH", "")
+        existing = [p for p in curr_ld.split(":") if p and "nvidia/cudnn" not in p and "nvidia_cudnn" not in p]
+        new_parts = [d for d in lib_dirs if d not in existing]
+        combined = new_parts + existing
+        if combined:
+            sub_env["LD_LIBRARY_PATH"] = ":".join(combined)
+    except Exception:
+        pass
+    return sub_env
+
+
 def run_auto_orchestrator(args: argparse.Namespace) -> int:
     """
     Coordinates Stage 1 (Audio/Diarization/Overlaps) and Stage 2 (Qwen 2.5 14B Extraction)
@@ -563,7 +597,7 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                     f"(batch={args.batch_videos}, budget=unlimited)...",
                     flush=True,
                 )
-                s1_res = subprocess.run(_build_stage1_subcmd(args, 0), check=False)
+                s1_res = subprocess.run(_build_stage1_subcmd(args, 0), env=_get_subprocess_env(), check=False)
                 if s1_res.returncode != 0:
                     exit_code = s1_res.returncode
                     break
@@ -575,7 +609,7 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                     f"(batch={args.stage2_batch_videos}, budget=unlimited)...",
                     flush=True,
                 )
-                s2_res = subprocess.run(_build_stage2_subcmd(args, 0), check=False)
+                s2_res = subprocess.run(_build_stage2_subcmd(args, 0), env=_get_subprocess_env(), check=False)
                 if s2_res.returncode != 0:
                     exit_code = s2_res.returncode
                     break
@@ -595,14 +629,14 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
     else:
         s1_budget_min = max(5, int(round(total_budget_min * 0.62)))
         print(f"[Orchestrator] Launching Isolated Stage 1 Subprocess (budget={s1_budget_min}m)...", flush=True)
-        s1_res = subprocess.run(_build_stage1_subcmd(args, s1_budget_min), check=False)
+        s1_res = subprocess.run(_build_stage1_subcmd(args, s1_budget_min), env=_get_subprocess_env(), check=False)
         if s1_res.returncode != 0:
             exit_code = s1_res.returncode
         else:
             elapsed_min = (time.time() - t_start) / 60.0
             rem_min = max(5, int(total_budget_min - elapsed_min))
             print(f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess (budget={rem_min}m)...", flush=True)
-            s2_res = subprocess.run(_build_stage2_subcmd(args, rem_min), check=False)
+            s2_res = subprocess.run(_build_stage2_subcmd(args, rem_min), env=_get_subprocess_env(), check=False)
             if s2_res.returncode != 0:
                 exit_code = s2_res.returncode
 

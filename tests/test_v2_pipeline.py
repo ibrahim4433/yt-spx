@@ -597,12 +597,22 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
 
     def test_cuda_libraries_discovery_and_preload(self):
         from core.audio_diarizer import get_cuda_library_dirs, preload_cuda_libraries
+        from core.colab_runner import ensure_cuda_runtime_loaded
+        from core.pipeline_orchestrator import _get_subprocess_env
 
         dirs = get_cuda_library_dirs()
         self.assertIsInstance(dirs, list)
 
-        # Calling preload_cuda_libraries should be safe across Windows & Linux platforms
+        # Calling preload_cuda_libraries & ensure_cuda_runtime_loaded should be safe across platforms
         preload_cuda_libraries()
+        ensure_cuda_runtime_loaded()
+
+        # Check subprocess env sets TF disabled and PyTorch alloc guards
+        sub_env = _get_subprocess_env()
+        self.assertEqual(sub_env.get("TRANSFORMERS_NO_TF"), "1")
+        self.assertEqual(sub_env.get("USE_TF"), "0")
+        self.assertEqual(sub_env.get("USE_TORCH"), "1")
+        self.assertIn("expandable_segments:True", sub_env.get("PYTORCH_CUDA_ALLOC_CONF", ""))
 
     def test_fetch_video_audio_m1_anonymous_fallback_on_invalid_cookies(self):
         import time as _t
