@@ -279,12 +279,12 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     allow_downloads = not args.offline_only
     exit_code = 0
 
-    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, rotated cookies)
+    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies)
     for cand in candidates:
         vid = cand["video_id"]
         st = workspace.get_video_state(vid)
         last_err = str(st.get("last_error") or "")
-        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "NeuralDiarizer", "libcublas", "libcudnn", "invalid", "cookie", "circuit breaker")):
+        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "NeuralDiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker")):
             st["error_count"] = 0
             st["last_error"] = None
             workspace.atomic_write_json(workspace.state_path(vid), st)

@@ -502,11 +502,27 @@ class WarmNeMoDiarizer:
                 },
             })
 
-            msdd = DiarizerClass(cfg=cfg).to(cfg.device)
-            msdd.diarize()
-            del msdd
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            try:
+                msdd = DiarizerClass(cfg=cfg).to(cfg.device)
+                msdd.diarize()
+            except RuntimeError as err:
+                err_s = str(err).lower()
+                if "cudnn" in err_s:
+                    print("    [!] cuDNN runtime error encountered; falling back to PyTorch native CUDA kernels (cudnn.enabled=False)...", flush=True)
+                    orig_cudnn = torch.backends.cudnn.enabled
+                    torch.backends.cudnn.enabled = False
+                    try:
+                        msdd = DiarizerClass(cfg=cfg).to(cfg.device)
+                        msdd.diarize()
+                    finally:
+                        torch.backends.cudnn.enabled = orig_cudnn
+                else:
+                    raise
+            finally:
+                if "msdd" in locals():
+                    del msdd
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             pred_rttm = tmp_p / "pred_rttms" / f"{wav_16k_path.stem}.rttm"
             rttm_text = pred_rttm.read_text(encoding="utf-8") if pred_rttm.exists() else ""

@@ -166,6 +166,15 @@ def _verify_stage1_runtime_health() -> bool:
 
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
     marker = Path("/tmp/.yt_spx_stage1_deps_ok")
+    # Ensure conflicting standalone nvidia-cudnn-cu12 is removed so PyTorch uses its bundled cuDNN (9.19.0)
+    try:
+        import importlib.util as u
+        if u.find_spec("nvidia.cudnn") is not None:
+            subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "nvidia-cudnn-cu12"], check=False)
+            marker.unlink(missing_ok=True)
+    except Exception:
+        pass
+
     if marker.exists():
         if _verify_stage1_runtime_health():
             print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
@@ -194,7 +203,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "tqdm",
         "ml-dtypes>=0.5.4",
         "nvidia-cublas-cu12",
-        "nvidia-cudnn-cu12",
+        # NOTE: nvidia-cudnn-cu12 is deliberately omitted — PyTorch bundles its own matched cuDNN
     ]
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)

@@ -288,6 +288,36 @@ class TestV2WebEndpoints(unittest.TestCase):
                 self.assertEqual(chat["response_package"]["daee_name"], "الشيخ عثمان بن فاروق")
                 self.assertIn("youtube.com", chat["response_package"]["timestamp_url"])
 
+    def test_03_database_initialization_and_search_without_fts5(self):
+        """Verifies init_db and search degrade gracefully to LIKE queries when FTS5 is missing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_db = Path(tmpdir) / "no_fts5.db"
+            with patch("db.database._supports_fts5", return_value=False):
+                # Should not raise sqlite3.OperationalError: no such module: fts5
+                db_mod.init_db(temp_db)
+
+                # Ingest a scenario turn and verify LIKE search
+                db_mod.ingest_scenario_payload(
+                    {
+                        "video_id": "test_no_fts",
+                        "speakers": [{"speaker_id": "SPK1", "speaker_role": "MAIN_DAEE", "speaking_sec": 10.0}],
+                        "turns": [{
+                            "turn_id": "T1",
+                            "turn_index": 1,
+                            "speaker_id": "SPK1",
+                            "speaker_role": "MAIN_DAEE",
+                            "start_ms": 0,
+                            "end_ms": 5000,
+                            "text_original": "Is morality objective?",
+                            "text_ar": "هل الأخلاق موضوعية؟",
+                        }],
+                    },
+                    db_path=temp_db,
+                )
+                res = db_mod.search_scenario_turns("morality", db_path=temp_db)
+                self.assertEqual(res["total"], 1)
+                self.assertEqual(res["turns"][0]["turn_id"], "T1")
+
 
 if __name__ == "__main__":
     unittest.main()

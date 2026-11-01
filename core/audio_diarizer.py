@@ -43,39 +43,56 @@ from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episode
 
 
 def get_cuda_library_dirs() -> List[str]:
-    """Finds all directories containing CUDA/cuBLAS/cuDNN shared libraries on Linux."""
+    """Finds directories containing CUDA/cuBLAS shared libraries on Linux."""
     import sys
     from pathlib import Path
 
-    dirs = set()
-    # Check site-packages/nvidia/*/lib
+    dirs = []
+    # 1. PyTorch bundled libraries FIRST (torch/lib) - absolute priority for cuDNN & CUDA runtime
+    try:
+        import torch
+        tlib = Path(torch.__file__).parent / "lib"
+        if tlib.is_dir():
+            dirs.append(str(tlib.resolve()))
+    except Exception:
+        pass
+
+    # 2. Check site-packages/nvidia/cublas/lib ONLY (for CTranslate2 / faster-whisper)
+    # NEVER include nvidia/cudnn/lib as that conflicts with PyTorch's bundled cuDNN (9.19.0)
     for p in sys.path:
         nv_dir = Path(p) / "nvidia"
         if nv_dir.is_dir():
             try:
                 for sub in nv_dir.iterdir():
-                    lib_p = sub / "lib"
-                    if lib_p.is_dir():
-                        dirs.add(str(lib_p.resolve()))
+                    if sub.name.lower() == "cublas":
+                        lib_p = sub / "lib"
+                        if lib_p.is_dir():
+                            p_str = str(lib_p.resolve())
+                            if p_str not in dirs:
+                                dirs.append(p_str)
             except OSError:
                 pass
 
-    # Check standard Linux CUDA paths
-    for cand in ("/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64", "/usr/lib/x86_64-linux-gnu"):
+    # 3. Standard Linux CUDA paths
+    for cand in ("/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"):
         cp = Path(cand)
         if cp.is_dir():
-            dirs.add(str(cp.resolve()))
+            p_str = str(cp.resolve())
+            if p_str not in dirs:
+                dirs.append(p_str)
 
-    return sorted(dirs)
+    return dirs
 
 
 def preload_cuda_libraries() -> None:
     """
-    Preloads cuBLAS (libcublas.so.12) and cuDNN libraries using ctypes.CDLL(RTLD_GLOBAL)
-    so CTranslate2 / faster-whisper dynamically finds them even if LD_LIBRARY_PATH
+    Preloads cuBLAS (libcublas.so.12) using ctypes.CDLL(RTLD_GLOBAL)
+    so CTranslate2 / faster-whisper dynamically finds it even if LD_LIBRARY_PATH
     was not set prior to Python process startup.
+    Ensures PyTorch's bundled cuDNN is preserved without version conflicts.
     """
     import sys
+    import os
     import ctypes
     from pathlib import Path
 
@@ -83,25 +100,19 @@ def preload_cuda_libraries() -> None:
         return
 
     lib_dirs = get_cuda_library_dirs()
-    if not lib_dirs:
-        return
 
-    # Update LD_LIBRARY_PATH in os.environ for child subprocesses and dynamic linker
+    # Clean existing LD_LIBRARY_PATH from any conflicting standalone nvidia/cudnn paths
     current_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    existing = set(current_ld.split(":")) if current_ld else set()
+    existing = [p for p in current_ld.split(":") if p and "nvidia/cudnn" not in p and "nvidia_cudnn" not in p]
     new_parts = [d for d in lib_dirs if d not in existing]
-    if new_parts:
-        os.environ["LD_LIBRARY_PATH"] = ":".join(new_parts) + (f":{current_ld}" if current_ld else "")
+    combined = new_parts + existing
+    if combined:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(combined)
 
-    # Priority order: dependencies first (cublasLt before cublas)
+    # Priority order: cuBLAS only (for CTranslate2)
     libs_to_load = [
         "libcublasLt.so.12",
         "libcublas.so.12",
-        "libcudnn.so.9",
-        "libcudnn.so.8",
-        "libcudnn_ops.so.9",
-        "libcudnn_ops_infer.so.9",
-        "libcudnn_ops_infer.so.8",
     ]
 
     for lib_name in libs_to_load:
@@ -421,9 +432,15 @@ class WarmASRAlignmentEngine:
     def _ensure_aligner(self):
         if self._align_model is None:
             import torch
-            from ctc_forced_aligner import load_alignment_model
             dtype = torch.float16 if self.device == "cuda" else torch.float32
-            self._align_model, self._align_tokenizer = load_alignment_model(self.device, dtype=dtype)
+            try:
+                from ctc_forced_aligner import load_alignment_model
+                self._align_model, self._align_tokenizer = load_alignment_model(self.device, dtype=dtype)
+            except (ImportError, AttributeError):
+                from transformers import AutoModelForCTC, AutoTokenizer
+                m_name = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+                self._align_model = AutoModelForCTC.from_pretrained(m_name, torch_dtype=dtype).to(self.device)
+                self._align_tokenizer = AutoTokenizer.from_pretrained(m_name)
 
     def _ensure_punct(self):
         if self._punct_model is None:

@@ -54,6 +54,31 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: s
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def};")
 
 
+_SQLITE_FTS5_SUPPORTED: Optional[bool] = None
+
+
+def _supports_fts5(conn: Optional[sqlite3.Connection] = None) -> bool:
+    """Returns True if the runtime sqlite3 engine supports FTS5 virtual tables."""
+    global _SQLITE_FTS5_SUPPORTED
+    if _SQLITE_FTS5_SUPPORTED is not None:
+        return _SQLITE_FTS5_SUPPORTED
+    close_after = False
+    target = conn
+    if target is None:
+        target = sqlite3.connect(":memory:")
+        close_after = True
+    try:
+        target.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _test_fts5_probe USING fts5(probe);")
+        target.execute("DROP TABLE IF EXISTS _test_fts5_probe;")
+        _SQLITE_FTS5_SUPPORTED = True
+    except sqlite3.OperationalError:
+        _SQLITE_FTS5_SUPPORTED = False
+    finally:
+        if close_after:
+            target.close()
+    return _SQLITE_FTS5_SUPPORTED
+
+
 def init_db(db_path: Optional[Path] = None) -> None:
     conn = get_db_connection(db_path)
     with conn:
@@ -171,41 +196,42 @@ def init_db(db_path: Optional[Path] = None) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_video_order ON scenario_turns(video_id, turn_index);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_video_time ON scenario_turns(video_id, start_ms);")
 
-        # 5. FTS5 Full-Text Index on Raw Scenario Turns
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS scenario_turns_fts USING fts5(
-                turn_id UNINDEXED,
-                video_id UNINDEXED,
-                speaker_label_en,
-                speaker_label_ar,
-                text_original,
-                text_ar,
-                tokenize = 'unicode61 remove_diacritics 2'
-            );
-        """)
+        # 5. FTS5 Full-Text Index on Raw Scenario Turns (if supported by sqlite3 runtime)
+        if _supports_fts5(conn):
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS scenario_turns_fts USING fts5(
+                    turn_id UNINDEXED,
+                    video_id UNINDEXED,
+                    speaker_label_en,
+                    speaker_label_ar,
+                    text_original,
+                    text_ar,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+            """)
 
-        conn.execute("DROP TRIGGER IF EXISTS turns_ai;")
-        conn.execute("DROP TRIGGER IF EXISTS turns_ad;")
-        conn.execute("DROP TRIGGER IF EXISTS turns_au;")
+            conn.execute("DROP TRIGGER IF EXISTS turns_ai;")
+            conn.execute("DROP TRIGGER IF EXISTS turns_ad;")
+            conn.execute("DROP TRIGGER IF EXISTS turns_au;")
 
-        conn.execute("""
-            CREATE TRIGGER turns_ai AFTER INSERT ON scenario_turns BEGIN
-                INSERT INTO scenario_turns_fts(turn_id, video_id, speaker_label_en, speaker_label_ar, text_original, text_ar)
-                VALUES (new.turn_id, new.video_id, new.speaker_label_en, new.speaker_label_ar, new.text_original, new.text_ar);
-            END;
-        """)
-        conn.execute("""
-            CREATE TRIGGER turns_ad AFTER DELETE ON scenario_turns BEGIN
-                DELETE FROM scenario_turns_fts WHERE turn_id = old.turn_id;
-            END;
-        """)
-        conn.execute("""
-            CREATE TRIGGER turns_au AFTER UPDATE ON scenario_turns BEGIN
-                DELETE FROM scenario_turns_fts WHERE turn_id = old.turn_id;
-                INSERT INTO scenario_turns_fts(turn_id, video_id, speaker_label_en, speaker_label_ar, text_original, text_ar)
-                VALUES (new.turn_id, new.video_id, new.speaker_label_en, new.speaker_label_ar, new.text_original, new.text_ar);
-            END;
-        """)
+            conn.execute("""
+                CREATE TRIGGER turns_ai AFTER INSERT ON scenario_turns BEGIN
+                    INSERT INTO scenario_turns_fts(turn_id, video_id, speaker_label_en, speaker_label_ar, text_original, text_ar)
+                    VALUES (new.turn_id, new.video_id, new.speaker_label_en, new.speaker_label_ar, new.text_original, new.text_ar);
+                END;
+            """)
+            conn.execute("""
+                CREATE TRIGGER turns_ad AFTER DELETE ON scenario_turns BEGIN
+                    DELETE FROM scenario_turns_fts WHERE turn_id = old.turn_id;
+                END;
+            """)
+            conn.execute("""
+                CREATE TRIGGER turns_au AFTER UPDATE ON scenario_turns BEGIN
+                    DELETE FROM scenario_turns_fts WHERE turn_id = old.turn_id;
+                    INSERT INTO scenario_turns_fts(turn_id, video_id, speaker_label_en, speaker_label_ar, text_original, text_ar)
+                    VALUES (new.turn_id, new.video_id, new.speaker_label_en, new.speaker_label_ar, new.text_original, new.text_ar);
+                END;
+            """)
 
         # 6. V2 Dialectical Q&A Dossier Units
         conn.execute("""
@@ -269,81 +295,82 @@ def init_db(db_path: Optional[Path] = None) -> None:
         ]:
             _ensure_column(conn, "qa_units", col, cdef)
 
-        # 7. FTS5 Full-Text Index on Q&A Dossiers
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS qa_fts USING fts5(
-                id UNINDEXED,
-                question_en,
-                question_ar,
-                core_answer_summary_en,
-                core_answer_summary_ar,
-                logical_premises,
-                logical_premises_ar,
-                analogy_or_metaphor,
-                analogy_or_metaphor_ar,
-                socratic_question,
-                socratic_question_ar,
-                verbatim_quote,
-                verbatim_quote_ar,
-                tags,
-                tokenize = 'unicode61 remove_diacritics 2'
-            );
-        """)
-
-        conn.execute("DROP TRIGGER IF EXISTS qa_ai;")
-        conn.execute("DROP TRIGGER IF EXISTS qa_ad;")
-        conn.execute("DROP TRIGGER IF EXISTS qa_au;")
-
-        conn.execute("""
-            CREATE TRIGGER qa_ai AFTER INSERT ON qa_units BEGIN
-                INSERT INTO qa_fts(
-                    id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
-                    logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                    socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
-                ) VALUES (
-                    new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
-                    new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
-                    new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
-                );
-            END;
-        """)
-        conn.execute("""
-            CREATE TRIGGER qa_ad AFTER DELETE ON qa_units BEGIN
-                DELETE FROM qa_fts WHERE id = old.id;
-            END;
-        """)
-        conn.execute("""
-            CREATE TRIGGER qa_au AFTER UPDATE ON qa_units BEGIN
-                DELETE FROM qa_fts WHERE id = old.id;
-                INSERT INTO qa_fts(
-                    id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
-                    logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                    socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
-                ) VALUES (
-                    new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
-                    new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
-                    new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
-                );
-            END;
-        """)
-
-        # Synchronize qa_fts if counts diverge
-        qa_count = conn.execute("SELECT COUNT(*) FROM qa_units").fetchone()[0]
-        fts_count = conn.execute("SELECT COUNT(*) FROM qa_fts").fetchone()[0]
-        if qa_count != fts_count:
-            conn.execute("DELETE FROM qa_fts;")
+        # 7. FTS5 Full-Text Index on Q&A Dossiers (if supported by sqlite3 runtime)
+        if _supports_fts5(conn):
             conn.execute("""
-                INSERT INTO qa_fts(
-                    id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
-                    logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                    socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
-                )
-                SELECT
-                    id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
-                    logical_premises_json, logical_premises_ar_json, analogy_or_metaphor, analogy_or_metaphor_ar,
-                    socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags_json
-                FROM qa_units;
+                CREATE VIRTUAL TABLE IF NOT EXISTS qa_fts USING fts5(
+                    id UNINDEXED,
+                    question_en,
+                    question_ar,
+                    core_answer_summary_en,
+                    core_answer_summary_ar,
+                    logical_premises,
+                    logical_premises_ar,
+                    analogy_or_metaphor,
+                    analogy_or_metaphor_ar,
+                    socratic_question,
+                    socratic_question_ar,
+                    verbatim_quote,
+                    verbatim_quote_ar,
+                    tags,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
             """)
+
+            conn.execute("DROP TRIGGER IF EXISTS qa_ai;")
+            conn.execute("DROP TRIGGER IF EXISTS qa_ad;")
+            conn.execute("DROP TRIGGER IF EXISTS qa_au;")
+
+            conn.execute("""
+                CREATE TRIGGER qa_ai AFTER INSERT ON qa_units BEGIN
+                    INSERT INTO qa_fts(
+                        id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
+                        logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                    ) VALUES (
+                        new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
+                        new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
+                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
+                    );
+                END;
+            """)
+            conn.execute("""
+                CREATE TRIGGER qa_ad AFTER DELETE ON qa_units BEGIN
+                    DELETE FROM qa_fts WHERE id = old.id;
+                END;
+            """)
+            conn.execute("""
+                CREATE TRIGGER qa_au AFTER UPDATE ON qa_units BEGIN
+                    DELETE FROM qa_fts WHERE id = old.id;
+                    INSERT INTO qa_fts(
+                        id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
+                        logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                    ) VALUES (
+                        new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
+                        new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
+                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
+                    );
+                END;
+            """)
+
+            # Synchronize qa_fts if counts diverge
+            qa_count = conn.execute("SELECT COUNT(*) FROM qa_units").fetchone()[0]
+            fts_count = conn.execute("SELECT COUNT(*) FROM qa_fts").fetchone()[0]
+            if qa_count != fts_count:
+                conn.execute("DELETE FROM qa_fts;")
+                conn.execute("""
+                    INSERT INTO qa_fts(
+                        id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
+                        logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                    )
+                    SELECT
+                        id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
+                        logical_premises_json, logical_premises_ar_json, analogy_or_metaphor, analogy_or_metaphor_ar,
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags_json
+                    FROM qa_units;
+                """)
 
         # Seed default speaker profiles
         try:
@@ -726,7 +753,7 @@ def _build_search_where(
 
         sub_clauses = []
         fts_query = sanitize_fts_query(query)
-        if fts_query:
+        if fts_query and _supports_fts5():
             sub_clauses.append("qa_units.id IN (SELECT id FROM qa_fts WHERE qa_fts MATCH ?)")
             params.append(fts_query)
 
@@ -1004,7 +1031,7 @@ def search_scenario_turns(
     clauses = []
     params: List[Any] = []
 
-    if fts_q:
+    if fts_q and _supports_fts5(conn):
         clauses.append("st.turn_id IN (SELECT turn_id FROM scenario_turns_fts WHERE scenario_turns_fts MATCH ?)")
         params.append(fts_q)
     else:
