@@ -320,7 +320,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                 elapsed = round(time.time() - t0, 1)
                 m = scen.get("metrics", {})
                 print(
-                    f"    [OK] M5_SCENARIO_BUILT in {elapsed}s | Turns={m.get('total_turns', 0)} "
+                    f"    [OK] M5_SCENARIO_BUILT in {elapsed}s | Turns={m.get('turns_count') or m.get('total_turns') or len(scen.get('turns', []))} "
                     f"| Overlaps={m.get('overlap_windows_count', 0)} | Pedestrians={m.get('pedestrian_turns_count', 0)}",
                     flush=True,
                 )
