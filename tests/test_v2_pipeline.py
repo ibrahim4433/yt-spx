@@ -555,6 +555,46 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         os.utime(a, (_t.time() + 5, _t.time() + 5))
         self.assertEqual({p.name for p in pool.healthy_cookies()}, {"acct1.txt", "acct2.txt"})
 
+    def test_pyav_metadata_errors_patch_and_audio_loading(self):
+        import sys
+        import types
+        import numpy as np
+        from core.audio_diarizer import patch_pyav_metadata_errors, load_audio_waveform_16k
+        from core.vocal_cleaner import write_wav_float32
+
+        # 1. Test mock PyAV 19.x simulation (where av.open lacks metadata_errors)
+        mock_av = types.ModuleType("av")
+        called_kwargs = {}
+
+        def mock_open(*args, **kwargs):
+            if "metadata_errors" in kwargs:
+                raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
+            called_kwargs.update(kwargs)
+            return "mock_container"
+
+        mock_av.open = mock_open
+        sys.modules["av"] = mock_av
+
+        # Before patch, passing metadata_errors raises TypeError
+        with self.assertRaises(TypeError):
+            mock_av.open("dummy.mp3", mode="r", metadata_errors="ignore")
+
+        # After patch, metadata_errors is popped safely
+        patch_pyav_metadata_errors()
+        res = mock_av.open("dummy.mp3", mode="r", metadata_errors="ignore")
+        self.assertEqual(res, "mock_container")
+        self.assertNotIn("metadata_errors", called_kwargs)
+        self.assertEqual(called_kwargs.get("mode"), "r")
+
+        # 2. Test load_audio_waveform_16k on a standard 16kHz WAV file
+        test_wav = self.ws.staging_dir / "test_load.wav"
+        orig_samples = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000)).astype(np.float32)
+        write_wav_float32(test_wav, orig_samples, sr=16000)
+
+        loaded = load_audio_waveform_16k(test_wav)
+        self.assertEqual(len(loaded), 16000)
+        self.assertTrue(np.allclose(orig_samples, loaded, atol=1e-3))
+
 
 if __name__ == "__main__":
     unittest.main()

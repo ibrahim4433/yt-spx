@@ -279,6 +279,16 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     allow_downloads = not args.offline_only
     exit_code = 0
 
+    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn)
+    for cand in candidates:
+        vid = cand["video_id"]
+        st = workspace.get_video_state(vid)
+        last_err = str(st.get("last_error") or "")
+        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "NeuralDiarizer")):
+            st["error_count"] = 0
+            st["last_error"] = None
+            workspace.atomic_write_json(workspace.state_path(vid), st)
+
     for cand in candidates:
         if completed_count >= args.batch_videos:
             print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
@@ -338,7 +348,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                 last_error_sig = err_sig
 
             # Do not penalize per-video error_count on repeated systemic environment/import errors
-            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError))):
+            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
                 workspace.record_error(vid, err_sig)
 
             if consecutive_errors >= 3:
@@ -424,7 +434,7 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
                 consecutive_errors = 1
                 last_error_sig = err_sig
 
-            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError))):
+            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
                 workspace.record_error(vid, err_sig)
 
             if consecutive_errors >= 3:

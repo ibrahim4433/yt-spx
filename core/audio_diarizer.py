@@ -42,6 +42,66 @@ from core.overlap_resolver import (
 from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episodes
 
 
+def patch_pyav_metadata_errors() -> None:
+    """
+    Patches PyAV (av >= 19.0.0) where metadata_errors/metadata_encoding kwargs were removed from av.open().
+    faster-whisper (even latest 1.2.1) still passes metadata_errors='ignore' in decode_audio().
+    """
+    try:
+        import av
+
+        if not getattr(av, "_patched_for_metadata_errors", False):
+            _orig_av_open = av.open
+
+            def _patched_av_open(*args, **kwargs):
+                kwargs.pop("metadata_errors", None)
+                kwargs.pop("metadata_encoding", None)
+                return _orig_av_open(*args, **kwargs)
+
+            av.open = _patched_av_open
+            av._patched_for_metadata_errors = True
+    except Exception:
+        pass
+
+
+patch_pyav_metadata_errors()
+
+
+def load_audio_waveform_16k(audio_path: Path) -> np.ndarray:
+    """
+    Loads 16kHz mono audio into a float32 [-1.0, 1.0] numpy array.
+    Uses stdlib wave for WAV files (instant, zero external C-lib dependency),
+    falling back to soundfile or faster_whisper.decode_audio (with PyAV patch).
+    """
+    p = Path(audio_path)
+    if p.suffix.lower() == ".wav" and p.exists():
+        try:
+            samples, sr = read_wav_float32(p)
+            if sr == 16000:
+                return samples
+        except Exception:
+            pass
+
+    patch_pyav_metadata_errors()
+    try:
+        import soundfile as sf
+
+        samples, sr = sf.read(str(p), dtype="float32")
+        if samples.ndim > 1:
+            samples = np.mean(samples, axis=1)
+        if sr != 16000:
+            import librosa
+
+            samples = librosa.resample(samples, orig_sr=sr, target_sr=16000)
+        return samples.astype(np.float32)
+    except Exception:
+        pass
+
+    import faster_whisper
+
+    return faster_whisper.decode_audio(str(p), sampling_rate=16000)
+
+
 THEOLOGICAL_VOCAB_PROMPT_EN = (
     "Speakers' Corner Dawah philosophical and theological street debate. "
     "Allah, Quran, Surah, Ayah, Prophet Muhammad, Tawheed, Shirk, Sunnah, Hadith, "
@@ -293,7 +353,8 @@ class WarmASRAlignmentEngine:
         import faster_whisper
 
         self._ensure_whisper()
-        audio_waveform = faster_whisper.decode_audio(str(wav_path))
+        patch_pyav_metadata_errors()
+        audio_waveform = load_audio_waveform_16k(wav_path)
         if len(audio_waveform) < 3200:
             return [], forced_language or "en"
 
