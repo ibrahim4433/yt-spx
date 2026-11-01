@@ -81,6 +81,26 @@ def _ensure_deno_runtime() -> None:
         os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
 
 
+def _get_pip_cache_args() -> List[str]:
+    """
+    Returns pip arguments pointing to /content/drive/MyDrive/yt-spx/pip_cache
+    so compiled wheels (ctc-forced-aligner, numpy, nemo) are cached on 5TB Drive.
+    Subsequent runs install in seconds instead of recompiling from scratch!
+    """
+    from core.drive_sync import SharedWorkspace
+    ws = SharedWorkspace()
+    if not ws.is_drive:
+        return []
+    cache_dir = ws.root / "pip_cache"
+    wheels_dir = cache_dir / "wheels"
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+    return [
+        f"--cache-dir={cache_dir}",
+        f"--find-links={wheels_dir}",
+        "--prefer-binary",
+    ]
+
+
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
     marker = Path("/tmp/.yt_spx_stage1_deps_ok")
     if marker.exists():
@@ -94,6 +114,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         subprocess.run(["apt-get", "update", "-qq"], check=False)
         subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], check=False)
 
+    pip_cache = _get_pip_cache_args()
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
     stage1_pkgs = [
         "yt-dlp>=2025.1.15",
@@ -107,15 +128,15 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "huggingface_hub",
         "tqdm",
     ]
-    print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + c_arg + stage1_pkgs)
+    print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
 
     try:
         import nemo.collections.asr  # noqa: F401
     except ImportError:
         print("   -> Installing NVIDIA NeMo ASR Toolkit (MSDD + TitaNet-Large)...")
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q"] + c_arg + ["cython", "nemo_toolkit[asr]"]
+            [sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + ["cython", "nemo_toolkit[asr]"]
         )
 
     try:
@@ -123,9 +144,24 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     except ImportError:
         print("   -> Installing ClearerVoice-Studio (MossFormer2_SS_16K 2-speaker overlap separator)...")
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q"] + c_arg + ["clearvoice"],
+            [sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + ["clearvoice"],
             check=False,
         )
+
+    # Save compiled wheels to Drive wheels directory so future runs don't rebuild
+    try:
+        from core.drive_sync import SharedWorkspace
+        ws = SharedWorkspace()
+        if ws.is_drive:
+            wheels_dir = ws.root / "pip_cache" / "wheels"
+            subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", "-q", "-w", str(wheels_dir)]
+                + c_arg
+                + ["ctc-forced-aligner", "nemo_toolkit[asr]"],
+                check=False,
+            )
+    except Exception:
+        pass
 
     marker.write_text("ok", encoding="utf-8")
 
@@ -136,10 +172,11 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         print("   -> Stage 2 Local LLM dependencies already verified in this runtime.")
         return
 
+    pip_cache = _get_pip_cache_args()
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
     llm_pkgs = ["transformers", "accelerate", "bitsandbytes", "huggingface_hub", "tqdm"]
-    print("   -> Ensuring Stage 2 LLM core packages...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + c_arg + llm_pkgs)
+    print("   -> Ensuring Stage 2 LLM core packages (cached on 5TB Drive)...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + llm_pkgs)
 
     try:
         import llama_cpp
@@ -156,6 +193,9 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                     "pip",
                     "install",
                     "-q",
+                ]
+                + pip_cache
+                + [
                     "llama-cpp-python",
                     "--only-binary=:all:",
                     f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}",
