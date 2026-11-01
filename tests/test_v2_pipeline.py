@@ -595,6 +595,15 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         self.assertEqual(len(loaded), 16000)
         self.assertTrue(np.allclose(orig_samples, loaded, atol=1e-3))
 
+    def test_cuda_libraries_discovery_and_preload(self):
+        from core.audio_diarizer import get_cuda_library_dirs, preload_cuda_libraries
+
+        dirs = get_cuda_library_dirs()
+        self.assertIsInstance(dirs, list)
+
+        # Calling preload_cuda_libraries should be safe across Windows & Linux platforms
+        preload_cuda_libraries()
+
 
 if __name__ == "__main__":
     unittest.main()

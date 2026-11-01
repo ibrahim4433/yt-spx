@@ -193,6 +193,8 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "huggingface_hub",
         "tqdm",
         "ml-dtypes>=0.5.4",
+        "nvidia-cublas-cu12",
+        "nvidia-cudnn-cu12",
     ]
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
@@ -312,6 +314,13 @@ def main() -> int:
     sys.path = [p for p in sys.path if "yt-ch" not in p.replace("\\", "/")]
     if CURRENT_DIR not in sys.path:
         sys.path.insert(0, CURRENT_DIR)
+
+    try:
+        from core.audio_diarizer import preload_cuda_libraries
+
+        preload_cuda_libraries()
+    except Exception:
+        pass
 
     print(f"\n[3/3] Handing off to YT-SPX V2 Smart-Batch Orchestrator (args={argv or ['--mode', 'auto']})...\n")
     from core.pipeline_orchestrator import main as orchestrator_main

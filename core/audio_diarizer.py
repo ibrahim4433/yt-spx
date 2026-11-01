@@ -42,6 +42,82 @@ from core.overlap_resolver import (
 from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episodes
 
 
+def get_cuda_library_dirs() -> List[str]:
+    """Finds all directories containing CUDA/cuBLAS/cuDNN shared libraries on Linux."""
+    import sys
+    from pathlib import Path
+
+    dirs = set()
+    # Check site-packages/nvidia/*/lib
+    for p in sys.path:
+        nv_dir = Path(p) / "nvidia"
+        if nv_dir.is_dir():
+            try:
+                for sub in nv_dir.iterdir():
+                    lib_p = sub / "lib"
+                    if lib_p.is_dir():
+                        dirs.add(str(lib_p.resolve()))
+            except OSError:
+                pass
+
+    # Check standard Linux CUDA paths
+    for cand in ("/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64", "/usr/lib/x86_64-linux-gnu"):
+        cp = Path(cand)
+        if cp.is_dir():
+            dirs.add(str(cp.resolve()))
+
+    return sorted(dirs)
+
+
+def preload_cuda_libraries() -> None:
+    """
+    Preloads cuBLAS (libcublas.so.12) and cuDNN libraries using ctypes.CDLL(RTLD_GLOBAL)
+    so CTranslate2 / faster-whisper dynamically finds them even if LD_LIBRARY_PATH
+    was not set prior to Python process startup.
+    """
+    import sys
+    import ctypes
+    from pathlib import Path
+
+    if sys.platform != "linux":
+        return
+
+    lib_dirs = get_cuda_library_dirs()
+    if not lib_dirs:
+        return
+
+    # Update LD_LIBRARY_PATH in os.environ for child subprocesses and dynamic linker
+    current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    existing = set(current_ld.split(":")) if current_ld else set()
+    new_parts = [d for d in lib_dirs if d not in existing]
+    if new_parts:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(new_parts) + (f":{current_ld}" if current_ld else "")
+
+    # Priority order: dependencies first (cublasLt before cublas)
+    libs_to_load = [
+        "libcublasLt.so.12",
+        "libcublas.so.12",
+        "libcudnn.so.9",
+        "libcudnn.so.8",
+        "libcudnn_ops.so.9",
+        "libcudnn_ops_infer.so.9",
+        "libcudnn_ops_infer.so.8",
+    ]
+
+    for lib_name in libs_to_load:
+        for d in lib_dirs:
+            target = Path(d) / lib_name
+            if target.exists():
+                try:
+                    ctypes.CDLL(str(target), mode=ctypes.RTLD_GLOBAL)
+                    break
+                except Exception:
+                    pass
+
+
+preload_cuda_libraries()
+
+
 def patch_pyav_metadata_errors() -> None:
     """
     Patches PyAV (av >= 19.0.0) where metadata_errors/metadata_encoding kwargs were removed from av.open().
@@ -318,14 +394,29 @@ class WarmASRAlignmentEngine:
 
     def _ensure_whisper(self):
         if self._whisper is None:
+            preload_cuda_libraries()
             import faster_whisper
+
             compute_type = "float16" if self.device == "cuda" else "int8"
-            self._whisper = faster_whisper.WhisperModel(
-                self.whisper_model_name,
-                device=self.device,
-                compute_type=compute_type,
-            )
-            self._whisper_batched = faster_whisper.BatchedInferencePipeline(model=self._whisper)
+            try:
+                self._whisper = faster_whisper.WhisperModel(
+                    self.whisper_model_name,
+                    device=self.device,
+                    compute_type=compute_type,
+                )
+                self._whisper_batched = faster_whisper.BatchedInferencePipeline(model=self._whisper)
+            except Exception as exc:
+                if self.device == "cuda" and ("cublas" in str(exc).lower() or "cudnn" in str(exc).lower()):
+                    print(f"   [!] Faster-Whisper CUDA init note ({exc}); falling back to cpu/int8")
+                    self.device = "cpu"
+                    self._whisper = faster_whisper.WhisperModel(
+                        self.whisper_model_name,
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                    self._whisper_batched = faster_whisper.BatchedInferencePipeline(model=self._whisper)
+                else:
+                    raise
 
     def _ensure_aligner(self):
         if self._align_model is None:
@@ -358,30 +449,49 @@ class WarmASRAlignmentEngine:
         if len(audio_waveform) < 3200:
             return [], forced_language or "en"
 
+        def _transcribe_stream(waveform: np.ndarray, target_lang: Optional[str], is_probe: bool = False):
+            try:
+                if is_probe:
+                    return self._whisper.transcribe(waveform, vad_filter=True)
+                if self.batch_size > 0 and len(waveform) > 16000 * 25 and self._whisper_batched:
+                    return self._whisper_batched.transcribe(
+                        waveform,
+                        language=target_lang,
+                        initial_prompt=init_prompt,
+                        batch_size=self.batch_size,
+                        word_timestamps=not use_ctc_aligner,
+                    )
+                else:
+                    return self._whisper.transcribe(
+                        waveform,
+                        language=target_lang,
+                        initial_prompt=init_prompt,
+                        vad_filter=True,
+                        word_timestamps=not use_ctc_aligner,
+                    )
+            except RuntimeError as err:
+                err_str = str(err).lower()
+                if ("libcublas" in err_str or "libcudnn" in err_str) and self.device == "cuda":
+                    print(f"   [!] Faster-Whisper cuBLAS/CUDA error ({err}); falling back to CPU int8 inference...")
+                    self.device = "cpu"
+                    self._whisper = faster_whisper.WhisperModel(
+                        self.whisper_model_name,
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                    self._whisper_batched = faster_whisper.BatchedInferencePipeline(model=self._whisper)
+                    return _transcribe_stream(waveform, target_lang, is_probe=is_probe)
+                raise
+
         # Detect language on first 45s if not forced
         lang = forced_language
         if not lang:
-            _, info_probe = self._whisper.transcribe(audio_waveform[: min(len(audio_waveform), 16000 * 45)], vad_filter=True)
+            probe_audio = audio_waveform[: min(len(audio_waveform), 16000 * 45)]
+            _, info_probe = _transcribe_stream(probe_audio, None, is_probe=True)
             lang = info_probe.language or "en"
 
         init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN if lang == "en" else None
-
-        if self.batch_size > 0 and len(audio_waveform) > 16000 * 25:
-            segments_iter, info = self._whisper_batched.transcribe(
-                audio_waveform,
-                language=lang,
-                initial_prompt=init_prompt,
-                batch_size=self.batch_size,
-                word_timestamps=not use_ctc_aligner,
-            )
-        else:
-            segments_iter, info = self._whisper.transcribe(
-                audio_waveform,
-                language=lang,
-                initial_prompt=init_prompt,
-                vad_filter=True,
-                word_timestamps=not use_ctc_aligner,
-            )
+        segments_iter, info = _transcribe_stream(audio_waveform, lang, is_probe=False)
 
         clean_segs = []
         fallback_words: List[Dict[str, Any]] = []
