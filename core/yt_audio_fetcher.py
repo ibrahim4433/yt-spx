@@ -139,18 +139,21 @@ def fetch_video_audio_m1(
 
         # Multi-cookie rotation: try each healthy cookies file (best first); on a bot-check / 429 /
         # dead-cookie response, quarantine that cookie in the shared Drive registry and retry the
-        # SAME video with the next one. Only when every cookie fails is the shared circuit breaker tripped.
+        # SAME video with the next one.
+        # An anonymous attempt (None) is ALWAYS appended as the final fallback so that rotated/expired
+        # cookies never block downloads that YouTube serves cleanly without authentication!
         pool = CookiePool(workspace)
         discovered = pool.discover()
-        attempts: List[Optional[Path]] = list(pool.healthy_cookies()[:max_cookie_attempts])
-        if not attempts:
-            if discovered:
-                print(
-                    f"    [cookies] All {len(discovered)} cookie file(s) are expired/quarantined "
-                    "-> trying one anonymous attempt.",
-                    flush=True,
-                )
-            attempts = [None]
+        healthy = pool.healthy_cookies()[:max_cookie_attempts]
+        if discovered and not healthy:
+            print(
+                f"    [cookies] All {len(discovered)} cookie file(s) are expired/quarantined "
+                "-> falling back to anonymous download.",
+                flush=True,
+            )
+        attempts: List[Optional[Path]] = list(healthy)
+        if None not in attempts:
+            attempts.append(None)
 
         proc = None
         last_kind = ""
@@ -218,13 +221,17 @@ def fetch_video_audio_m1(
         if not success:
             if last_kind == "age_gate":
                 raise RuntimeError(f"Video {vid} is age-restricted and no available cookie could access it.")
-            workspace.trip_youtube_circuit_breaker(
-                reason=f"All {len(attempts)} cookie attempt(s) failed ({last_kind}) on {vid}: {last_tail}",
-                cooldown_minutes=45,
-            )
-            raise AntiBanCircuitBreakerError(
-                f"YouTube {last_kind or 'bot-check'} on {vid} with all {len(attempts)} cookie option(s). "
-                "Tripped 45-min shared Drive cooldown."
+            if last_kind in ("challenged", "rate_limited"):
+                workspace.trip_youtube_circuit_breaker(
+                    reason=f"YouTube challenge ({last_kind}) on {vid} with all {len(attempts)} option(s): {last_tail}",
+                    cooldown_minutes=45,
+                )
+                raise AntiBanCircuitBreakerError(
+                    f"YouTube {last_kind} on {vid} with all {len(attempts)} option(s). "
+                    "Tripped 45-min shared Drive cooldown."
+                )
+            raise RuntimeError(
+                f"Failed to fetch {vid} with all {len(attempts)} option(s) (last status: {last_kind or 'unknown'}): {last_tail}"
             )
 
         # Locate downloaded media file and .info.json

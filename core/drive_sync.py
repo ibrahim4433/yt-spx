@@ -318,6 +318,19 @@ class SharedWorkspace:
         data = self.read_json(rl_path, default={}) or {}
 
         cooldown_until = float(data.get("circuit_breaker_until", 0.0))
+        reason_str = str(data.get("reason", "")).lower()
+        if (
+            cooldown_until > now
+            and "invalid" in reason_str
+            and "bot" not in reason_str
+            and "429" not in reason_str
+            and "too many" not in reason_str
+        ):
+            # Auto-clear false-positive cooldown tripped by rotated/invalid cookies (anonymous download still works!)
+            data["circuit_breaker_until"] = 0.0
+            self.atomic_write_json(rl_path, data)
+            cooldown_until = 0.0
+
         if cooldown_until > now:
             rem = round(cooldown_until - now, 1)
             return False, rem, data.get("reason", "Anti-ban cooldown active")

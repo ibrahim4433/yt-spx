@@ -604,6 +604,58 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         # Calling preload_cuda_libraries should be safe across Windows & Linux platforms
         preload_cuda_libraries()
 
+    def test_fetch_video_audio_m1_anonymous_fallback_on_invalid_cookies(self):
+        import time as _t
+        import subprocess
+        from unittest.mock import patch
+        from core.yt_audio_fetcher import fetch_video_audio_m1
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        # Cookie file with auth tokens that passes offline validation
+        bad_cookie = cdir / "bad_acct.txt"
+        bad_cookie.write_text(
+            f"# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t{future}\t__Secure-3PSID\trotated_token\n",
+            encoding="utf-8",
+        )
+
+        vid = "test_anon_vid"
+        record = {"video_id": vid, "youtube_url": f"https://www.youtube.com/watch?v={vid}"}
+
+        def mock_subp_run(cmd, *args, **kwargs):
+            # If --cookies is present, simulate rotated cookie failure
+            if "--cookies" in cmd:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="WARNING: [youtube] The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser.",
+                )
+            # If anonymous (no --cookies), create a dummy audio file and info.json in the working tmp_dir
+            # The output template (-o) gives the path
+            for i, arg in enumerate(cmd):
+                if arg == "-o" and i + 1 < len(cmd):
+                    out_pat = Path(cmd[i + 1])
+                    tmp_dir = out_pat.parent
+                    dummy_audio = tmp_dir / f"{vid}.opus"
+                    dummy_audio.write_bytes(b"OggS" + b"\x00" * 10000)
+                    dummy_info = tmp_dir / f"{vid}.info.json"
+                    dummy_info.write_text('{"duration": 120.0}', encoding="utf-8")
+                    break
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[download] 100% of 10.0KiB")
+
+        with patch("subprocess.run", side_effect=mock_subp_run), patch("time.sleep", return_value=None):
+            raw_audio, info = fetch_video_audio_m1(record, self.ws, min_global_gap_sec=0.0)
+
+        self.assertIsNotNone(raw_audio)
+        self.assertTrue(raw_audio.exists())
+        self.assertEqual(self.ws.get_video_state(vid)["micro_step"], "M1_DOWNLOADED")
+
+        # Verify circuit breaker was NOT tripped by the rotated cookie
+        can_dl, rem, _ = self.ws.check_youtube_download_slot(min_global_gap_sec=0.0)
+        self.assertTrue(can_dl)
+        self.assertEqual(rem, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
