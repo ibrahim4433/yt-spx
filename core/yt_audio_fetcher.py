@@ -20,9 +20,10 @@ import time
 import tempfile
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
+from core.cookie_pool import CookiePool, classify_ytdlp_output
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -51,16 +52,9 @@ class PermanentVideoUnavailableError(RuntimeError):
 
 
 def _find_cookies_source(workspace: SharedWorkspace) -> Optional[Path]:
-    """Finds cookies.txt in Drive workspace or git repository without modifying it in-place."""
-    candidates = [
-        workspace.root / "cookies.txt",
-        workspace.data_dir / "cookies.txt",
-        BASE_DIR / "cookies.txt",
-    ]
-    for c in candidates:
-        if c.is_file() and c.stat().st_size > 32:
-            return c
-    return None
+    """Returns the best currently-healthy cookies file from the rotation pool (see core/cookie_pool.py)."""
+    healthy = CookiePool(workspace).healthy_cookies()
+    return healthy[0] if healthy else None
 
 
 def find_existing_raw_audio(workspace: SharedWorkspace, video_id: str) -> Optional[Path]:
@@ -77,6 +71,7 @@ def fetch_video_audio_m1(
     workspace: SharedWorkspace,
     min_global_gap_sec: float = 15.0,
     max_wait_for_slot_sec: float = 90.0,
+    max_cookie_attempts: int = 4,
 ) -> Tuple[Optional[Path], Dict[str, Any]]:
     """
     Executes Micro-Step M1 (YouTube Audio Fetch) with full resume & anti-ban protection.
@@ -120,12 +115,13 @@ def fetch_video_audio_m1(
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"yt_spx_dl_{vid}_"))
     try:
         out_tmpl = str(tmp_dir / f"{vid}.%(ext)s")
-        cmd = [
+        base_cmd = [
             "yt-dlp",
             "--no-playlist",
             "--format", "bestaudio[ext=m4a][abr<=160]/bestaudio[ext=opus][abr<=160]/bestaudio/best",
             "--write-info-json",
             "--no-write-subs",
+            "--no-progress",
             "--retries", "4",
             "--fragment-retries", "4",
             "--sleep-requests", "1",
@@ -139,43 +135,97 @@ def fetch_video_audio_m1(
         if shutil.which("node"):
             runtimes.append("node")
         if runtimes:
-            cmd.extend(["--js-runtimes", ",".join(runtimes)])
+            base_cmd.extend(["--js-runtimes", ",".join(runtimes)])
 
-        # Isolated working copy of cookies.txt so yt-dlp never clobbers shared Drive cookies
-        cookies_src = _find_cookies_source(workspace)
-        if cookies_src:
-            cookies_tmp = tmp_dir / "cookies_working.txt"
-            shutil.copy2(cookies_src, cookies_tmp)
-            cmd.extend(["--cookies", str(cookies_tmp)])
+        # Multi-cookie rotation: try each healthy cookies file (best first); on a bot-check / 429 /
+        # dead-cookie response, quarantine that cookie in the shared Drive registry and retry the
+        # SAME video with the next one. Only when every cookie fails is the shared circuit breaker tripped.
+        pool = CookiePool(workspace)
+        discovered = pool.discover()
+        attempts: List[Optional[Path]] = list(pool.healthy_cookies()[:max_cookie_attempts])
+        if not attempts:
+            if discovered:
+                print(
+                    f"    [cookies] All {len(discovered)} cookie file(s) are expired/quarantined "
+                    "-> trying one anonymous attempt.",
+                    flush=True,
+                )
+            attempts = [None]
 
-        cmd.append(url)
+        proc = None
+        last_kind = ""
+        last_tail = ""
+        success = False
+        for idx, cookie in enumerate(attempts):
+            if idx > 0:
+                time.sleep(random.uniform(6.0, 14.0))
+            # Clean partial files from any previous failed attempt
+            for f in tmp_dir.iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
 
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-        )
-        output_lower = (proc.stdout or "").lower()
+            cmd = list(base_cmd)
+            cookie_label = "anonymous"
+            if cookie is not None:
+                # Isolated working copy so yt-dlp never clobbers shared Drive cookies
+                cookies_tmp = tmp_dir / "cookies_working.txt"
+                shutil.copy2(cookie, cookies_tmp)
+                cmd.extend(["--cookies", str(cookies_tmp)])
+                cookie_label = pool.cookie_key(cookie)
+            cmd.append(url)
 
-        if proc.returncode != 0:
-            for pat in BOT_CHALLENGE_PATTERNS:
-                if re.search(pat, output_lower):
-                    workspace.trip_youtube_circuit_breaker(
-                        reason=f"Bot/429 challenge on {vid}: {proc.stdout[-240:].strip()}",
-                        cooldown_minutes=45,
-                    )
-                    raise AntiBanCircuitBreakerError(
-                        f"YouTube bot-check detected on {vid}. Tripped 45-min shared Drive cooldown to protect cookies."
-                    )
+            if idx > 0 or len(attempts) > 1:
+                print(f"    [cookies] Attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
+
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+            )
+            output = proc.stdout or ""
+            output_lower = output.lower()
+            kind = classify_ytdlp_output(output_lower)
+            last_tail = output[-240:].strip()
+
+            if proc.returncode == 0:
+                if cookie is not None:
+                    if kind == "invalid":
+                        # Downloaded anonymously, but this cookie is dead -> quarantine so next video uses another
+                        pool.mark_failed(cookie, "invalid", last_tail)
+                        print(f"    [cookies] {cookie_label} is no longer valid (rotated/logged out) -> quarantined.", flush=True)
+                    else:
+                        pool.mark_ok(cookie)
+                success = True
+                break
+
+            if kind in ("invalid", "challenged", "rate_limited", "age_gate"):
+                last_kind = kind
+                if cookie is not None and kind != "age_gate":
+                    pool.mark_failed(cookie, kind, last_tail)
+                    print(f"    [cookies] {cookie_label} failed ({kind}) -> quarantined, rotating to next cookie.", flush=True)
+                continue
+
             for pat in UNAVAILABLE_VIDEO_PATTERNS:
                 if re.search(pat, output_lower):
                     raise PermanentVideoUnavailableError(f"Video {vid} is permanently unavailable on YouTube.")
 
-            raise RuntimeError(f"yt-dlp exited with code {proc.returncode}: {proc.stdout[-300:].strip()}")
+            raise RuntimeError(f"yt-dlp exited with code {proc.returncode}: {output[-300:].strip()}")
+
+        if not success:
+            if last_kind == "age_gate":
+                raise RuntimeError(f"Video {vid} is age-restricted and no available cookie could access it.")
+            workspace.trip_youtube_circuit_breaker(
+                reason=f"All {len(attempts)} cookie attempt(s) failed ({last_kind}) on {vid}: {last_tail}",
+                cooldown_minutes=45,
+            )
+            raise AntiBanCircuitBreakerError(
+                f"YouTube {last_kind or 'bot-check'} on {vid} with all {len(attempts)} cookie option(s). "
+                "Tripped 45-min shared Drive cooldown."
+            )
 
         # Locate downloaded media file and .info.json
         downloaded_audio: Optional[Path] = None

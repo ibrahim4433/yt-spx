@@ -56,14 +56,13 @@ def setup_colab_drive() -> bool:
 
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")
-    cookies_cand = ws.root / "cookies.txt"
-    if cookies_cand.exists():
-        print(f"   -> Shared cookies.txt    : Found ({cookies_cand})")
-    else:
-        print(
-            f"   -> Shared cookies.txt    : Optional — place Netscape cookies.txt at {cookies_cand} "
-            "if YouTube requests authentication."
-        )
+    try:
+        from core.cookie_pool import CookiePool
+
+        (ws.root / "cookies").mkdir(parents=True, exist_ok=True)
+        CookiePool(ws).print_summary(indent="   -> ")
+    except Exception as exc:
+        print(f"   -> Cookies pool        : check skipped ({exc})")
     return True
 
 
@@ -116,15 +115,45 @@ def _get_pip_cache_args() -> List[str]:
     ]
 
 
+def _dist_version(dist_name: str) -> str:
+    """
+    Returns the installed distribution version WITHOUT importing the package
+    (importlib.util.find_spec('a.b.c') imports parent packages and raises
+    ModuleNotFoundError when 'a' is missing, so it must never be used for checks).
+    """
+    import importlib
+    import importlib.metadata as md
+
+    importlib.invalidate_caches()
+    try:
+        return md.version(dist_name)
+    except md.PackageNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
+def _nemo_2x_installed() -> bool:
+    """True only for nemo_toolkit >=2.6,<3.0 (3.0 removed msdd_models.NeuralDiarizer)."""
+    ver = _dist_version("nemo_toolkit")
+    if not ver:
+        return False
+    try:
+        major, minor = (int("".join(ch for ch in part if ch.isdigit()) or 0) for part in ver.split(".")[:2])
+    except ValueError:
+        return False
+    return major == 2 and minor >= 6
+
+
 def _verify_stage1_runtime_health() -> bool:
-    """Fast (<0.5s) ABI & module spec check ensuring ml_dtypes>=0.5.4 and NeMo 2.x NeuralDiarizer exist."""
+    """Fast (<0.5s) check: ml_dtypes>=0.5.4 ABI, NeMo 2.x, clearvoice, faster-whisper & demucs installed."""
     check_code = (
-        "import importlib.util, ml_dtypes; "
+        "import importlib.metadata as md, importlib.util as u, ml_dtypes; "
         "assert hasattr(ml_dtypes, 'float4_e2m1fn'); "
-        "assert importlib.util.find_spec('nemo.collections.asr.models.msdd_models') is not None; "
-        "assert importlib.util.find_spec('clearvoice') is not None; "
-        "assert importlib.util.find_spec('faster_whisper') is not None; "
-        "assert importlib.util.find_spec('demucs') is not None"
+        "v = md.version('nemo_toolkit').split('.'); "
+        "assert int(v[0]) == 2 and int(''.join(c for c in v[1] if c.isdigit())) >= 6; "
+        "md.version('clearvoice'); "
+        "assert all(u.find_spec(m) is not None for m in ('faster_whisper', 'demucs', 'ctc_forced_aligner', 'yt_dlp'))"
     )
     res = subprocess.run(
         [sys.executable, "-c", check_code],
@@ -136,8 +165,6 @@ def _verify_stage1_runtime_health() -> bool:
 
 
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
-    import importlib.util
-
     marker = Path("/tmp/.yt_spx_stage1_deps_ok")
     if marker.exists():
         if _verify_stage1_runtime_health():
@@ -170,7 +197,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
 
-    if importlib.util.find_spec("nemo.collections.asr.models.msdd_models") is None:
+    if not _nemo_2x_installed():
         print("   -> Installing NVIDIA NeMo 2.x ASR Toolkit (MSDD NeuralDiarizer + TitaNet-Large)...")
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "-q"]
@@ -179,7 +206,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
             + ["cython", "nemo_toolkit[asr]>=2.6.0,<3.0.0", "ml-dtypes>=0.5.4"]
         )
 
-    if importlib.util.find_spec("clearvoice") is None:
+    if not _dist_version("clearvoice"):
         print("   -> Installing ClearerVoice-Studio (MossFormer2_SS_16K 2-speaker overlap separator)...")
         # Install pure audio dependencies with constraints first, then --no-deps on clearvoice
         # so clearvoice's legacy setup.py metadata never downgrades NumPy 2.x or ml-dtypes on Python 3.13.
@@ -268,7 +295,11 @@ def main() -> int:
     is_colab = setup_colab_drive()
 
     constraints_path = Path(CURRENT_DIR) / "constraints_colab.txt"
-    if is_colab and mode not in ("status", "sync-db"):
+    if is_colab and mode == "test-cookies":
+        print("\n[2/3] Cookie test mode — ensuring yt-dlp + Deno only...")
+        _ensure_deno_runtime()
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "curl_cffi"], check=False)
+    elif is_colab and mode not in ("status", "sync-db"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)

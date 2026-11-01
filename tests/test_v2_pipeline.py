@@ -500,6 +500,61 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         parsed = build_arg_parser().parse_args([])
         self.assertEqual(parsed.max_session_minutes, 0)
 
+    def test_cookie_pool_offline_validation_rotation_and_quarantine(self):
+        import os
+        import time as _t
+        from core.cookie_pool import CookiePool, classify_ytdlp_output, validate_cookie_file_offline
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        past = int(_t.time()) - 86400
+
+        def _jar(name, expiry, auth=True):
+            cname = "__Secure-3PSID" if auth else "PREF"
+            body = (
+                "# Netscape HTTP Cookie File\n"
+                f".youtube.com\tTRUE\t/\tTRUE\t{expiry}\t{cname}\tabcdef123456\n"
+                f".youtube.com\tTRUE\t/\tFALSE\t{expiry}\tVISITOR_INFO1_LIVE\txyz987\n"
+            )
+            p = cdir / name
+            p.write_text(body, encoding="utf-8")
+            return p
+
+        a = _jar("acct1.txt", future)
+        b = _jar("acct2.txt", future)
+        expired = _jar("acct3_expired.txt", past)
+        anon = _jar("acct4_anon.txt", future, auth=False)
+
+        self.assertTrue(validate_cookie_file_offline(a)[0])
+        self.assertFalse(validate_cookie_file_offline(expired)[0])
+        self.assertFalse(validate_cookie_file_offline(anon)[0])
+
+        self.assertEqual(classify_ytdlp_output("error: sign in to confirm you're not a bot"), "challenged")
+        self.assertEqual(classify_ytdlp_output("warning: the provided youtube account cookies are no longer valid"), "invalid")
+        self.assertEqual(classify_ytdlp_output("http error 429: too many requests"), "rate_limited")
+        self.assertEqual(
+            classify_ytdlp_output("video unavailable. this content isn't available, try again later."),
+            "rate_limited",
+        )
+
+        pool = CookiePool(self.ws, include_repo_dir=False)
+        healthy = pool.healthy_cookies()
+        self.assertEqual({p.name for p in healthy}, {"acct1.txt", "acct2.txt"})
+
+        # acct1 gets bot-checked -> quarantined, acct2 becomes the only option
+        pool.mark_failed(a, "challenged", "Sign in to confirm you're not a bot")
+        self.assertEqual([p.name for p in pool.healthy_cookies()], ["acct2.txt"])
+
+        # Successful cookie is preferred first
+        pool.mark_ok(b)
+        self.assertEqual(pool.healthy_cookies()[0].name, "acct2.txt")
+
+        # Replacing acct1 with a fresh export (new mtime/size) clears its quarantine automatically
+        a.write_text(a.read_text(encoding="utf-8") + ".youtube.com\tTRUE\t/\tTRUE\t%d\tSID\tnewsid\n" % future, encoding="utf-8")
+        os.utime(a, (_t.time() + 5, _t.time() + 5))
+        self.assertEqual({p.name for p in pool.healthy_cookies()}, {"acct1.txt", "acct2.txt"})
+
 
 if __name__ == "__main__":
     unittest.main()

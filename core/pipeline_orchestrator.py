@@ -602,11 +602,51 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def run_cookie_tests(args: argparse.Namespace) -> int:
+    """
+    Actively tests EVERY cookies file in the pool with one `yt-dlp --simulate` request each
+    (spaced out to stay anti-ban safe) and updates the shared Drive health registry.
+    """
+    from core.cookie_pool import CookiePool
+
+    workspace = SharedWorkspace(worker_name=args.worker_id or None)
+    pool = CookiePool(workspace)
+    cookies = pool.discover()
+    print("=" * 74)
+    print("  YT-SPX COOKIE POOL TEST")
+    print("=" * 74)
+    if not cookies:
+        pool.print_summary(indent="  ")
+        return 1
+
+    test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    try:
+        manifest = load_or_create_manifest(workspace)
+        if manifest:
+            test_url = manifest[0].get("youtube_url") or f"https://www.youtube.com/watch?v={manifest[0]['video_id']}"
+    except Exception:
+        pass
+
+    n_ok = 0
+    for i, ck in enumerate(cookies):
+        if i > 0:
+            time.sleep(random.uniform(5.0, 10.0))
+        ok, kind, msg = pool.test_cookie_online(ck, test_url)
+        n_ok += int(ok)
+        status = "OK  " if ok else f"FAIL ({kind})"
+        print(f"  [{status}] {pool.cookie_key(ck)} -> {msg[:160]}", flush=True)
+
+    print("-" * 74)
+    pool.print_summary(indent="  ")
+    print("=" * 74)
+    return 0 if n_ok > 0 else 1
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="YT-SPX V2 Smart-Batch & Multi-Account Pipeline Orchestrator")
     p.add_argument(
         "--mode",
-        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status"],
+        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies"],
         default="auto",
         help="Execution mode: 'auto' runs Stage 1 -> Stage 2 in isolated GPU subprocesses.",
     )
@@ -637,6 +677,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ws = SharedWorkspace(worker_name=args.worker_id or None)
         print_status_report(ws)
         return 0
+
+    if args.mode == "test-cookies":
+        return run_cookie_tests(args)
 
     if args.mode == "sync-db":
         ws = SharedWorkspace(worker_name=args.worker_id or None)
