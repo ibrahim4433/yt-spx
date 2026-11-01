@@ -24,11 +24,19 @@ cookies.txt
 Downloads/
 downloads/
 
-# Large/Runtime Databases & Extraction Checkpoints (kept on Google Drive)
+# Large/Runtime Databases & V2 Shared Workspace Artifacts (kept on 5 TB Google Drive)
 data/*.db
 data/*.sqlite*
 data/extracted_qa.jsonl
 data/extraction_checkpoint.json
+data/clean_audio/
+data/diarization/
+data/scenarios/
+data/extractions/
+data/state/
+data/locks/
+data/profiles/
+data/cookies/
 
 # OS & Editor files
 .DS_Store

@@ -1,162 +1,90 @@
 #!/usr/bin/env python3
-import os
-import re
-import subprocess
+"""
+download_videos.py
+V2 Anti-Ban Audio Staging CLI for Dawah Dialectics (yt-spx).
+
+Stages M1_DOWNLOADED best-audio streams (Opus/M4A + .info.json) from the canonical
+2,640-video manifest (all_channels_videos.csv + clean_urls.txt) into the shared
+workspace (audio_raw/), enforcing global anti-ban pacing, isolated cookies.txt copies,
+and automatic circuit-breaker protection.
+"""
+
+import argparse
 import sys
 from pathlib import Path
+from typing import Optional, List
 
-# ==============================================================================
-# 1. إعداد المسارات المحلية
-# ==============================================================================
-# المجلد الحالي الذي يُشغل منه السكربت
 BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-# مجلد حفظ الفيديوهات المحملة
-DOWNLOAD_DIR = BASE_DIR / "Downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# ملف الأرشيف لحفظ سجل الفيديوهات التي اكتمل تنزيلها
-ARCHIVE_FILE = DOWNLOAD_DIR / "archive.txt"
-
-# ==============================================================================
-# 2. البحث عن ملف المصدر واستخراج الروابط النقية
-# ==============================================================================
-print("[1/3] البحث عن ملف الروابط وتنقيته...")
-
-source_file = None
-possible_names = ["remaining_urls.txt", "urls.txt", "links.txt", "urls.csv"]
-
-# فحص الأسماء الشائعة في المجلد الحالي
-for name in possible_names:
-    candidate = BASE_DIR / name
-    if candidate.is_file():
-        source_file = candidate
-        break
-
-# إذا لم يُعثر عليه بالأسماء المحددة، فحص أول ملف txt أو csv في المجلد
-if not source_file:
-    for f in BASE_DIR.glob("*"):
-        if f.is_file() and f.suffix.lower() in [".txt", ".csv"] and f.name != "clean_urls.txt":
-            source_file = f
-            break
-
-if not source_file:
-    print("[-] خطأ: لم يتم العثور على أي ملف نصي أو CSV يحتوي على الروابط.")
-    print(f"    يرجى وضع ملف الروابط داخل المجلد: {BASE_DIR}")
-    sys.exit(1)
-
-print(f"  -> تم العثور على ملف المصدر: {source_file.name}")
-
-with open(source_file, "r", encoding="utf-8", errors="ignore") as f:
-    content = f.read()
-
-# استخراج الروابط العادية و Shorts بدقة
-raw_urls = re.findall(
-    r"https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[a-zA-Z0-9_-]+",
-    content,
+from core.drive_sync import SharedWorkspace, STEP_RANK
+from core.pipeline_orchestrator import load_or_create_manifest, select_stage1_candidates
+from core.yt_audio_fetcher import (
+    fetch_video_audio_m1,
+    AntiBanCircuitBreakerError,
+    PermanentVideoUnavailableError,
 )
 
-# إزالة التكرار مع الحفاظ على الترتيب
-clean_urls = []
-seen = set()
-for url in raw_urls:
-    if url not in seen:
-        seen.add(url)
-        clean_urls.append(url)
 
-if not clean_urls:
-    print(f"[-] خطأ: لم يتم العثور على أي روابط يوتيوب صالحة داخل {source_file.name}")
-    sys.exit(1)
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Stage M1 YouTube audio streams in safe anti-ban batches.")
+    parser.add_argument("--batch-videos", type=int, default=8, help="Number of videos to stage in this batch.")
+    parser.add_argument("--cookies", type=str, default="", help="Optional path to Netscape cookies.txt.")
+    parser.add_argument("--debates-only", action="store_true", help="Stage full-length debates before #shorts.")
+    parser.add_argument("--workspace-dir", type=str, default="", help="Optional custom workspace root path.")
+    args = parser.parse_args(argv)
 
-clean_batch_file = BASE_DIR / "clean_urls.txt"
-with open(clean_batch_file, "w", encoding="utf-8") as f:
-    for url in clean_urls:
-        f.write(f"{url}\n")
+    ws_root = Path(args.workspace_dir) if args.workspace_dir else None
+    cookies_override = Path(args.cookies) if args.cookies else None
 
-print(f"  -> تم استخراج {len(clean_urls)} رابط صالح.")
-print(f"  -> حُفظت القائمة في: {clean_batch_file.name}")
+    workspace = SharedWorkspace(root_dir=ws_root)
+    manifest = load_or_create_manifest(workspace)
+    candidates = [
+        c
+        for c in select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only)
+        if c.get("_step_rank", 0) < STEP_RANK["M1_DOWNLOADED"]
+    ]
 
-# ==============================================================================
-# 3. تنظيف ملفات الترجمة غير المرغوبة (إن وُجدت)
-# ==============================================================================
-print("\n[2/3] فحص ملفات الترجمة...")
-ALLOWED_LANGUAGES = {"ja", "jpn", "ar", "ara", "en", "eng"}
-SUB_EXTENSIONS = {".srt", ".vtt", ".ass", ".sub", ".smi"}
+    print("=" * 70)
+    print(f"  YT-SPX V2 AUDIO STAGING (M0 -> M1_DOWNLOADED)")
+    print(f"  Workspace : {workspace.root}")
+    print(f"  Queued    : {len(candidates)} un-staged videos | Batch Limit: {args.batch_videos}")
+    print("=" * 70)
+
+    staged = 0
+    for cand in candidates:
+        if staged >= args.batch_videos:
+            break
+        vid = cand["video_id"]
+        lock_name = f"{vid}.stage1"
+        if not workspace.acquire_lock(lock_name, ttl_sec=1800, verify_delay_sec=0.25 if workspace.is_drive else 0.0):
+            continue
+        try:
+            print(f"\n[{staged + 1}/{args.batch_videos}] Staging [{vid}] {cand.get('title_ar', '')[:55]}...")
+            audio_path, _ = fetch_video_audio_m1(cand, workspace, cookies_override=cookies_override)
+            staged += 1
+            print(f"   -> Saved raw audio: {audio_path.name}")
+        except AntiBanCircuitBreakerError as cb:
+            print(f"\n[!] Anti-Ban Circuit Breaker tripped: {cb}")
+            print("    Stopping download batch early to protect cookies and IP reputation.")
+            break
+        except PermanentVideoUnavailableError as perm:
+            print(f"   -> Permanently unavailable ({perm}); marking skipped.")
+            workspace.advance_micro_step(
+                vid,
+                "M0_QUEUED",
+                extra_updates={"permanent_unavailable": True, "last_error": str(perm)[:300]},
+            )
+        except Exception as exc:
+            print(f"   -> Error staging {vid}: {exc}")
+            workspace.record_error(vid, str(exc))
+        finally:
+            workspace.release_lock(lock_name)
+
+    print(f"\n[+] Batch finished: {staged} video(s) staged at M1_DOWNLOADED.")
+    return 0
 
 
-def clean_unwanted_subtitles(directory: Path, allowed_langs: set) -> int:
-    removed = 0
-    for f in directory.rglob("*"):
-        if f.is_file() and f.suffix.lower() in SUB_EXTENSIONS:
-            parts = f.name.split(".")
-            if len(parts) >= 3:
-                lang = parts[-2].lower()
-                if len(lang) in (2, 3) and lang.isalpha():
-                    if lang not in allowed_langs:
-                        try:
-                            f.unlink()
-                            removed += 1
-                        except OSError:
-                            pass
-    return removed
-
-
-deleted_subs = clean_unwanted_subtitles(DOWNLOAD_DIR, ALLOWED_LANGUAGES)
-print(f"  -> تم حذف {deleted_subs} ملف ترجمة للغات غير مطلوبة.")
-
-# ==============================================================================
-# 4. تشغيل عملية التنزيل عبر yt-dlp
-# ==============================================================================
-print("\n[3/3] بدء تنزيل الفيديوهات...")
-
-output_template = str(DOWNLOAD_DIR / "%(title)s.%(ext)s")
-
-ytdlp_cmd = [
-    "yt-dlp",
-    "--skip-download",           
-    "--write-sub",               
-    "--write-auto-sub",          
-    "--sub-lang", "en,en-US",    
-    "--sub-format", "srt/vtt",   
-    "--continue",
-    "--no-overwrites",
-    "--download-archive", str(ARCHIVE_FILE),
-    "--force-write-archive",     
-    "--batch-file", str(clean_batch_file),
-    "-o", output_template,
-    "--retries", "10",
-    "--ignore-errors",           
-    
-    # الكوكيز والانتحال ومحرك جافاسكربت
-    "--cookies", "cookies.txt", 
-    "--impersonate", "chrome", 
-    "--js-runtimes", "node",
-    
-    # ------------------ تعديلات الأمان لتجنب الحظر ------------------
-    # 1. زيادة التأخير الزمني (ينتظر بين 5 إلى 15 ثانية بشكل عشوائي بين كل فيديو)
-    "--sleep-interval", "5",     
-    "--max-sleep-interval", "15", 
-    
-    # 2. تحديد عدد الطلبات المسموح بها لتجنب الإرهاق
-    "--sleep-requests", "1", # تأخير بسيط بين الطلبات الداخلية لنفس الفيديو
-]
-
-try:
-    process = subprocess.Popen(
-        ytdlp_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-
-    for line in iter(process.stdout.readline, ""):
-        print(line, end="")
-
-    process.stdout.close()
-    exit_code = process.wait()
-    print(f"\n[+] اكتمل التشغيل بكود خروج: {exit_code}")
-
-except KeyboardInterrupt:
-    print("\n[!] تم إيقاف التنزيل يدوياً. يمكنك إعادة تشغيل السكربت للاستكمال من حيث توقف.")
-    sys.exit(0)
+if __name__ == "__main__":
+    raise SystemExit(main())

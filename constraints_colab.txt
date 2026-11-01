@@ -1,0 +1,6 @@
+# Pin ABI-sensitive scientific packages so NeMo MSDD, ClearVoice MossFormer2,
+# Faster-Whisper, Demucs, and CTC-Forced-Aligner coexist cleanly on Google Colab T4.
+numpy<2.0.0
+scipy<1.15.0
+cython<3.1.0
+packaging>=23.0

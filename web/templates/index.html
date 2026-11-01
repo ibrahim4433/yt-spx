@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dawah Dialectics — Applied Islamic Apologetics &amp; Street Debate Corpus</title>
+  <title>Dawah Dialectics V2 — Diarized Scenario Transcripts &amp; Dialectical Dossiers</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='9' fill='%230F523E'/%3E%3Cpath d='M20 5.5 24.2 11.8 31.5 11.8 31.5 19.1 36 23.3 31.5 27.5 31.5 31.5 24.2 31.5 20 35.5 15.8 31.5 8.5 31.5 8.5 27.5 4 23.3 8.5 19.1 8.5 11.8 15.8 11.8Z' fill='none' stroke='%23E5C158' stroke-width='1.5' stroke-opacity='0.55'/%3E%3Cpath d='M12 15.5c2.6 0 5.4.8 8 2.4 2.6-1.6 5.4-2.4 8-2.4v11.2c-2.6 0-5.4.7-8 2.2-2.6-1.5-5.4-2.2-8-2.2V15.5Z' fill='%23FFFFFF' fill-opacity='0.14' stroke='%23FFFFFF' stroke-width='1.75' stroke-linejoin='round'/%3E%3Cpath d='M20 17.9v11' stroke='%23E5C158' stroke-width='1.75' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Chivo+Mono:wght@500;600;700&family=Noto+Naskh+Arabic:wght@400;500;600;700&family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=4">
+  <link rel="stylesheet" href="/static/css/style.css?v=5">
 </head>
 <body>
   <div class="app-shell">
@@ -20,10 +20,8 @@
             <svg width="38" height="38" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
               <rect width="40" height="40" rx="9" fill="#0F523E"/>
               <rect x="1" y="1" width="38" height="38" rx="8" stroke="#FFFFFF" stroke-opacity="0.16"/>
-              <!-- 8-Pointed Rub el Hizb Dialectical Geometry -->
               <rect x="10.5" y="10.5" width="19" height="19" rx="1.5" stroke="#E5C158" stroke-width="1.35" stroke-opacity="0.7"/>
               <rect x="10.5" y="10.5" width="19" height="19" rx="1.5" transform="rotate(45 20 20)" stroke="#E5C158" stroke-width="1.35" stroke-opacity="0.7"/>
-              <!-- Open Codex & Pillar of Proof -->
               <path d="M13 15.5C15.4 15.5 17.8 16.2 20 17.6C22.2 16.2 24.6 15.5 27 15.5V25.2C24.6 25.2 22.2 25.8 20 27.1C17.8 25.8 15.4 25.2 13 25.2V15.5Z" fill="#0F523E" stroke="#FFFFFF" stroke-width="1.7" stroke-linejoin="round"/>
               <path d="M20 17.6V27.1" stroke="#E5C158" stroke-width="1.6" stroke-linecap="round"/>
             </svg>
@@ -38,15 +36,15 @@
         </div>
       </div>
 
-      <!-- Minimized Beta Corpus Extraction Strip -->
-      <button type="button" class="beta-ledger-mini" onclick="switchTab('stats-tab')" title="View Corpus &amp; Beta Extraction Ledger">
+      <!-- Minimized V2 Pipeline Extraction Strip -->
+      <button type="button" class="beta-ledger-mini" onclick="switchTab('stats-tab')" title="View V2 Acoustic &amp; Extraction Ledger">
         <div class="beta-ledger-top">
           <span class="beta-status-dot" aria-hidden="true"></span>
-          <span id="beta-badge-label" class="beta-status-text">BETA CORPUS</span>
-          <span id="beta-ratio-num" class="beta-ratio-num">607 / 2,348 (26%)</span>
+          <span id="beta-badge-label" class="beta-status-text">V2 DIARIZED</span>
+          <span id="beta-ratio-num" class="beta-ratio-num">0 / 2,640</span>
         </div>
-        <div class="beta-progress-track" role="progressbar" aria-valuenow="26" aria-valuemin="0" aria-valuemax="100" aria-label="Corpus extraction progress">
-          <div class="beta-progress-fill" id="beta-progress-fill"></div>
+        <div class="beta-progress-track" id="beta-progress-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="V2 corpus pipeline progress">
+          <div class="beta-progress-fill" id="beta-progress-fill" style="width: 0%;"></div>
         </div>
       </button>
 
@@ -56,31 +54,32 @@
           <span id="filter-topic-label" class="facet-group-label">Theological Pillars</span>
           <button type="button" id="reset-filters-btn" class="reset-link" onclick="resetAllFilters()">Reset</button>
         </div>
-        <div id="category-pills" class="facet-list" role="listbox" aria-label="Topic categories">
-          <!-- Populated dynamically with live counts from /api/categories -->
-        </div>
+        <div id="category-pills" class="facet-list" role="listbox" aria-label="Topic categories"></div>
       </div>
 
-      <!-- Facet Group 2: Interlocutor Archetype (with split divider line above) -->
+      <!-- Facet Group 2: Da'ee Voiceprint Speaker -->
+      <div class="facet-section facet-section-divider">
+        <div class="facet-header-bar">
+          <span id="filter-speaker-label" class="facet-group-label">Da'ee Voiceprint</span>
+        </div>
+        <div id="speaker-pills" class="facet-list" role="listbox" aria-label="Da'ee speakers"></div>
+      </div>
+
+      <!-- Facet Group 3: Interlocutor Archetype -->
       <div class="facet-section facet-section-divider">
         <div class="facet-header-bar">
           <span id="filter-interlocutor-label" class="facet-group-label">Interlocutor Archetype</span>
         </div>
-        <div id="interlocutor-pills" class="facet-list" role="listbox" aria-label="Interlocutor archetypes">
-          <!-- Populated dynamically with live counts from /api/interlocutors -->
-        </div>
+        <div id="interlocutor-pills" class="facet-list" role="listbox" aria-label="Interlocutor archetypes"></div>
       </div>
 
       <div class="rail-footer">
-        <p id="footer-text">Grounded in deductive reason, textual verification, and timestamped street dialogues.</p>
+        <p id="footer-text">Grounded in vocal isolation, neural speaker diarization, overlap separation, and timestamped street dialogues.</p>
       </div>
     </aside>
 
     <!-- Main Workspace Column -->
     <div class="workspace-main">
-      <!-- Two-Bar Header Architecture:
-           Bar 1 (topbar-primary) = Search + Language Toggle (on both PC and Mobile)
-           Bar 2 (topbar-secondary) = Navigation Menus (under Bar 1 on PC, fixed Bottom Bar on Mobile) -->
       <header class="topbar-stack">
         <!-- BAR 1: Search + Language Toggle -->
         <div class="topbar-primary">
@@ -89,16 +88,15 @@
             <span id="mobile-filter-label" class="filter-btn-text">Filters</span>
           </button>
 
-          <!-- Global Instant Search Box (Single clean clear button, no duplicate X, no / badge) -->
           <div class="global-search-box" role="search">
             <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
             <input
               type="text"
               role="searchbox"
               id="search-input"
-              placeholder="Search 607 doubts, premises, fallacies (EN / العربية)..."
+              placeholder="Search doubts, premises, fallacies, or diarized quotes (EN / العربية)..."
               autocomplete="off"
-               spellcheck="false"
+              spellcheck="false"
               oninput="handleSearchInput()"
               onkeydown="if(event.key==='Enter'){event.preventDefault();performSearch(true);}"
               aria-label="Search dialectical archive"
@@ -108,7 +106,7 @@
             </button>
           </div>
 
-          <!-- 3-Way Segmented Language & Parallel Mode Switcher (Compact on PC, Mini beside search on Mobile) -->
+          <!-- 3-Way Segmented Language & Parallel Mode Switcher -->
           <div class="lang-segmented" role="group" aria-label="Language and reading mode">
             <button type="button" class="lang-seg-btn" id="mode-btn-en" onclick="setLanguageMode('en', false)" title="English">
               <span>EN</span>
@@ -124,21 +122,26 @@
           </div>
         </div>
 
-        <!-- BAR 2: Navigation Menus (Under Bar 1 on PC; Fixed Bottom Bar on Mobile) -->
+        <!-- BAR 2: Primary Navigation Views -->
         <nav class="topbar-secondary" aria-label="Primary Views">
           <div class="surface-nav">
             <button type="button" class="tab-btn active" data-tab="search-tab" onclick="switchTab('search-tab')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
-              <span id="tab-search-label">Claim &amp; Proof Archive</span>
-              <span class="nav-count-badge" id="nav-qa-count">607</span>
+              <span id="tab-search-label">Claim &amp; Proof Dossiers</span>
+              <span class="nav-count-badge" id="nav-qa-count">0</span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="scenarios-tab" onclick="switchTab('scenarios-tab')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h14"/><circle cx="19" cy="12" r="2"/></svg>
+              <span id="tab-scenarios-label">Scenario Transcripts</span>
+              <span class="nav-count-badge nav-count-subtle" id="nav-scenarios-count">0</span>
             </button>
             <button type="button" class="tab-btn" data-tab="chat-tab" onclick="switchTab('chat-tab')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="m9 10 2 2 4-4"/></svg>
-              <span id="tab-chat-label">Smart Dialectical Assistant</span>
+              <span id="tab-chat-label">Smart Assistant</span>
             </button>
             <button type="button" class="tab-btn" data-tab="stats-tab" onclick="switchTab('stats-tab')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-3"/></svg>
-              <span id="tab-stats-label">Corpus &amp; Beta Ledger</span>
+              <span id="tab-stats-label">Pipeline Ledger</span>
             </button>
           </div>
         </nav>
@@ -148,23 +151,22 @@
       <main class="main-content">
         <!-- VIEW 1: Claim & Proof Dossier Archive -->
         <section id="search-tab" class="tab-pane active" aria-labelledby="search-heading">
-          <!-- Workspace Subheader & Active Filter Controls -->
           <div class="archive-toolbar">
             <div class="archive-intro">
               <h2 id="search-heading">Claim &amp; Proof Dialectical Dossier</h2>
-              <p id="search-subheading">Every theological doubt paired directly with its exposed fallacy, Socratic counter-question, deductive syllogism, and timestamped street-debate evidence.</p>
+              <p id="search-subheading">Speaker-verified street-debate objections paired with exposed fallacies, Socratic counter-questions, deductive syllogisms, and dual-speaker dialogue exchanges.</p>
             </div>
 
             <div class="archive-controls-bar">
               <div class="active-filters-summary">
-                <span id="results-count-text" class="results-counter">Showing 1–20 of 607 dialectical units</span>
+                <span id="results-count-text" class="results-counter">Showing 0 dialectical units</span>
                 <div id="active-filter-chips" class="active-filter-chips"></div>
               </div>
 
               <div class="sort-and-view-controls">
                 <label for="sort-select" id="sort-label" class="control-label">Order:</label>
                 <select id="sort-select" class="architectural-select" onchange="handleSortChange()">
-                  <option value="default" id="sort-opt-default">Corpus Index (QA-001 → QA-607)</option>
+                  <option value="default" id="sort-opt-default">Corpus Index</option>
                   <option value="timestamp_asc" id="sort-opt-time-asc">Debate Timestamp (Earliest)</option>
                   <option value="timestamp_desc" id="sort-opt-time-desc">Debate Timestamp (Deepest)</option>
                   <option value="category" id="sort-opt-cat">Theological Pillar</option>
@@ -173,14 +175,10 @@
             </div>
           </div>
 
-          <!-- Dossier Cards Stream -->
-          <div id="qa-cards-container" class="dossier-stream">
-            <!-- Rendered dynamically by app.js -->
-          </div>
+          <div id="qa-cards-container" class="dossier-stream"></div>
 
-          <!-- Pagination & Load More Footer -->
           <div id="pagination-bar" class="pagination-bar" hidden>
-            <div class="pagination-status" id="pagination-status-text">Loaded 20 of 607 units</div>
+            <div class="pagination-status" id="pagination-status-text">Loaded 0 units</div>
             <div class="pagination-actions">
               <button type="button" id="load-more-btn" class="btn-primary-emerald" onclick="loadMoreResults()">
                 <span id="load-more-label">Load Next 20 Dossiers</span>
@@ -190,36 +188,92 @@
           </div>
         </section>
 
-        <!-- VIEW 2: Smart Dialectical Assistant -->
+        <!-- VIEW 2: Full Scenario Transcripts & Diarized Turn Search -->
+        <section id="scenarios-tab" class="tab-pane" aria-labelledby="scenarios-heading">
+          <div class="archive-toolbar">
+            <div class="archive-intro">
+              <h2 id="scenarios-heading">Multi-Speaker Scenario Transcripts</h2>
+              <p id="scenarios-subheading">Full chronological street-debate transcripts built with Demucs vocal cleaning, NeMo MSDD speaker diarization, MossFormer2 2-stream overlap separation, and pedestrian interruption filtering.</p>
+            </div>
+
+            <div class="scenarios-controls-grid">
+              <div class="transcript-search-bar">
+                <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input
+                  type="text"
+                  id="scenario-search-input"
+                  placeholder="Search video titles or spoken transcript turns across speakers..."
+                  autocomplete="off"
+                  oninput="handleScenarioSearchInput()"
+                  aria-label="Search scenario videos and spoken turns"
+                >
+                <select id="scenario-role-select" class="architectural-select" onchange="handleScenarioSearchInput()" aria-label="Filter spoken turns by speaker role">
+                  <option value="all" id="role-opt-all">All Speaker Roles</option>
+                  <option value="MAIN_DAEE" id="role-opt-daee">Main Da'ee Only</option>
+                  <option value="INTERLOCUTOR" id="role-opt-inter">Interlocutors Only</option>
+                  <option value="PEDESTRIAN" id="role-opt-ped">Pedestrian Interruptions</option>
+                </select>
+              </div>
+
+              <div class="scenarios-filter-toggles">
+                <label class="toggle-pill-check">
+                  <input type="checkbox" id="only-diarized-checkbox" onchange="loadScenarioCatalog(true)">
+                  <span id="only-diarized-label">Completed Stage 1 Scenarios Only</span>
+                </label>
+                <span id="scenarios-count-text" class="results-counter">0 videos</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Direct FTS5 Turn Matches Panel (Shown when searching spoken dialogue) -->
+          <div id="transcript-turn-hits-box" class="turn-hits-sheet" hidden>
+            <div class="turn-hits-header">
+              <span id="turn-hits-title">Direct Spoken Turn Matches</span>
+              <span id="turn-hits-count" class="facet-count">0</span>
+            </div>
+            <div id="transcript-turn-hits-list" class="turn-hits-list"></div>
+          </div>
+
+          <!-- Video Scenario Cards Stream -->
+          <div id="scenarios-cards-container" class="scenarios-catalog-stream"></div>
+
+          <div id="scenarios-pagination-bar" class="pagination-bar" hidden>
+            <div class="pagination-status" id="scenarios-pagination-status">Loaded 0 videos</div>
+            <div class="pagination-actions">
+              <button type="button" id="scenarios-load-more-btn" class="btn-primary-emerald" onclick="loadMoreScenarios()">
+                <span id="scenarios-load-more-label">Load Next 30 Videos</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 3: Smart Dialectical Assistant -->
         <section id="chat-tab" class="tab-pane" aria-labelledby="assistant-title">
           <div class="assistant-workbench">
-            <!-- Left Panel: Inquiry Starters & Method Guide -->
             <div class="assistant-sidebar">
               <div class="assistant-sidebar-box">
                 <h2 id="assistant-title">Smart Dialectical Assistant</h2>
-                <p id="assistant-desc">Zero-LLM deterministic reasoning engine: retrieves verified syllogisms, exposed fallacies, analogies, Socratic counter-questions, and exact YouTube debate timestamps with zero hallucination.</p>
+                <p id="assistant-desc">Zero-LLM deterministic reasoning engine: retrieves speaker-verified syllogisms, exposed fallacies, analogies, Socratic counter-questions, and exact YouTube debate timestamps with zero hallucination.</p>
               </div>
 
               <div class="assistant-starters-box">
                 <div class="starter-header">
                   <span id="chip-hint">Common Objections &amp; Doubts</span>
                 </div>
-                <div id="prompt-chips-container" class="starter-chips-list">
-                  <!-- Rendered dynamically by app.js -->
-                </div>
+                <div id="prompt-chips-container" class="starter-chips-list"></div>
               </div>
             </div>
 
-            <!-- Right Panel: Interactive Dialogue Stream -->
             <div class="chat-container">
               <div id="chat-messages" class="chat-messages-box" aria-live="polite">
                 <div class="message assistant-msg welcome-msg">
                   <div class="msg-content">
                     <div class="bot-msg-header">
-                      <span class="bot-badge">DIALECTICAL ENGINE READY • 607 UNITS INDEXED</span>
+                      <span class="bot-badge" id="welcome-bot-badge">V2 DIALECTICAL ENGINE READY</span>
                     </div>
                     <p id="welcome-text">
-                      Ask any theological objection, philosophical doubt, or inquiry about Islam in English or Arabic. The engine will decompose the objection into its exposed fallacy, Socratic counter-question, numbered deductive premises, concrete analogy, and exact video timestamp.
+                      Ask any theological objection, philosophical doubt, or inquiry about Islam in English or Arabic. The engine retrieves speaker-verified syllogisms, Socratic counter-questions, dual-speaker exchanges, and direct links to the Scenario Transcript Studio.
                     </p>
                   </div>
                 </div>
@@ -242,58 +296,66 @@
           </div>
         </section>
 
-        <!-- VIEW 3: Corpus Metadata & Beta Extraction Ledger -->
+        <!-- VIEW 4: Corpus Metadata & V2 Pipeline Ledger -->
         <section id="stats-tab" class="tab-pane" aria-labelledby="stats-title">
           <div class="corpus-ledger-view">
             <div class="ledger-header-sheet">
               <div class="ledger-header-main">
-                <h2 id="stats-title">Corpus Metadata &amp; Beta Extraction Ledger</h2>
-                <p id="stats-subtitle">Complete methodological transparency: tracking 2,348 cataloged SCDawah Arabic street-debate transcripts (~5.95M spoken words) through automated dialectical distillation.</p>
+                <h2 id="stats-title">V2 Acoustic Diarization &amp; Extraction Ledger</h2>
+                <p id="stats-subtitle">Methodological transparency across 2,640 cataloged street-debate videos processed through Demucs vocal cleaning, NeMo MSDD diarization, MossFormer2 overlap separation, and Qwen 2.5 14B distillation.</p>
               </div>
               <div class="ledger-summary-strip">
                 <div class="ledger-datum">
-                  <span class="datum-value" id="stat-qa">607</span>
+                  <span class="datum-value" id="stat-qa">0</span>
                   <span class="datum-label" id="stat-qa-label">Extracted Q&amp;A Dossiers</span>
                 </div>
                 <div class="ledger-datum">
-                  <span class="datum-value" id="stat-videos">2,348</span>
-                  <span class="datum-label" id="stat-videos-label">Cataloged Debate Videos</span>
+                  <span class="datum-value" id="stat-stage1">0 / 2,640</span>
+                  <span class="datum-label" id="stat-stage1-label">Diarized Scenarios (Stage 1)</span>
                 </div>
                 <div class="ledger-datum">
-                  <span class="datum-value" id="stat-words">5,955,997</span>
-                  <span class="datum-label" id="stat-words-label">Spoken Words Preserved</span>
+                  <span class="datum-value" id="stat-hours">0.0h</span>
+                  <span class="datum-label" id="stat-hours-label">Clean Vocals Preserved</span>
                 </div>
                 <div class="ledger-datum">
-                  <span class="datum-value" id="stat-pillars">10</span>
-                  <span class="datum-label" id="stat-pillars-label">Theological Pillars Indexed</span>
+                  <span class="datum-value" id="stat-overlaps">0</span>
+                  <span class="datum-label" id="stat-overlaps-label">Overlaps Unmixed (2-Stream)</span>
+                </div>
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-pedestrians">0</span>
+                  <span class="datum-label" id="stat-pedestrians-label">Pedestrian Turns Isolated</span>
+                </div>
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-speakers">0</span>
+                  <span class="datum-label" id="stat-speakers-label">Debate Speakers Indexed</span>
                 </div>
               </div>
             </div>
 
             <div class="ledger-tables-grid">
-              <!-- Table 1: Breakdown by Theological Pillar -->
               <div class="ledger-table-sheet">
                 <h3 id="ledger-cat-heading">Distribution by Theological Pillar</h3>
                 <p id="ledger-cat-sub" class="sheet-sub">Click any pillar row to filter the Claim &amp; Proof Archive directly.</p>
-                <div id="stats-categories-table" class="architectural-bars-list">
-                  <!-- Populated dynamically by app.js -->
-                </div>
+                <div id="stats-categories-table" class="architectural-bars-list"></div>
               </div>
 
-              <!-- Table 2: Breakdown by Interlocutor Archetype & Colab Pipeline -->
               <div class="ledger-side-stack">
+                <div class="ledger-table-sheet">
+                  <h3 id="ledger-speaker-heading">Identified Da'ee Voiceprints</h3>
+                  <p id="ledger-speaker-sub" class="sheet-sub">Cross-video TitaNet-Large 192-D speaker profiles and title hints.</p>
+                  <div id="stats-speakers-table" class="architectural-bars-list"></div>
+                </div>
+
                 <div class="ledger-table-sheet">
                   <h3 id="ledger-inter-heading">Distribution by Interlocutor Archetype</h3>
                   <p id="ledger-inter-sub" class="sheet-sub">Real street-debate interlocutor profiles across extracted units.</p>
-                  <div id="stats-interlocutors-table" class="architectural-bars-list">
-                    <!-- Populated dynamically by app.js -->
-                  </div>
+                  <div id="stats-interlocutors-table" class="architectural-bars-list"></div>
                 </div>
 
                 <div class="colab-pipeline-sheet">
-                  <h3 id="colab-title">Open-Source Google Colab Extraction Pipeline</h3>
+                  <h3 id="colab-title">Multi-Account Google Colab Free T4 + 5 TB Drive Pipeline</h3>
                   <p id="colab-desc">
-                    This repository is in active Beta extraction. Run checkpointed batch distillation across all 2,348 subtitle files using <code>dawah_knowledge_extractor_colab.ipynb</code> or <code>run_colab_all_in_one.py</code> with zero data loss.
+                    Every micro-step (<code>M1</code> audio fetch, <code>M2</code> chunked Demucs vocals, <code>M3</code> NeMo MSDD diarization, <code>M4</code> MossFormer2 overlap separation, <code>M5</code> CTC scenario JSON, and <code>M6</code> Qwen 2.5 14B episode extraction) saves atomically to <code>/content/drive/MyDrive/yt-spx</code> via <code>dawah_knowledge_extractor_colab.ipynb</code>.
                   </p>
                 </div>
               </div>
@@ -304,9 +366,71 @@
     </div>
   </div>
 
-  <!-- Toast Notification for Copy Actions -->
+  <!-- Interactive Scenario Transcript Studio Modal (Native <dialog closedby="any">) -->
+  <dialog id="scenario-studio-dialog" class="scenario-dialog" closedby="any" aria-labelledby="scenario-studio-title">
+    <div class="scenario-dialog-shell">
+      <div class="scenario-dialog-header">
+        <div class="scenario-title-group">
+          <h2 id="scenario-studio-title">Scenario Transcript Studio</h2>
+          <div id="scenario-studio-meta" class="scenario-meta-pills"></div>
+        </div>
+        <button type="button" class="studio-close-btn" onclick="closeScenarioStudio()" aria-label="Close Scenario Studio">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="scenario-studio-body">
+        <!-- Left Column: Synced YouTube Player + Speaker Roster + Extracted Q&A Jumps -->
+        <div class="scenario-media-col">
+          <div class="yt-player-frame" id="studio-player-wrap">
+            <div id="studio-yt-player"></div>
+          </div>
+
+          <div class="studio-panel-card">
+            <h3 id="studio-speakers-heading">Diarized Speaker Roster</h3>
+            <div id="studio-speakers-list" class="studio-speakers-list"></div>
+          </div>
+
+          <div class="studio-panel-card" id="studio-qa-panel" hidden>
+            <h3 id="studio-qa-heading">Extracted Dossiers in This Video</h3>
+            <div id="studio-qa-jumps" class="studio-qa-jumps"></div>
+          </div>
+        </div>
+
+        <!-- Right Column: Interactive Chronological & Overlap-Resolved Scenario Stream -->
+        <div class="scenario-transcript-col">
+          <div class="scenario-stream-toolbar">
+            <div id="studio-episode-tabs" class="episode-tabs-row"></div>
+            <div class="studio-toggles-row">
+              <div class="studio-inline-filter">
+                <input
+                  type="text"
+                  id="studio-turn-filter"
+                  placeholder="Filter turns in this video..."
+                  oninput="renderStudioTurns()"
+                  aria-label="Filter turns in current scenario"
+                >
+              </div>
+              <label class="toggle-pill-check">
+                <input type="checkbox" id="hide-pedestrians-checkbox" checked onchange="renderStudioTurns()">
+                <span id="hide-pedestrians-label">Hide Pedestrian Interruptions</span>
+              </label>
+              <label class="toggle-pill-check">
+                <input type="checkbox" id="auto-follow-checkbox" checked>
+                <span id="auto-follow-label">Auto-Follow Video</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="studio-turns-viewport" class="scenario-turns-viewport"></div>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Toast Notification -->
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>Copied to clipboard</div>
 
-  <script src="/static/js/app.js?v=4"></script>
+  <script src="/static/js/app.js?v=5"></script>
 </body>
 </html>

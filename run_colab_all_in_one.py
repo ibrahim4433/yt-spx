@@ -1,310 +1,208 @@
 #!/usr/bin/env python3
 """
 run_colab_all_in_one.py
-ONE-STEP Automated Multi-Day Extractor for Google Colab (Free T4 GPU).
+ONE-STEP Automated Bootstrapper for Dawah Dialectics V2 (yt-spx) on Google Colab Free T4 GPUs.
 
-Does everything in a single execution:
-  1. Mounts Google Drive & navigates to project folder.
-  2. Auto-installs GPU dependencies if missing.
-  3. Loads Qwen 2.5 7B Instruct in 4-bit into T4 GPU VRAM.
-  4. Resumes from last checkpoint automatically.
-  5. Extracts dialectical Q&As and updates SQLite database live on the fly.
-  6. 100% zero data loss when daily free GPU quota expires.
+Features:
+  1. Mounts Google Drive & resolves the shared 5 TB workspace (/content/drive/MyDrive/yt-spx).
+     (Leaves the legacy /content/drive/MyDrive/yt-ch V1 archive 100% untouched!)
+  2. Auto-installs Deno JS runtime + yt-dlp + Stage 1 Acoustic/Diarization/Separation stack
+     + Stage 2 Qwen 2.5 14B Q5_K_M CUDA GGUF wheel depending on the selected mode.
+  3. Delegates to core/pipeline_orchestrator.py with subprocess CUDA isolation, M1->M6
+     micro-step resume, anti-ban YouTube pacing, and multi-account Drive lock coordination.
 """
 
 import os
 import sys
+import shutil
+import subprocess
 from pathlib import Path
+from typing import List
 
-# Prevent PyTorch CUDA memory fragmentation on Nvidia GPUs (T4 / A100)
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# Force project root and working directory into sys.path immediately at module level
 CURRENT_DIR = str(Path(__file__).resolve().parent)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
-if os.getcwd() not in sys.path:
-    sys.path.insert(0, os.getcwd())
-
-import json
-import time
 
 
-# 1. Environment & Google Drive Auto-Setup
-def setup_environment():
-    print("=" * 70)
-    print("  🕌  DAWAH DIALECTICS: ONE-STEP LOCAL GPU PIPELINE")
-    print("=" * 70)
+def setup_colab_drive() -> bool:
+    print("=" * 74)
+    print("  DAWAH DIALECTICS V2 (YT-SPX): MULTI-STAGE ACOUSTIC & LLM PIPELINE")
+    print("=" * 74)
 
     is_colab = "google.colab" in sys.modules or os.path.exists("/content")
-    if is_colab:
-        print("[1/5] Running inside Google Colab environment...")
-        try:
-            from google.colab import drive
-            if not os.path.exists("/content/drive/MyDrive"):
-                print("   -> Mounting Google Drive...")
-                drive.mount("/content/drive")
-            
-            drive_base = Path("/content/drive/MyDrive/yt-ch")
-            drive_downloads = drive_base / "Downloads"
-            drive_data = drive_base / "data"
+    if not is_colab:
+        print("[1/3] Running in standard local environment.")
+        return False
 
-            drive_data.mkdir(parents=True, exist_ok=True)
-            print(f"   💾 Persistent Google Drive storage: {drive_data}")
+    print("[1/3] Detected Google Colab runtime...")
+    try:
+        from google.colab import drive
 
-            # Link Google Drive Downloads to local workspace if not present
-            local_downloads = Path(CURRENT_DIR) / "Downloads"
-            if drive_downloads.exists() and not local_downloads.exists():
-                try:
-                    os.symlink(drive_downloads, local_downloads)
-                    print(f"   🔗 Linked subtitle corpus from Drive: {drive_downloads}")
-                except Exception:
-                    pass
+        if not os.path.exists("/content/drive/MyDrive") and not os.path.exists("/content/drive/My Drive"):
+            print("   -> Mounting Google Drive...")
+            drive.mount("/content/drive")
+    except Exception as exc:
+        print(f"   [-] Note on Drive mount: {exc}")
 
-            # Remove any stale code folders on Drive that might shadow the active Git repository
-            for stale_dir in ["core", "db", "web", "scripts", "tests", "__pycache__"]:
-                stale_path = drive_base / stale_dir
-                if stale_path.exists() and stale_path.is_dir():
-                    try:
-                        import shutil
-                        shutil.rmtree(stale_path)
-                    except Exception:
-                        pass
-            for stale_file in ["run_colab_all_in_one.py", "run_app.py", "download_videos.py"]:
-                stale_path = drive_base / stale_file
-                if stale_path.exists():
-                    try:
-                        stale_path.unlink()
-                    except Exception:
-                        pass
+    from core.drive_sync import SharedWorkspace
 
-            print(f"   📁 Active Code Workspace: {CURRENT_DIR}")
-        except Exception as e:
-            print(f"   [-] Note on Drive setup: {e}")
+    ws = SharedWorkspace()
+    print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
+    print(f"   -> Active Code Directory : {CURRENT_DIR}")
+    cookies_cand = ws.root / "cookies.txt"
+    if cookies_cand.exists():
+        print(f"   -> Shared cookies.txt    : Found ({cookies_cand})")
     else:
-        print("[1/5] Running in standard environment.")
+        print(
+            f"   -> Shared cookies.txt    : Optional — place Netscape cookies.txt at {cookies_cand} "
+            "if YouTube requests authentication."
+        )
+    return True
 
-    return is_colab
 
-    return is_colab
+def _ensure_deno_runtime() -> None:
+    """Installs Deno (<3s) so yt-dlp solves YouTube JS signature/n-parameter challenges cleanly."""
+    deno_bin = Path.home() / ".deno" / "bin"
+    if deno_bin.exists():
+        os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
+    if shutil.which("deno") or shutil.which("node"):
+        return
+    print("   -> Installing Deno JS runtime for yt-dlp YouTube challenge solver...")
+    subprocess.run(
+        "curl -fsSL https://deno.land/install.sh | sh",
+        shell=True,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if deno_bin.exists():
+        os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
 
 
-# 2. Auto-Install Dependencies if Missing
-def ensure_dependencies():
-    print("\n[2/5] Checking GPU acceleration packages...")
-    packages = ["transformers", "torch", "accelerate", "bitsandbytes", "huggingface_hub", "tqdm"]
-    missing = []
-    for pkg in packages:
-        try:
-            __import__(pkg)
-        except ImportError:
-            missing.append(pkg)
+def ensure_stage1_dependencies(constraints_path: Path) -> None:
+    marker = Path("/tmp/.yt_spx_stage1_deps_ok")
+    if marker.exists():
+        print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
+        _ensure_deno_runtime()
+        return
 
-    import subprocess
-    if missing:
-        print(f"   -> Installing missing packages: {', '.join(missing)}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + missing)
-        print("   -> Core packages installed successfully.")
-    else:
-        print("   -> Core packages already installed.")
+    _ensure_deno_runtime()
 
-    # Ensure pre-built CUDA wheel for llama-cpp-python (for Qwen 2.5 14B Q5_K_M GGUF + 8-bit KV Cache)
+    if shutil.which("ffmpeg") is None and shutil.which("apt-get"):
+        subprocess.run(["apt-get", "update", "-qq"], check=False)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], check=False)
+
+    c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
+    stage1_pkgs = [
+        "yt-dlp>=2025.1.15",
+        "curl_cffi",
+        "demucs",
+        "faster-whisper>=1.1.0",
+        "ctc-forced-aligner",
+        "deepmultilingualpunctuation",
+        "soundfile",
+        "scipy",
+        "huggingface_hub",
+        "tqdm",
+    ]
+    print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + c_arg + stage1_pkgs)
+
+    try:
+        import nemo.collections.asr  # noqa: F401
+    except ImportError:
+        print("   -> Installing NVIDIA NeMo ASR Toolkit (MSDD + TitaNet-Large)...")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q"] + c_arg + ["cython", "nemo_toolkit[asr]"]
+        )
+
+    try:
+        import clearvoice  # noqa: F401
+    except ImportError:
+        print("   -> Installing ClearerVoice-Studio (MossFormer2_SS_16K 2-speaker overlap separator)...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q"] + c_arg + ["clearvoice"],
+            check=False,
+        )
+
+    marker.write_text("ok", encoding="utf-8")
+
+
+def ensure_stage2_dependencies(constraints_path: Path) -> None:
+    marker = Path("/tmp/.yt_spx_stage2_deps_ok")
+    if marker.exists():
+        print("   -> Stage 2 Local LLM dependencies already verified in this runtime.")
+        return
+
+    c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
+    llm_pkgs = ["transformers", "accelerate", "bitsandbytes", "huggingface_hub", "tqdm"]
+    print("   -> Ensuring Stage 2 LLM core packages...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + c_arg + llm_pkgs)
+
     try:
         import llama_cpp
+
         if not llama_cpp.llama_supports_gpu_offload():
-            raise ImportError("llama_cpp lacks GPU offload")
+            raise ImportError("llama_cpp lacks CUDA offload")
     except Exception:
-        print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Q5_K_M GGUF engine)...")
-        installed_wheel = False
+        print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Qwen 2.5 14B Q5_K_M GGUF)...")
         for cu_ver in ["cu124", "cu122", "cu121"]:
-            try:
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", "-q",
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
                     "llama-cpp-python",
                     "--only-binary=:all:",
-                    f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}"
-                ])
-                installed_wheel = True
-                print(f"   -> llama-cpp-python ({cu_ver}) pre-built GPU wheel installed!")
+                    f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}",
+                ],
+                check=False,
+            )
+            if res.returncode == 0:
+                print(f"   -> Installed llama-cpp-python ({cu_ver}) GPU wheel!")
                 break
-            except Exception:
-                continue
-        if not installed_wheel:
-            print("   -> Pre-built llama-cpp wheel not matched; will use Transformers 14B GPU engine.")
+
+    marker.write_text("ok", encoding="utf-8")
 
 
-# 3. Main One-Step Execution Loop
-def run_pipeline():
-    setup_environment()
-    ensure_dependencies()
+def _detect_requested_mode(argv: List[str]) -> str:
+    for i, tok in enumerate(argv):
+        if tok == "--mode" and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith("--mode="):
+            return tok.split("=", 1)[1]
+    return "auto"
 
-    # Purge any Google Drive code paths from sys.path so they never shadow the git repo
-    sys.path = [p for p in sys.path if "drive/MyDrive/yt-ch" not in p.replace("\\", "/")]
-    if "/content/yt-ch" in sys.path:
-        sys.path.remove("/content/yt-ch")
-    if os.path.exists("/content/yt-ch"):
-        sys.path.insert(0, "/content/yt-ch")
-    if CURRENT_DIR in sys.path:
-        sys.path.remove(CURRENT_DIR)
-    sys.path.insert(0, CURRENT_DIR)
 
-    import torch
-    from core.colab_runner import (
-        LocalGPUClient, process_video, append_extracted_units,
-        save_checkpoint, load_checkpoints, save_checkpoints_dict, DATA_DIR
-    )
-    from db.database import init_db, insert_qa_unit, get_stats, DB_PATH
+def main() -> int:
+    argv = sys.argv[1:]
+    mode = _detect_requested_mode(argv)
+    is_colab = setup_colab_drive()
 
-    # Initialize SQLite Database
-    init_db()
-
-    # Auto-enrich and sanitize any previous records in Google Drive
-    try:
-        from scripts.enrich_arabic_db import run_enrichment
-        run_enrichment(DB_PATH)
-    except Exception as e:
-        print(f"   [-] Note on Arabic enrichment check: {e}")
-
-    try:
-        from scripts.sync_and_clean_607 import clean_db_glitches
-        fixed_cnt = clean_db_glitches(DB_PATH)
-        if fixed_cnt > 0:
-            print(f"   🧹 Cleaned {fixed_cnt} records from CJK/English token splices in SQLite DB!")
-    except Exception as e:
-        print(f"   [-] Note on DB glitch sanitizer: {e}")
-
-    # Verify GPU
-    print("\n[3/5] Verifying GPU hardware...")
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"   ✅ GPU Detected: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+    constraints_path = Path(CURRENT_DIR) / "constraints_colab.txt"
+    if is_colab and mode not in ("status", "sync-db"):
+        print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
+        if mode in ("auto", "stage1", "stage1-worker"):
+            ensure_stage1_dependencies(constraints_path)
+        if mode in ("auto", "stage2", "stage2-worker"):
+            ensure_stage2_dependencies(constraints_path)
     else:
-        print("   ⚠️ No GPU detected! Running on CPU (will be slower).")
+        print(f"\n[2/3] Lightweight mode '{mode}' — skipping heavy GPU wheel checks.")
 
-    # Load Model: Qwen 2.5 14B Instruct (Q5_K_M 5-bit GGUF + 8-bit KV Cache + 8192 Context)
-    print("\n[4/5] Loading Qwen 2.5 14B Instruct (Q5_K_M 5-bit / 8192 ctx / 8-bit KV Cache) into GPU memory...")
-    client = LocalGPUClient(
-        model_name="Qwen/Qwen2.5-14B-Instruct",
-        load_in_4bit=True,
-        use_gguf_q5=True,
-        context_length=8192
-    )
+    # Ensure sys.path prioritizes /content/yt-spx and never legacy /content/drive/MyDrive/yt-ch
+    sys.path = [p for p in sys.path if "yt-ch" not in p.replace("\\", "/")]
+    if CURRENT_DIR not in sys.path:
+        sys.path.insert(0, CURRENT_DIR)
 
-    # Load Manifest & Checkpoints
-    manifest_path = DATA_DIR / "video_manifest.json"
-    if not manifest_path.exists():
-        from core.metadata_linker import build_manifest
-        manifest = build_manifest()
-    else:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
+    print(f"\n[3/3] Handing off to YT-SPX V2 Smart-Batch Orchestrator (args={argv or ['--mode', 'auto']})...\n")
+    from core.pipeline_orchestrator import main as orchestrator_main
 
-    # Silently ensure all paths use forward slashes for Linux compatibility
-    manifest_dirty = False
-    for v in manifest:
-        if "srt_file" in v and "\\" in v["srt_file"]:
-            v["srt_file"] = v["srt_file"].replace("\\", "/")
-            manifest_dirty = True
-    if manifest_dirty:
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
-
-    checkpoints = load_checkpoints()
-    processed_set = set(checkpoints.get("processed_video_ids", []))
-    total_qa_recorded = checkpoints.get("total_qa_extracted", 0)
-
-    # Auto-repair: If checkpoint recorded 0 extractions across many skipped videos (e.g. from earlier path testing)
-    if len(processed_set) > 50 and total_qa_recorded == 0:
-        print("\n   ⚠️  Detected empty checkpoint from previous path test (videos were skipped without extraction).")
-        print("   🔄 Automatically resetting checkpoint so real GPU extraction will run on all videos!")
-        checkpoints = {"processed_video_ids": [], "total_qa_extracted": 0}
-        processed_set = set()
-        save_checkpoints_dict(checkpoints)
-
-    # Auto-heal: If any video in checkpoint has 0 extracted units in the database, re-queue it for proper extraction
-    try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        real_video_ids = set(r[0] for r in conn.execute("SELECT DISTINCT video_id FROM qa_units WHERE video_id IS NOT NULL").fetchall())
-        conn.close()
-
-        valid_processed = [vid for vid in checkpoints.get("processed_video_ids", []) if vid in real_video_ids]
-        if len(valid_processed) < len(checkpoints.get("processed_video_ids", [])):
-            diff_count = len(checkpoints.get("processed_video_ids", [])) - len(valid_processed)
-            print(f"\n   🔄 Detected {diff_count} video(s) with 0 units. Resetting them for full extraction!")
-            checkpoints["processed_video_ids"] = valid_processed
-            save_checkpoints_dict(checkpoints)
-            processed_set = set(valid_processed)
-    except Exception as e:
-        print(f"   [-] Checkpoint sync note: {e}")
-
-    total_videos = len(manifest)
-    completed_videos = len(processed_set)
-    remaining_manifest = [v for v in manifest if v["video_id"] not in processed_set]
-    # Prioritize any video currently in-progress (interrupted mid-chunk), then sort by largest transcripts
-    in_progress_ids = set(checkpoints.get("chunk_progress", {}).keys())
-    remaining_manifest.sort(
-        key=lambda x: (x.get("video_id") in in_progress_ids, x.get("file_size", 0)),
-        reverse=True
-    )
-    remaining_videos = len(remaining_manifest)
-
-    print("\n[5/5] Starting Batch Dialectical Extraction...")
-    print(f"   📊 Total Archive: {total_videos} videos")
-    print(f"   ✅ Previously Completed: {completed_videos} videos")
-    print(f"   ⏳ Remaining to Process: {remaining_videos} videos")
-    print(f"   💡 Live Log Monitor: /content/drive/MyDrive/yt-ch/data/extraction_live.log")
-    print("-" * 70)
-
-    from tqdm.auto import tqdm
-    pbar = tqdm(remaining_manifest, desc="Extracting Q&A Units", initial=completed_videos, total=total_videos)
-
-    total_extracted_session = 0
-
-    try:
-        for video in pbar:
-            vid = video["video_id"]
-            title_preview = video.get("title_ar", "")[:35]
-            pbar.set_postfix_str(f"{vid} | {title_preview}")
-            sys.stdout.flush()
-
-            t_vid_start = time.time()
-            try:
-                units = process_video(video, client)
-                if units is None:
-                    # Subtitle missing or unreadable - do not mark as completed
-                    print(f"[-] Subtitle file not accessible for {vid}: {title_preview}", flush=True)
-                    continue
-
-                if units:
-                    # 1. Save to JSONL in Drive
-                    append_extracted_units(units)
-                    # 2. Save directly to SQLite DB in Drive live
-                    for u in units:
-                        insert_qa_unit(u)
-                    total_extracted_session += len(units)
-
-                # 3. Save checkpoint in Drive (video was genuinely processed by model)
-                save_checkpoint(vid, len(units))
-                processed_set.add(vid)
-
-                t_vid_elapsed = round(time.time() - t_vid_start, 1)
-                pbar.set_postfix_str(f"+{len(units)} QA ({t_vid_elapsed}s) | Total: {total_extracted_session}")
-                sys.stdout.flush()
-
-            except Exception as e:
-                print(f"\n[-] Error on video {vid}: {e}", flush=True)
-                time.sleep(2)
-
-    except KeyboardInterrupt:
-        print("\n[!] Execution paused by user. Progress safely saved.")
-
-    print("\n" + "=" * 70)
-    print(f"🎉 Session Complete! Extracted {total_extracted_session} Q&A arguments this session.")
-    print("   📊 Total Library Stats:", get_stats())
-    print("=" * 70)
+    return orchestrator_main(argv)
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    raise SystemExit(main())
