@@ -387,10 +387,32 @@ class WarmNeMoDiarizer:
         return l2_normalize(emb.squeeze(0).detach().cpu().numpy())
 
     def run_diarization(self, wav_16k_path: Path, out_rttm_path: Path, is_short: bool = False) -> str:
-        """Runs NeMo MSDD (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
+        """Runs NeMo MSDD / ClusteringDiarizer (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
         import torch
         from omegaconf import OmegaConf
-        from nemo.collections.asr.models.msdd_models import NeuralDiarizer
+
+        # Handle backward/forward-compatible NeMo diarizer imports across NeMo versions
+        DiarizerClass = None
+        for mod_path, cls_name in [
+            ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
+            ("nemo.collections.asr.models.clustering_diarizer", "NeuralDiarizer"),
+            ("nemo.collections.asr.models", "ClusteringDiarizer"),
+            ("nemo.collections.asr.models", "NeuralDiarizer"),
+            ("nemo.collections.asr.models.msdd_models", "NeuralDiarizer"),
+            ("nemo.collections.asr.parts.submodules.neural_diarizer", "NeuralDiarizer"),
+        ]:
+            try:
+                mod = __import__(mod_path, fromlist=[cls_name])
+                DiarizerClass = getattr(mod, cls_name)
+                break
+            except (ImportError, AttributeError):
+                continue
+
+        if DiarizerClass is None:
+            raise ImportError(
+                "Could not locate NeuralDiarizer or ClusteringDiarizer in nemo.collections.asr. "
+                "Ensure nemo_toolkit[asr] is installed."
+            )
 
         with tempfile.TemporaryDirectory(prefix="yt_spx_msdd_") as tmp_dir:
             tmp_p = Path(tmp_dir)
@@ -473,7 +495,7 @@ class WarmNeMoDiarizer:
                 },
             })
 
-            msdd = NeuralDiarizer(cfg=cfg).to(cfg.device)
+            msdd = DiarizerClass(cfg=cfg).to(cfg.device)
             msdd.diarize()
             del msdd
             if torch.cuda.is_available():
