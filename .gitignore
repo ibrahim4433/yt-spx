@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment & Virtualenvs
+.env
+.venv
+venv/
+env/
+ENV/
+
+# Large archives & temporary data
+yt-ch.zip
+*.zip
+*.tar.gz
+*.rar
+
+# YouTube Cookies & Credentials
+cookies.txt
+
+# Heavy Subtitle Source Data (kept securely on Google Drive)
+Downloads/
+downloads/
+
+# Large/Runtime Databases & Extraction Checkpoints (kept on Google Drive)
+data/*.db
+data/*.sqlite*
+data/extracted_qa.jsonl
+data/extraction_checkpoint.json
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.system_generated/
+/data-20261031T140241Z-1-001
+/.impeccable
+data/extraction_live.log

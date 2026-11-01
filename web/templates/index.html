@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dawah Dialectics — Applied Islamic Apologetics &amp; Street Debate Corpus</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='9' fill='%230F523E'/%3E%3Cpath d='M20 5.5 24.2 11.8 31.5 11.8 31.5 19.1 36 23.3 31.5 27.5 31.5 31.5 24.2 31.5 20 35.5 15.8 31.5 8.5 31.5 8.5 27.5 4 23.3 8.5 19.1 8.5 11.8 15.8 11.8Z' fill='none' stroke='%23E5C158' stroke-width='1.5' stroke-opacity='0.55'/%3E%3Cpath d='M12 15.5c2.6 0 5.4.8 8 2.4 2.6-1.6 5.4-2.4 8-2.4v11.2c-2.6 0-5.4.7-8 2.2-2.6-1.5-5.4-2.2-8-2.2V15.5Z' fill='%23FFFFFF' fill-opacity='0.14' stroke='%23FFFFFF' stroke-width='1.75' stroke-linejoin='round'/%3E%3Cpath d='M20 17.9v11' stroke='%23E5C158' stroke-width='1.75' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Chivo+Mono:wght@500;600;700&family=Noto+Naskh+Arabic:wght@400;500;600;700&family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css?v=4">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Persistent Left Architectural Facet Rail -->
+    <aside class="facet-rail" id="facet-rail" aria-label="Corpus Filters">
+      <div class="rail-brand">
+        <div class="brand-row">
+          <div class="brand-logo-mark" aria-hidden="true">
+            <svg width="38" height="38" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="40" height="40" rx="9" fill="#0F523E"/>
+              <rect x="1" y="1" width="38" height="38" rx="8" stroke="#FFFFFF" stroke-opacity="0.16"/>
+              <!-- 8-Pointed Rub el Hizb Dialectical Geometry -->
+              <rect x="10.5" y="10.5" width="19" height="19" rx="1.5" stroke="#E5C158" stroke-width="1.35" stroke-opacity="0.7"/>
+              <rect x="10.5" y="10.5" width="19" height="19" rx="1.5" transform="rotate(45 20 20)" stroke="#E5C158" stroke-width="1.35" stroke-opacity="0.7"/>
+              <!-- Open Codex & Pillar of Proof -->
+              <path d="M13 15.5C15.4 15.5 17.8 16.2 20 17.6C22.2 16.2 24.6 15.5 27 15.5V25.2C24.6 25.2 22.2 25.8 20 27.1C17.8 25.8 15.4 25.2 13 25.2V15.5Z" fill="#0F523E" stroke="#FFFFFF" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M20 17.6V27.1" stroke="#E5C158" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="brand-titles">
+            <h1 id="nav-title">Dawah Dialectics</h1>
+            <p id="nav-subtitle">جدليات الدعوة الإسلامية</p>
+          </div>
+          <button type="button" class="mobile-rail-close" id="mobile-rail-close" onclick="toggleMobileRail(false)" aria-label="Close filters">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Minimized Beta Corpus Extraction Strip -->
+      <button type="button" class="beta-ledger-mini" onclick="switchTab('stats-tab')" title="View Corpus &amp; Beta Extraction Ledger">
+        <div class="beta-ledger-top">
+          <span class="beta-status-dot" aria-hidden="true"></span>
+          <span id="beta-badge-label" class="beta-status-text">BETA CORPUS</span>
+          <span id="beta-ratio-num" class="beta-ratio-num">607 / 2,348 (26%)</span>
+        </div>
+        <div class="beta-progress-track" role="progressbar" aria-valuenow="26" aria-valuemin="0" aria-valuemax="100" aria-label="Corpus extraction progress">
+          <div class="beta-progress-fill" id="beta-progress-fill"></div>
+        </div>
+      </button>
+
+      <!-- Facet Group 1: Theological Pillars -->
+      <div class="facet-section">
+        <div class="facet-header-bar">
+          <span id="filter-topic-label" class="facet-group-label">Theological Pillars</span>
+          <button type="button" id="reset-filters-btn" class="reset-link" onclick="resetAllFilters()">Reset</button>
+        </div>
+        <div id="category-pills" class="facet-list" role="listbox" aria-label="Topic categories">
+          <!-- Populated dynamically with live counts from /api/categories -->
+        </div>
+      </div>
+
+      <!-- Facet Group 2: Interlocutor Archetype (with split divider line above) -->
+      <div class="facet-section facet-section-divider">
+        <div class="facet-header-bar">
+          <span id="filter-interlocutor-label" class="facet-group-label">Interlocutor Archetype</span>
+        </div>
+        <div id="interlocutor-pills" class="facet-list" role="listbox" aria-label="Interlocutor archetypes">
+          <!-- Populated dynamically with live counts from /api/interlocutors -->
+        </div>
+      </div>
+
+      <div class="rail-footer">
+        <p id="footer-text">Grounded in deductive reason, textual verification, and timestamped street dialogues.</p>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Column -->
+    <div class="workspace-main">
+      <!-- Two-Bar Header Architecture:
+           Bar 1 (topbar-primary) = Search + Language Toggle (on both PC and Mobile)
+           Bar 2 (topbar-secondary) = Navigation Menus (under Bar 1 on PC, fixed Bottom Bar on Mobile) -->
+      <header class="topbar-stack">
+        <!-- BAR 1: Search + Language Toggle -->
+        <div class="topbar-primary">
+          <button type="button" class="mobile-filter-trigger" id="mobile-filter-btn" onclick="toggleMobileRail(true)" aria-label="Open filters">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+            <span id="mobile-filter-label" class="filter-btn-text">Filters</span>
+          </button>
+
+          <!-- Global Instant Search Box (Single clean clear button, no duplicate X, no / badge) -->
+          <div class="global-search-box" role="search">
+            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input
+              type="text"
+              role="searchbox"
+              id="search-input"
+              placeholder="Search 607 doubts, premises, fallacies (EN / العربية)..."
+              autocomplete="off"
+               spellcheck="false"
+              oninput="handleSearchInput()"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();performSearch(true);}"
+              aria-label="Search dialectical archive"
+            >
+            <button type="button" id="clear-search-btn" class="clear-search-btn" onclick="clearSearchInput()" hidden aria-label="Clear search">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+
+          <!-- 3-Way Segmented Language & Parallel Mode Switcher (Compact on PC, Mini beside search on Mobile) -->
+          <div class="lang-segmented" role="group" aria-label="Language and reading mode">
+            <button type="button" class="lang-seg-btn" id="mode-btn-en" onclick="setLanguageMode('en', false)" title="English">
+              <span>EN</span>
+            </button>
+            <button type="button" class="lang-seg-btn" id="mode-btn-ar" onclick="setLanguageMode('ar', false)" title="العربية">
+              <span class="ar-font lang-label-full">العربية</span>
+              <span class="ar-font lang-label-mini">ع</span>
+            </button>
+            <button type="button" class="lang-seg-btn active" id="mode-btn-parallel" onclick="setLanguageMode(null, true)" title="Side-by-side English &amp; Arabic parallel reading">
+              <span class="lang-label-full">EN ⇄ <span class="ar-font">عربي</span></span>
+              <span class="lang-label-mini">EN⇄<span class="ar-font">ع</span></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- BAR 2: Navigation Menus (Under Bar 1 on PC; Fixed Bottom Bar on Mobile) -->
+        <nav class="topbar-secondary" aria-label="Primary Views">
+          <div class="surface-nav">
+            <button type="button" class="tab-btn active" data-tab="search-tab" onclick="switchTab('search-tab')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+              <span id="tab-search-label">Claim &amp; Proof Archive</span>
+              <span class="nav-count-badge" id="nav-qa-count">607</span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="chat-tab" onclick="switchTab('chat-tab')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="m9 10 2 2 4-4"/></svg>
+              <span id="tab-chat-label">Smart Dialectical Assistant</span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="stats-tab" onclick="switchTab('stats-tab')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-3"/></svg>
+              <span id="tab-stats-label">Corpus &amp; Beta Ledger</span>
+            </button>
+          </div>
+        </nav>
+      </header>
+
+      <!-- Main View Panes -->
+      <main class="main-content">
+        <!-- VIEW 1: Claim & Proof Dossier Archive -->
+        <section id="search-tab" class="tab-pane active" aria-labelledby="search-heading">
+          <!-- Workspace Subheader & Active Filter Controls -->
+          <div class="archive-toolbar">
+            <div class="archive-intro">
+              <h2 id="search-heading">Claim &amp; Proof Dialectical Dossier</h2>
+              <p id="search-subheading">Every theological doubt paired directly with its exposed fallacy, Socratic counter-question, deductive syllogism, and timestamped street-debate evidence.</p>
+            </div>
+
+            <div class="archive-controls-bar">
+              <div class="active-filters-summary">
+                <span id="results-count-text" class="results-counter">Showing 1–20 of 607 dialectical units</span>
+                <div id="active-filter-chips" class="active-filter-chips"></div>
+              </div>
+
+              <div class="sort-and-view-controls">
+                <label for="sort-select" id="sort-label" class="control-label">Order:</label>
+                <select id="sort-select" class="architectural-select" onchange="handleSortChange()">
+                  <option value="default" id="sort-opt-default">Corpus Index (QA-001 → QA-607)</option>
+                  <option value="timestamp_asc" id="sort-opt-time-asc">Debate Timestamp (Earliest)</option>
+                  <option value="timestamp_desc" id="sort-opt-time-desc">Debate Timestamp (Deepest)</option>
+                  <option value="category" id="sort-opt-cat">Theological Pillar</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dossier Cards Stream -->
+          <div id="qa-cards-container" class="dossier-stream">
+            <!-- Rendered dynamically by app.js -->
+          </div>
+
+          <!-- Pagination & Load More Footer -->
+          <div id="pagination-bar" class="pagination-bar" hidden>
+            <div class="pagination-status" id="pagination-status-text">Loaded 20 of 607 units</div>
+            <div class="pagination-actions">
+              <button type="button" id="load-more-btn" class="btn-primary-emerald" onclick="loadMoreResults()">
+                <span id="load-more-label">Load Next 20 Dossiers</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 2: Smart Dialectical Assistant -->
+        <section id="chat-tab" class="tab-pane" aria-labelledby="assistant-title">
+          <div class="assistant-workbench">
+            <!-- Left Panel: Inquiry Starters & Method Guide -->
+            <div class="assistant-sidebar">
+              <div class="assistant-sidebar-box">
+                <h2 id="assistant-title">Smart Dialectical Assistant</h2>
+                <p id="assistant-desc">Zero-LLM deterministic reasoning engine: retrieves verified syllogisms, exposed fallacies, analogies, Socratic counter-questions, and exact YouTube debate timestamps with zero hallucination.</p>
+              </div>
+
+              <div class="assistant-starters-box">
+                <div class="starter-header">
+                  <span id="chip-hint">Common Objections &amp; Doubts</span>
+                </div>
+                <div id="prompt-chips-container" class="starter-chips-list">
+                  <!-- Rendered dynamically by app.js -->
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Panel: Interactive Dialogue Stream -->
+            <div class="chat-container">
+              <div id="chat-messages" class="chat-messages-box" aria-live="polite">
+                <div class="message assistant-msg welcome-msg">
+                  <div class="msg-content">
+                    <div class="bot-msg-header">
+                      <span class="bot-badge">DIALECTICAL ENGINE READY • 607 UNITS INDEXED</span>
+                    </div>
+                    <p id="welcome-text">
+                      Ask any theological objection, philosophical doubt, or inquiry about Islam in English or Arabic. The engine will decompose the objection into its exposed fallacy, Socratic counter-question, numbered deductive premises, concrete analogy, and exact video timestamp.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <form class="chat-input-bar" onsubmit="event.preventDefault(); sendChatMessage();">
+                <input
+                  type="text"
+                  id="chat-input"
+                  placeholder="Type a question or objection in English or Arabic (e.g., 'Who created God?', 'من خلق الله؟')..."
+                  autocomplete="off"
+                  aria-label="Ask the Smart Dialectical Assistant"
+                >
+                <button type="submit" id="chat-send-btn" class="btn-primary-emerald">
+                  <span id="send-label">Analyze Objection</span>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </button>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 3: Corpus Metadata & Beta Extraction Ledger -->
+        <section id="stats-tab" class="tab-pane" aria-labelledby="stats-title">
+          <div class="corpus-ledger-view">
+            <div class="ledger-header-sheet">
+              <div class="ledger-header-main">
+                <h2 id="stats-title">Corpus Metadata &amp; Beta Extraction Ledger</h2>
+                <p id="stats-subtitle">Complete methodological transparency: tracking 2,348 cataloged SCDawah Arabic street-debate transcripts (~5.95M spoken words) through automated dialectical distillation.</p>
+              </div>
+              <div class="ledger-summary-strip">
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-qa">607</span>
+                  <span class="datum-label" id="stat-qa-label">Extracted Q&amp;A Dossiers</span>
+                </div>
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-videos">2,348</span>
+                  <span class="datum-label" id="stat-videos-label">Cataloged Debate Videos</span>
+                </div>
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-words">5,955,997</span>
+                  <span class="datum-label" id="stat-words-label">Spoken Words Preserved</span>
+                </div>
+                <div class="ledger-datum">
+                  <span class="datum-value" id="stat-pillars">10</span>
+                  <span class="datum-label" id="stat-pillars-label">Theological Pillars Indexed</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="ledger-tables-grid">
+              <!-- Table 1: Breakdown by Theological Pillar -->
+              <div class="ledger-table-sheet">
+                <h3 id="ledger-cat-heading">Distribution by Theological Pillar</h3>
+                <p id="ledger-cat-sub" class="sheet-sub">Click any pillar row to filter the Claim &amp; Proof Archive directly.</p>
+                <div id="stats-categories-table" class="architectural-bars-list">
+                  <!-- Populated dynamically by app.js -->
+                </div>
+              </div>
+
+              <!-- Table 2: Breakdown by Interlocutor Archetype & Colab Pipeline -->
+              <div class="ledger-side-stack">
+                <div class="ledger-table-sheet">
+                  <h3 id="ledger-inter-heading">Distribution by Interlocutor Archetype</h3>
+                  <p id="ledger-inter-sub" class="sheet-sub">Real street-debate interlocutor profiles across extracted units.</p>
+                  <div id="stats-interlocutors-table" class="architectural-bars-list">
+                    <!-- Populated dynamically by app.js -->
+                  </div>
+                </div>
+
+                <div class="colab-pipeline-sheet">
+                  <h3 id="colab-title">Open-Source Google Colab Extraction Pipeline</h3>
+                  <p id="colab-desc">
+                    This repository is in active Beta extraction. Run checkpointed batch distillation across all 2,348 subtitle files using <code>dawah_knowledge_extractor_colab.ipynb</code> or <code>run_colab_all_in_one.py</code> with zero data loss.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Toast Notification for Copy Actions -->
+  <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>Copied to clipboard</div>
+
+  <script src="/static/js/app.js?v=4"></script>
+</body>
+</html>
