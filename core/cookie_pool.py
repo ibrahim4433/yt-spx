@@ -156,17 +156,33 @@ class CookiePool:
     # Discovery & registry
     # ------------------------------------------------------------------
     def discover(self) -> List[Path]:
-        dirs = [self.ws.root / "cookies", self.ws.data_dir / "cookies"]
-        singles = [self.ws.root / "cookies.txt", self.ws.data_dir / "cookies.txt"]
+        dirs = [
+            self.ws.root / "cookies",
+            self.ws.root / "Cookies",
+            self.ws.data_dir / "cookies",
+        ]
+        if self.ws.is_drive and self.ws.root.parent.exists():
+            dirs.extend([
+                self.ws.root.parent / "cookies",
+                self.ws.root.parent / "Cookies",
+            ])
+        singles = [
+            self.ws.root / "cookies.txt",
+            self.ws.data_dir / "cookies.txt",
+        ]
         if self.include_repo_dir:
             dirs.append(BASE_DIR / "cookies")
+            dirs.append(BASE_DIR / "Cookies")
             singles.append(BASE_DIR / "cookies.txt")
+
         found: List[Path] = []
         seen = set()
 
         def _add(p: Path) -> None:
             try:
-                if not p.is_file() or p.stat().st_size <= 32:
+                if not p.is_file():
+                    return
+                if p.stat().st_size < 10:
                     return
                 key = str(p.resolve())
             except OSError:
@@ -177,10 +193,18 @@ class CookiePool:
 
         for d in dirs:
             if d.is_dir():
-                for p in sorted(d.glob("*.txt")):
-                    _add(p)
+                try:
+                    for p in sorted(d.iterdir()):
+                        if p.is_file() and not p.name.startswith("."):
+                            name_lower = p.name.lower()
+                            if name_lower.endswith((".txt", ".cookie", ".cookies")) or "cookie" in name_lower:
+                                _add(p)
+                except OSError:
+                    pass
+
         for s in singles:
             _add(s)
+
         return found
 
     def cookie_key(self, path: Path) -> str:
@@ -296,9 +320,32 @@ class CookiePool:
     def print_summary(self, indent: str = "   -> ") -> None:
         rows = self.status_report()
         if not rows:
+            target_dir = self.ws.root / "cookies"
+            diag_notes = []
+            if target_dir.is_dir():
+                try:
+                    entries = [e for e in target_dir.iterdir() if not e.name.startswith(".")]
+                    if entries:
+                        diag_notes.append(f"Folder exists ({target_dir}) with {len(entries)} item(s): {[e.name for e in entries]}")
+                        for e in entries:
+                            if e.is_file():
+                                _, r = validate_cookie_file_offline(e)
+                                diag_notes.append(f"  - {e.name} ({e.stat().st_size} bytes): {r}")
+                    else:
+                        diag_notes.append(
+                            f"Folder exists on Drive ({target_dir}) but is currently reported as empty by Colab's Drive FUSE cache."
+                        )
+                except Exception as exc:
+                    diag_notes.append(f"Could not read {target_dir}: {exc}")
+            else:
+                diag_notes.append(f"Folder {target_dir} is not yet visible on Drive.")
+
+            print(f"{indent}Cookies pool        : none found.")
+            for note in diag_notes:
+                print(f"{indent}   {note}")
             print(
-                f"{indent}Cookies pool        : none found. Put one Netscape cookies file per Google account in "
-                f"{self.ws.root / 'cookies'}/ (e.g. acct1.txt, acct2.txt)."
+                f"{indent}   [Tip] In Colab's left sidebar file manager (folder icon), expand 'drive/MyDrive/yt-spx/cookies/' "
+                "or drag & drop cookies into '/content/yt-spx/cookies/' for instant zero-sync-delay detection."
             )
             return
         n_ok = sum(1 for r in rows if r["usable"])
