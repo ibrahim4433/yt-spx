@@ -24,17 +24,17 @@ TRANSCRIPT STRUCTURE:
 - [OVERLAP]: Simultaneous speech separated so both speakers' exact words are preserved.
 
 PRIMARY AUDIENCE & CORE PURPOSE:
-This website will be searched by real human beings: sincere seekers of truth, non-Muslims with tough questions or misleading ideas, skeptics, and Muslims confused by viral anti-Islamic claims.
-When a person enters the website with a doubt or misconception, they will search for that question to find the authentic, convincing Islamic truth that satisfies their mind, touches their heart, refutes the false claims, and guides them toward Islam.
+This DATA OUTPUT will be searched by real human beings inside a website : sincere seekers of truth, non-Muslims with tough questions or misleading ideas, skeptics, and Muslims confused by viral anti-Islamic claims ....
+When a person enters the website with a doubt or misconception, they will search for that question to find the authentic, convincing Islamic truth that satisfies their mind, touches their heart, refutes the false claims, and guides them toward Islam using the language of Logic, reason, and thinking based on logical and trustworthy sequence.
 
 CRITICAL RULE 1: PERSPECTIVE OF THE QUESTION (صياغة السؤال من وجهة نظر السائل أو صاحب الشبهة)
 - The question ("question_en", "question_ar") MUST ALWAYS be formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
-- It represents the FALSE CLAIM, OBJECTION, or MISCONCEPTION they bring to the table (e.g. "Isn't Jesus God in the flesh according to the Bible?", "Why does God allow innocent children to suffer?", "If everything needs a creator, who created God?").
+- It represents the FALSE CLAIM, OBJECTION, QUESTION or MISCONCEPTION they bring to the table (e.g. "Isn't Jesus God in the flesh according to the Bible?", "Why does God allow innocent children to suffer?", "If everything needs a creator, who created God?").
 - DO NOT put the Da'ee's counter-question as the card title! (e.g. "If Jesus is God, why doesn't he know the hour?" is the DA'EE'S counter-question, which belongs in `socratic_question`, NOT in `question_en`).
 
 CRITICAL RULE 2: DIRECT CONVINCING TRUTH (الجواب المقنع المبرهن الشافي - حظر السرد الصحفي الميتا)
 - DO NOT write narrative summaries of the conversation: "The Da'ee counters by citing...", "Hashim questions...", "The speaker explains that...".
-- WRITE THE ACTUAL, CONVINCING INTELLECTUAL AND SCRIPTURAL TRUTH DIRECTLY: Expose the false assumption, state the Islamic rational principle, cite the decisive proof, and explain the theological wisdom. A seeker reading the card must understand why Islam is the only rational, uncorrupted truth.
+- WRITE THE ACTUAL, CONVINCING INTELLECTUAL AND SCRIPTURAL TRUTH DIRECTLY: Expose the false assumption, state the Islamic rational principle, cite the decisive proof, and explain the theological wisdom. A seeker reading the card must understand why Islam is the only rational, uncorrupted truth...
 
 CRITICAL RULE 3: ZERO CONVERSATIONAL NOISE (حظر الحشو والتفاهات اللفظية)
 - NEVER extract rhetorical interjections, fragments, or passing conversational filler (e.g., NEVER extract "Let her be?", "What did you say?", "Excuse me?", "Are you listening?").
@@ -45,11 +45,11 @@ EXACT JSON OUTPUT SCHEMA (Array of Objects):
   {
     "question_turn_id": "Exact Turn ID where the interlocutor raised the point (e.g. 'YC86BQwvHyk_T0014')",
     "answer_turn_id": "Exact Turn ID where the Da'ee began the core response (e.g. 'YC86BQwvHyk_T0015')",
-    "question_en": "The exact question, misconception, or false claim as a seeker/interlocutor would ask or search it in English (ends with '?')",
-    "question_ar": "صياغة الشبهة أو السؤال أو الزعم كما يطرحه المحاور أو الباحث عن الحقيقة بالعربية الفصحى (تنتهي بـ '؟')",
-    "topic_category": "One of: [Theology & God's Existence, Comparative Religion & Christianity, Problem of Evil & Suffering, Objective Morality & Ethics, Epistemology & Science, Prophethood & Quran, Shariah & Social Inquiries]",
-    "topic_subcategory": "Specific subtopic (e.g. Divinity of Christ, Divine Justice, First Cause, Textual Preservation, Moral Ontology)",
-    "interlocutor_type": "One of: [Atheist / Materialist, Christian / Trinitarian, Agnostic / Skeptic, Secular Humanist, Inquiring Seeker, Muslim with Doubts]",
+    "question_en": "The exact question, misconception, or false claim as a seeker/interlocutor would ask or search it in English",
+    "question_ar": "صياغة الشبهة أو السؤال أو الزعم كما يطرحه المحاور أو الباحث عن الحقيقة بالعربية الفصحى",
+    "topic_category": "One of: [Theology & God's Existence, Comparative Religion & Christianity, Problem of Evil & Suffering, Objective Morality & Ethics, Epistemology & Science, Prophethood & Quran, Shariah & Social Inquiries, .....]",
+    "topic_subcategory": "Specific subtopic (e.g. Divinity of Christ, Divine Justice, First Cause, Textual Preservation, Moral Ontology, ....)",
+    "interlocutor_type": "One of: [Atheist / Materialist, Christian / Trinitarian, Agnostic / Skeptic, Secular Humanist, Inquiring Seeker, Muslim with Doubts , ....]",
     "core_answer_summary_en": "Direct, authoritative, convincing Islamic refutation and explanation in English (NO 'The Da'ee said' narrative). State the truth that dissolves the doubt.",
     "core_answer_summary_ar": "بيان برهاني حاسم ومحرر بالعربية الفصحى يقرر أصل العقيدة والرد المقنع الشافي (ممنوع تماماً الصياغات السردية مثل 'يرد الداعية بكذا')",
     "logical_premises": [
@@ -83,7 +83,7 @@ EXACT JSON OUTPUT SCHEMA (Array of Objects):
     ],
     "timestamp_seconds": 120,
     "timestamp_formatted": "02:00",
-    "tags": ["Tag1", "Tag2", "Tag3"]
+    "tags": ["Tag1", "Tag2", "Tag3" , ...]
   }
 ]
 
