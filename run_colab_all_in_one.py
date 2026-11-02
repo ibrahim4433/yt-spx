@@ -12,12 +12,13 @@ Features:
      micro-step resume, anti-ban YouTube pacing, and multi-account Drive lock coordination.
 """
 
+from __future__ import annotations
 import os
 import sys
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Any, Dict, Tuple
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ["USE_TF"] = "0"
