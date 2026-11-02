@@ -118,7 +118,8 @@ def fetch_video_audio_m1(
         base_cmd = [
             "yt-dlp",
             "--no-playlist",
-            "--format", "bestaudio[ext=m4a][abr<=160]/bestaudio[ext=opus][abr<=160]/bestaudio/best",
+            "--format", "ba/b/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
+            "--extractor-args", "youtube:player_client=android,web,ios",
             "--write-info-json",
             "--no-write-subs",
             "--no-progress",
@@ -128,7 +129,7 @@ def fetch_video_audio_m1(
             "-o", out_tmpl,
         ]
 
-        # Detect available JS runtimes (Deno preferred in Colab for PO token / n-challenge)
+        # Detect available JS runtimes (Deno & Node in Colab)
         runtimes = []
         if shutil.which("deno"):
             runtimes.append("deno")
@@ -161,7 +162,7 @@ def fetch_video_audio_m1(
         success = False
         for idx, cookie in enumerate(attempts):
             if idx > 0:
-                time.sleep(random.uniform(6.0, 14.0))
+                time.sleep(random.uniform(4.0, 8.0))
             # Clean partial files from any previous failed attempt
             for f in tmp_dir.iterdir():
                 if f.is_file():
@@ -205,16 +206,26 @@ def fetch_video_audio_m1(
                 success = True
                 break
 
-            if kind in ("invalid", "challenged", "rate_limited", "age_gate"):
-                last_kind = kind
-                if cookie is not None and kind != "age_gate":
-                    pool.mark_failed(cookie, kind, last_tail)
-                    print(f"    [cookies] {cookie_label} failed ({kind}) -> quarantined, rotating to next cookie.", flush=True)
-                continue
-
             for pat in UNAVAILABLE_VIDEO_PATTERNS:
                 if re.search(pat, output_lower):
                     raise PermanentVideoUnavailableError(f"Video {vid} is permanently unavailable on YouTube.")
+
+            # If this attempt failed while using a cookie, quarantine/record it and ROTATE!
+            if cookie is not None:
+                fail_kind = kind or "format_or_access_restricted"
+                last_kind = fail_kind
+                if fail_kind != "age_gate":
+                    pool.mark_failed(cookie, fail_kind, last_tail)
+                    print(f"    [cookies] {cookie_label} failed ({fail_kind}) -> quarantined, rotating to next attempt.", flush=True)
+                continue
+
+            # If anonymous attempt failed but there are remaining attempts
+            if idx + 1 < len(attempts):
+                continue
+
+            if kind in ("invalid", "challenged", "rate_limited", "age_gate"):
+                last_kind = kind
+                break
 
             raise RuntimeError(f"yt-dlp exited with code {proc.returncode}: {output[-300:].strip()}")
 

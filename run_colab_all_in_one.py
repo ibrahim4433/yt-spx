@@ -92,31 +92,15 @@ def _ensure_deno_runtime() -> None:
 
 def _get_pip_cache_args() -> List[str]:
     """
-    Returns pip arguments pointing to /content/drive/MyDrive/yt-spx/pip_cache
-    so downloaded & built wheels (ctc-forced-aligner, nemo_toolkit) are cached on 5TB Drive
-    and indexed strictly by Python ABI & version constraints.
+    Uses local fast NVMe disk for pip cache (/tmp/.pip_cache) so downloads & builds
+    run at native datacenter speed (~100 MB/s) instead of throttling over Google Drive FUSE.
     """
-    from core.drive_sync import SharedWorkspace
-
-    ws = SharedWorkspace()
-    if not ws.is_drive:
-        return []
-    cache_dir = ws.root / "pip_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Purge any stale flat wheels from legacy runs (e.g. numpy-1.x, ml_dtypes-0.4.x, nemo_toolkit-3.x)
-    legacy_wheels_dir = cache_dir / "wheels"
-    if legacy_wheels_dir.exists():
-        for bad_glob in ("numpy-1.*.whl", "ml_dtypes-0.4*.whl", "nemo_toolkit-3.*.whl", "scipy-1.1[0-4]*.whl"):
-            for stale_whl in legacy_wheels_dir.glob(bad_glob):
-                try:
-                    stale_whl.unlink()
-                except OSError:
-                    pass
-
+    local_cache = Path("/tmp/.pip_cache")
+    local_cache.mkdir(parents=True, exist_ok=True)
     return [
-        f"--cache-dir={cache_dir}",
+        f"--cache-dir={local_cache}",
         "--prefer-binary",
+        "--no-warn-conflicts",
     ]
 
 
@@ -187,25 +171,20 @@ def _purge_conflicting_tensorflow() -> None:
 
 
 def ensure_stage1_dependencies(constraints_path: Path) -> None:
-    marker = Path("/tmp/.yt_spx_stage1_deps_ok")
     # Ensure conflicting standalone nvidia-cudnn-cu12 is removed so PyTorch uses its bundled cuDNN (9.19.0)
     try:
         import importlib.util as u
         if u.find_spec("nvidia.cudnn") is not None:
             subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "nvidia-cudnn-cu12"], check=False)
-            marker.unlink(missing_ok=True)
     except Exception:
         pass
 
     _purge_conflicting_tensorflow()
 
-    if marker.exists():
-        if _verify_stage1_runtime_health():
-            print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
-            _ensure_deno_runtime()
-            return
-        print("   -> Detected stale or mismatched runtime packages; repairing automatically...")
-        marker.unlink(missing_ok=True)
+    if _verify_stage1_runtime_health():
+        print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
+        _ensure_deno_runtime()
+        return
 
     _ensure_deno_runtime()
 
@@ -230,7 +209,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "nvidia-cuda-runtime-cu12",
         # NOTE: nvidia-cudnn-cu12 is deliberately omitted — PyTorch bundles its own matched cuDNN
     ]
-    print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on 5TB Drive)...")
+    print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on fast local SSD)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
 
     if not _nemo_2x_installed():
@@ -270,16 +249,26 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     if abi_check.returncode != 0:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-U", "ml-dtypes>=0.5.4"] + pip_cache)
 
-    marker.write_text("ok", encoding="utf-8")
+
+def _verify_stage2_runtime_health() -> bool:
+    try:
+        from core.colab_runner import ensure_cuda_runtime_loaded
+        ensure_cuda_runtime_loaded()
+        import llama_cpp
+        if not llama_cpp.llama_supports_gpu_offload():
+            return False
+        import transformers, accelerate, bitsandbytes
+        return True
+    except Exception:
+        return False
 
 
 def ensure_stage2_dependencies(constraints_path: Path) -> None:
-    marker = Path("/tmp/.yt_spx_stage2_deps_ok")
-    if marker.exists():
+    _purge_conflicting_tensorflow()
+
+    if _verify_stage2_runtime_health():
         print("   -> Stage 2 Local LLM dependencies already verified in this runtime.")
         return
-
-    _purge_conflicting_tensorflow()
 
     pip_cache = _get_pip_cache_args()
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
@@ -291,7 +280,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         "tqdm",
         "nvidia-cuda-runtime-cu12",
     ]
-    print("   -> Ensuring Stage 2 LLM core packages (cached on 5TB Drive)...")
+    print("   -> Ensuring Stage 2 LLM core packages (cached on fast local SSD)...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + llm_pkgs)
 
     def _test_llama_cpp() -> bool:
@@ -328,8 +317,6 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                 print(f"   -> Installed & verified llama-cpp-python ({cu_ver}) GPU wheel!")
                 break
 
-    marker.write_text("ok", encoding="utf-8")
-
 
 def _detect_requested_mode(argv: List[str]) -> str:
     for i, tok in enumerate(argv):
@@ -354,7 +341,7 @@ def main() -> int:
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)
-        if mode in ("auto", "stage2", "stage2-worker"):
+        if mode in ("stage2", "stage2-worker"):
             ensure_stage2_dependencies(constraints_path)
     else:
         print(f"\n[2/3] Lightweight mode '{mode}' — skipping heavy GPU wheel checks.")

@@ -53,6 +53,8 @@ COOKIE_INVALID_PATTERNS = [
 COOKIE_CHALLENGED_PATTERNS = [
     r"sign in to confirm you.?re not a bot",
     r"use --cookies-from-browser or --cookies for the authentication",
+    r"only images are available for download",
+    r"requested format is not available",
 ]
 RATE_LIMIT_PATTERNS = [
     r"http error 429",
