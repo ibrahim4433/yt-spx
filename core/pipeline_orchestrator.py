@@ -501,10 +501,18 @@ def print_status_report(workspace: SharedWorkspace) -> None:
     print("=" * 74 + "\n")
 
 
+def _resolve_runner_script() -> str:
+    """Returns run_colab_all_in_one.py if available so worker subprocesses run verified environments."""
+    all_in_one = BASE_DIR / "run_colab_all_in_one.py"
+    if all_in_one.exists():
+        return str(all_in_one.resolve())
+    return str(Path(__file__).resolve())
+
+
 def _build_stage1_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]:
     cmd = [
         sys.executable,
-        str(Path(__file__).resolve()),
+        _resolve_runner_script(),
         "--mode", "stage1-worker",
         "--batch-videos", str(args.batch_videos),
         "--max-session-minutes", str(budget_min),
@@ -525,7 +533,7 @@ def _build_stage1_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]
 def _build_stage2_subcmd(args: argparse.Namespace, budget_min: int) -> List[str]:
     cmd = [
         sys.executable,
-        str(Path(__file__).resolve()),
+        _resolve_runner_script(),
         "--mode", "stage2-worker",
         "--stage2-batch-videos", str(args.stage2_batch_videos),
         "--max-session-minutes", str(budget_min),

@@ -264,8 +264,24 @@ class LocalGPUClient:
         if use_gguf_q5 and torch.cuda.is_available():
             try:
                 ensure_cuda_runtime_loaded()
-                from llama_cpp import Llama, llama_supports_gpu_offload
-                from huggingface_hub import hf_hub_download
+                try:
+                    from llama_cpp import Llama, llama_supports_gpu_offload
+                except ImportError:
+                    print("[+] Auto-installing pre-built CUDA wheel for llama-cpp-python...")
+                    import subprocess, sys
+                    for cu_ver in ["cu124", "cu122", "cu121"]:
+                        res = subprocess.run(
+                            [
+                                sys.executable, "-m", "pip", "install", "-q",
+                                "--prefer-binary", "llama-cpp-python",
+                                f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}",
+                            ],
+                            check=False,
+                        )
+                        if res.returncode == 0:
+                            ensure_cuda_runtime_loaded()
+                            break
+                    from llama_cpp import Llama, llama_supports_gpu_offload
 
                 if llama_supports_gpu_offload():
                     print(f"[+] Downloading/Loading 5-bit GGUF: {gguf_repo}/{gguf_filename} (~10.5 GB)...")
@@ -313,6 +329,13 @@ class LocalGPUClient:
         quant_config = None
         if load_in_4bit and torch.cuda.is_available():
             try:
+                import bitsandbytes
+            except ImportError:
+                print("[+] Auto-installing bitsandbytes for 4-bit GPU quantization...")
+                import subprocess, sys
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "bitsandbytes", "accelerate"], check=False)
+
+            try:
                 from transformers import BitsAndBytesConfig
 
                 quant_config = BitsAndBytesConfig(
@@ -321,8 +344,8 @@ class LocalGPUClient:
                     bnb_4bit_quant_type="nf4",
                     bnb_4bit_use_double_quant=True,
                 )
-            except ImportError:
-                print("[-] bitsandbytes not found, continuing without 4-bit quant.")
+            except Exception as bnb_err:
+                print(f"[-] bitsandbytes setup note ({bnb_err}); attempting 4-bit fallback...")
 
         model_kwargs: Dict[str, Any] = {
             "device_map": "auto",
@@ -355,7 +378,13 @@ class LocalGPUClient:
             tokenize=False,
             add_generation_prompt=True,
         )
-        inputs = self.tokenizer([text_input], return_tensors="pt").to(self.model.device)
+        max_prompt_len = max(1024, self.context_length - self.max_new_tokens - 64)
+        inputs = self.tokenizer(
+            [text_input],
+            return_tensors="pt",
+            max_length=max_prompt_len,
+            truncation=True,
+        ).to(self.model.device)
 
         eos_ids = [self.tokenizer.eos_token_id]
         for special_token in ["<|im_end|>", "<|endoftext|>"]:

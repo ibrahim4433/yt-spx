@@ -90,6 +90,39 @@ def classify_ytdlp_output(output_lower: str) -> str:
     return ""
 
 
+def sanitize_cookie_file(src_path: Path, dst_path: Path) -> None:
+    """
+    Standardizes Netscape header, ensures strict tab separation (repairs space-aligned exports),
+    and normalizes Unix line endings so yt-dlp never rejects valid cookies.
+    """
+    try:
+        text = src_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        shutil.copy2(src_path, dst_path)
+        return
+
+    lines = []
+    has_header = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "# Netscape" in line or "# HTTP Cookie" in line:
+            has_header = True
+            lines.append(line)
+            continue
+        if "\t" not in line and " " in line:
+            parts = re.split(r"\s+", line)
+            if len(parts) >= 7:
+                line = "\t".join(parts)
+        lines.append(line)
+
+    if not has_header:
+        lines.insert(0, "# Netscape HTTP Cookie File")
+
+    dst_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def validate_cookie_file_offline(path: Path) -> Tuple[bool, str]:
     """
     Zero-network sanity test of a Netscape cookies.txt:
@@ -114,7 +147,7 @@ def validate_cookie_file_offline(path: Path) -> Tuple[bool, str]:
             line = line[len("#HttpOnly_"):]
         elif line.startswith("#"):
             continue
-        parts = line.split("\t")
+        parts = line.split("\t") if "\t" in line else re.split(r"\s+", line)
         if len(parts) < 7:
             continue
         total_lines += 1
@@ -134,7 +167,7 @@ def validate_cookie_file_offline(path: Path) -> Tuple[bool, str]:
                 expired_auth.append(name)
 
     if total_lines == 0:
-        return False, "not a Netscape cookies.txt (no tab-separated cookie lines)"
+        return False, "not a Netscape cookies.txt (no cookie lines)"
     if yt_lines == 0:
         return False, "contains no youtube.com/google.com cookies"
     if not live_auth:
@@ -374,14 +407,15 @@ class CookiePool:
         tmp_dir = Path(tempfile.mkdtemp(prefix="yt_spx_cookie_test_"))
         try:
             jar = tmp_dir / "cookies_working.txt"
-            shutil.copy2(path, jar)
+            sanitize_cookie_file(path, jar)
             cmd = [
                 "yt-dlp",
                 "--simulate",
                 "--no-playlist",
                 "--no-progress",
                 "--print", "id",
-                "--format", "bestaudio/best",
+                "--format", "ba/b/bestaudio/best",
+                "--extractor-args", "youtube:player_client=android,web,ios",
                 "--cookies", str(jar),
             ]
             runtimes = [r for r in ("deno", "node") if shutil.which(r)]

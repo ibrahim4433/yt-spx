@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
-from core.cookie_pool import CookiePool, classify_ytdlp_output
+from core.cookie_pool import CookiePool, classify_ytdlp_output, sanitize_cookie_file
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -171,9 +171,9 @@ def fetch_video_audio_m1(
             cmd = list(base_cmd)
             cookie_label = "anonymous"
             if cookie is not None:
-                # Isolated working copy so yt-dlp never clobbers shared Drive cookies
+                # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
                 cookies_tmp = tmp_dir / "cookies_working.txt"
-                shutil.copy2(cookie, cookies_tmp)
+                sanitize_cookie_file(cookie, cookies_tmp)
                 cmd.extend(["--cookies", str(cookies_tmp)])
                 cookie_label = pool.cookie_key(cookie)
             cmd.append(url)

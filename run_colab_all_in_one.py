@@ -341,7 +341,7 @@ def main() -> int:
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)
-        if mode in ("stage2", "stage2-worker"):
+        if mode in ("auto", "stage2", "stage2-worker"):
             ensure_stage2_dependencies(constraints_path)
     else:
         print(f"\n[2/3] Lightweight mode '{mode}' — skipping heavy GPU wheel checks.")
