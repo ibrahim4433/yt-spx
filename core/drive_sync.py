@@ -226,6 +226,18 @@ class SharedWorkspace:
         self.atomic_write_json(self.state_path(video_id), state)
         return state
 
+    def reset_micro_step(self, video_id: str, target_step: str = "M0_QUEUED") -> Dict[str, Any]:
+        """Resets the micro-step state back (e.g. to M0_QUEUED) when corrupted/truncated artifacts are purged."""
+        state = self.get_video_state(video_id)
+        state["micro_step"] = target_step
+        state["step_rank"] = STEP_RANK.get(target_step, 0)
+        state["updated_at"] = time.time()
+        state["worker_id"] = self.worker_id
+        if "artifacts" in state:
+            state["artifacts"].clear()
+        self.atomic_write_json(self.state_path(video_id), state)
+        return state
+
     def update_substep_progress(self, video_id: str, key: str, progress_payload: Dict[str, Any]) -> None:
         """Saves granular mid-step progress (Demucs chunks, overlap windows, or LLM episodes)."""
         state = self.get_video_state(video_id)

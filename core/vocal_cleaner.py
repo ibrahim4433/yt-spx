@@ -265,6 +265,20 @@ def clean_vocals_m2(
     raw_samples, sr = read_wav_float32(raw_16k_wav)
     total_sec = len(raw_samples) / float(sr)
 
+    # Corrupt or truncated download detection (< 5.0s or severely under expected duration)
+    info_cached = workspace.read_json(workspace.audio_raw_dir / f"{video_id}.info.json", default={}) or {}
+    expected_dur = float(info_cached.get("duration") or 0.0)
+    if total_sec < 5.0 or (expected_dur >= 30.0 and total_sec < min(15.0, expected_dur * 0.3)):
+        raw_16k_wav.unlink(missing_ok=True)
+        if raw_audio_path and raw_audio_path.exists():
+            raw_audio_path.unlink(missing_ok=True)
+        (workspace.audio_raw_dir / f"{video_id}.info.json").unlink(missing_ok=True)
+        workspace.reset_micro_step(video_id, "M0_QUEUED")
+        raise RuntimeError(
+            f"Raw audio for {video_id} is incomplete/truncated (decoded {total_sec:.1f}s vs expected {expected_dur:.1f}s). "
+            "Purged corrupted raw file from Drive to trigger clean re-download."
+        )
+
     if enable_stemming and total_sec > 1.0:
         vid_stage_dir = workspace.staging_dir / video_id
         vid_stage_dir.mkdir(parents=True, exist_ok=True)

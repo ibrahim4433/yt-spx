@@ -526,6 +526,11 @@ class WarmNeMoDiarizer:
                     try:
                         msdd = DiarizerClass(cfg=cfg).to(cfg.device)
                         msdd.diarize()
+                    except ValueError as v_err:
+                        if "silence" in str(v_err).lower():
+                            print(f"    [!] NeMo VAD detected silence/non-speech in audio ({v_err}); continuing with empty RTTM.", flush=True)
+                        else:
+                            raise
                     finally:
                         torch.backends.cudnn.enabled = orig_cudnn
                 else:

@@ -60,8 +60,17 @@ def _find_cookies_source(workspace: SharedWorkspace) -> Optional[Path]:
 def find_existing_raw_audio(workspace: SharedWorkspace, video_id: str) -> Optional[Path]:
     """Returns existing complete raw audio file on Drive if already downloaded."""
     valid_exts = {".m4a", ".opus", ".webm", ".mp3", ".ogg", ".wav", ".aac", ".flac"}
+    info_cached = workspace.read_json(workspace.audio_raw_dir / f"{video_id}.info.json", default={}) or {}
+    expected_dur = float(info_cached.get("duration") or 0.0)
+
     for p in workspace.audio_raw_dir.glob(f"{video_id}.*"):
-        if p.suffix.lower() in valid_exts and p.stat().st_size > 10_000:
+        if p.suffix.lower() in valid_exts:
+            size = p.stat().st_size
+            if size < 50_000:
+                continue
+            # If duration is known and significant (>= 30s), ensure file has at least 2KB/sec of expected data
+            if expected_dur >= 30.0 and size < expected_dur * 2000:
+                continue
             return p
     return None
 
