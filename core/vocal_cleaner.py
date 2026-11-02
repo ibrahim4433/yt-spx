@@ -213,12 +213,19 @@ def ensure_local_leveled_16k_wav(
     """
     clean_opus = workspace.audio_clean_dir / f"{video_id}.opus"
     rms_file = workspace.audio_clean_dir / f"{video_id}_rms.json"
-    if not clean_opus.exists():
-        raise FileNotFoundError(f"Clean Opus archive missing for {video_id}: {clean_opus}")
+    if not clean_opus.exists() or clean_opus.stat().st_size <= 1024:
+        if clean_opus.exists():
+            clean_opus.unlink(missing_ok=True)
+        raise FileNotFoundError(f"Clean Opus archive missing or truncated for {video_id}: {clean_opus}")
 
     local_wav = local_tmp_dir / f"{video_id}_leveled_16k.wav"
     if not local_wav.exists():
-        decode_audio_to_16k_wav(clean_opus, local_wav)
+        try:
+            decode_audio_to_16k_wav(clean_opus, local_wav)
+        except subprocess.CalledProcessError as err:
+            logger.warning("Clean Opus archive for %s is corrupted. Removing corrupted file.", video_id)
+            clean_opus.unlink(missing_ok=True)
+            raise RuntimeError(f"Clean Opus archive for {video_id} was corrupted: {err}") from err
 
     rms_data = workspace.read_json(rms_file, default={}) or {}
     rms_timeline = rms_data.get("rms_db", [])
@@ -243,8 +250,11 @@ def clean_vocals_m2(
     state = workspace.get_video_state(video_id)
 
     # Fast-skip if M2 already completed on a previous Colab session!
-    if state["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"] and clean_opus.exists() and rms_json.exists():
-        return ensure_local_leveled_16k_wav(video_id, workspace, local_tmp_dir)
+    if state["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"] and clean_opus.exists() and clean_opus.stat().st_size > 1024 and rms_json.exists():
+        try:
+            return ensure_local_leveled_16k_wav(video_id, workspace, local_tmp_dir)
+        except Exception:
+            clean_opus.unlink(missing_ok=True)
 
     if raw_audio_path is None or not raw_audio_path.exists():
         raise FileNotFoundError(f"Raw audio required for M2 on {video_id}, but got {raw_audio_path}")

@@ -576,6 +576,8 @@ class WarmASRAlignmentEngine:
                     batch_size=max(4, self.batch_size // 2),
                 )
                 del wav_tensor
+                if hasattr(emissions, "cpu"):
+                    emissions = emissions.cpu()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -603,7 +605,10 @@ class WarmASRAlignmentEngine:
         try:
             self._ensure_punct()
             words_only = [w["word"] for w in mapped_words]
-            labeled = self._punct_model.predict(words_only, chunk_size=230)
+            try:
+                labeled = self._punct_model.predict(words_only, chunk_size=230)
+            except TypeError:
+                labeled = self._punct_model.predict(words_only)
             ending_puncts = ".?!"
             model_puncts = ".,;:!?"
             is_acronym = lambda s: bool(re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", s))

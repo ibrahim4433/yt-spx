@@ -84,6 +84,8 @@ def fetch_video_audio_m1(
 
     # Fast-skip 1: Already past M2 and clean Opus exists on Drive -> no download ever needed!
     clean_opus = workspace.audio_clean_dir / f"{vid}.opus"
+    if clean_opus.exists() and clean_opus.stat().st_size <= 1024:
+        clean_opus.unlink(missing_ok=True)
     if state["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"] and clean_opus.exists():
         info_cached = workspace.read_json(workspace.audio_raw_dir / f"{vid}.info.json", default={}) or {}
         return None, info_cached
