@@ -54,10 +54,13 @@ def setup_colab_drive() -> bool:
     from core.drive_sync import SharedWorkspace
 
     ws = SharedWorkspace()
-    # Cache model weights on local fast NVMe (/tmp) to keep Google Drive 100% clean of hash chunks
-    local_torch_cache = Path("/tmp/.torch_cache")
+    # Cache model weights on local fast NVMe to keep Google Drive 100% clean of hash chunks
+    local_torch_cache = Path("/root/.cache/torch") if os.path.exists("/root") else Path("/tmp/.torch_cache")
     local_torch_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("TORCH_HOME", str(local_torch_cache))
+
+    # Fast restore of pre-downloaded AI models from Drive archive (~15s)
+    _restore_model_archive_if_present()
 
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")
@@ -102,6 +105,142 @@ def _get_pip_cache_args() -> List[str]:
         "--prefer-binary",
         "--no-warn-conflicts",
     ]
+
+
+def _ensure_uv_runtime() -> bool:
+    """Ensures Astral's uv is available for 10x-50x faster parallel wheel installs."""
+    if shutil.which("uv") is not None or _dist_version("uv") != "":
+        return True
+    try:
+        pip_cache = _get_pip_cache_args()
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q"] + pip_cache + ["uv"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return shutil.which("uv") is not None or _dist_version("uv") != ""
+    except Exception:
+        return False
+
+
+def _get_drive_wheels_dir() -> Optional[Path]:
+    """Returns persistent .cache/wheels directory on Google Drive if mounted."""
+    try:
+        from core.drive_sync import SharedWorkspace
+        ws = SharedWorkspace()
+        if ws.is_drive:
+            w_dir = ws.root / ".cache" / "wheels"
+            w_dir.mkdir(parents=True, exist_ok=True)
+            return w_dir
+    except Exception:
+        pass
+    return None
+
+
+def _fast_install(
+    pkgs: List[str],
+    constraints_path: Optional[Path] = None,
+    no_deps: bool = False,
+    extra_args: Optional[List[str]] = None,
+) -> None:
+    """
+    Installs packages with Astral's uv (10x-50x faster parallel downloads & resolution).
+    Falls back gracefully to standard pip if uv encounters any legacy metadata errors.
+    """
+    c_arg = ["-c", str(constraints_path)] if constraints_path and constraints_path.exists() else []
+    w_dir = _get_drive_wheels_dir()
+    w_args = [f"--find-links={w_dir}"] if w_dir and w_dir.exists() else []
+    extra = list(extra_args or [])
+
+    # Strategy 1: Attempt Astral's uv for ultra-fast parallel installation
+    if _ensure_uv_runtime():
+        uv_cmd = [sys.executable, "-m", "uv", "pip", "install", "--system", "-q"]
+        if no_deps:
+            uv_cmd.append("--no-deps")
+        uv_cmd.extend(c_arg + w_args + extra + pkgs)
+        res = subprocess.run(uv_cmd, check=False)
+        if res.returncode == 0:
+            return
+
+    # Strategy 2: Robust standard pip fallback
+    pip_cache = _get_pip_cache_args()
+    pip_cmd = [sys.executable, "-m", "pip", "install", "-q"] + pip_cache
+    if no_deps:
+        pip_cmd.append("--no-deps")
+    pip_cmd.extend(c_arg + w_args + extra + pkgs)
+    subprocess.check_call(pip_cmd)
+
+
+def _cache_wheel_on_drive(pkg_name: str, constraints_path: Optional[Path] = None) -> None:
+    """Builds and caches a package wheel to Drive once so future runs install in 0.1s without compilation."""
+    w_dir = _get_drive_wheels_dir()
+    if not w_dir:
+        return
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    pkg_clean = pkg_name.split("[")[0].replace("-", "_")
+    existing = list(w_dir.glob(f"{pkg_clean}*{py_tag}*.whl"))
+    if existing:
+        return
+    try:
+        c_arg = ["-c", str(constraints_path)] if constraints_path and constraints_path.exists() else []
+        subprocess.run(
+            [sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", str(w_dir)] + c_arg + [pkg_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _restore_model_archive_if_present() -> None:
+    """Restores pre-downloaded AI models from Google Drive to fast local SSD (/root/.cache) in ~15-20s."""
+    try:
+        from core.drive_sync import SharedWorkspace
+        ws = SharedWorkspace()
+        if not ws.is_drive:
+            return
+        tar_path = ws.root / ".cache" / "models" / "stage1_models.tar"
+        root_cache = Path("/root/.cache")
+        # Check if already restored
+        if (root_cache / "torch" / "NeMo").exists() and (root_cache / "huggingface" / "hub").exists():
+            return
+        if tar_path.exists() and tar_path.stat().st_size > 50_000_000:
+            print("   -> Restoring cached AI models (Whisper, NeMo, Demucs) from Google Drive archive (~15s)...", flush=True)
+            root_cache.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["tar", "-xf", str(tar_path), "-C", str(root_cache)], check=False)
+    except Exception as exc:
+        print(f"   [-] Note on model archive restore: {exc}", flush=True)
+
+
+def save_stage1_models_to_drive_archive(workspace: Any) -> None:
+    """Creates a single persistent models archive on Drive if not already present."""
+    if not getattr(workspace, "is_drive", False):
+        return
+    tar_path = workspace.root / ".cache" / "models" / "stage1_models.tar"
+    if tar_path.exists() and tar_path.stat().st_size > 50_000_000:
+        return
+    root_cache = Path("/root/.cache")
+    if not (root_cache / "torch").exists() and not (root_cache / "huggingface").exists():
+        return
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_tar = tar_path.parent / ".stage1_models.tmp.tar"
+    print("\n   -> [Cache] Archiving downloaded AI models to Google Drive for 15s future boot times...", flush=True)
+    dirs_to_pack = [d for d in ("torch", "huggingface") if (root_cache / d).exists()]
+    if not dirs_to_pack:
+        return
+    res = subprocess.run(
+        ["tar", "-cf", str(tmp_tar), "-C", str(root_cache)] + dirs_to_pack,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if res.returncode == 0 and tmp_tar.exists() and tmp_tar.stat().st_size > 50_000_000:
+        os.replace(tmp_tar, tar_path)
+        print("   -> [Cache] [DONE] Saved persistent model archive to Google Drive!", flush=True)
+    else:
+        tmp_tar.unlink(missing_ok=True)
 
 
 def _dist_version(dist_name: str) -> str:
@@ -210,16 +349,19 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         # NOTE: nvidia-cudnn-cu12 is deliberately omitted — PyTorch bundles its own matched cuDNN
     ]
     print("   -> Ensuring Stage 1 ASR, Demucs & Forced-Alignment packages (cached on fast local SSD)...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + stage1_pkgs)
+    _fast_install(stage1_pkgs, constraints_path)
+
+    # Pre-build & cache compiled C++ wheels to Drive so future Colab VMs install in 0.1s
+    _cache_wheel_on_drive("ctc-forced-aligner", constraints_path)
 
     if not _nemo_2x_installed():
         print("   -> Installing NVIDIA NeMo 2.x ASR Toolkit (MSDD NeuralDiarizer + TitaNet-Large)...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q"]
-            + pip_cache
-            + c_arg
-            + ["cython", "nemo_toolkit[asr]>=2.6.0,<3.0.0", "ml-dtypes>=0.5.4"]
+        _fast_install(
+            ["cython", "nemo_toolkit[asr]>=2.6.0,<3.0.0", "ml-dtypes>=0.5.4"],
+            constraints_path,
         )
+        _cache_wheel_on_drive("antlr4-python3-runtime", constraints_path)
+        _cache_wheel_on_drive("wget", constraints_path)
 
     if not _dist_version("clearvoice"):
         print("   -> Installing ClearerVoice-Studio (MossFormer2_SS_16K 2-speaker overlap separator)...")
@@ -236,8 +378,8 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
             "pydub",
             "librosa",
         ]
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + clearvoice_deps)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-deps"] + pip_cache + ["clearvoice"])
+        _fast_install(clearvoice_deps, constraints_path)
+        _fast_install(["clearvoice"], constraints_path, no_deps=True)
 
     # Final ABI guard: guarantee ml_dtypes>=0.5.4 (float4_e2m1fn required by onnx>=1.20 on Python 3.13)
     abi_check = subprocess.run(
@@ -247,7 +389,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         check=False,
     )
     if abi_check.returncode != 0:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-U", "ml-dtypes>=0.5.4"] + pip_cache)
+        _fast_install(["ml-dtypes>=0.5.4"], constraints_path, extra_args=["-U"])
 
 
 def _verify_stage2_runtime_health() -> bool:
@@ -270,8 +412,6 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         print("   -> Stage 2 Local LLM dependencies already verified in this runtime.")
         return
 
-    pip_cache = _get_pip_cache_args()
-    c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
     llm_pkgs = [
         "transformers",
         "accelerate",
@@ -281,7 +421,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         "nvidia-cuda-runtime-cu12",
     ]
     print("   -> Ensuring Stage 2 LLM core packages (cached on fast local SSD)...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pip_cache + c_arg + llm_pkgs)
+    _fast_install(llm_pkgs, constraints_path)
 
     def _test_llama_cpp() -> bool:
         try:
@@ -294,7 +434,17 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
 
     if not _test_llama_cpp():
         print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Qwen 2.5 14B Q5_K_M GGUF)...")
+        w_dir = _get_drive_wheels_dir()
+        py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+        if w_dir:
+            cached = list(w_dir.glob(f"llama_cpp_python*{py_tag}*.whl"))
+            if cached:
+                print(f"   -> Found cached llama-cpp-python GPU wheel on Drive ({cached[0].name})...")
+                _fast_install([str(cached[0])], no_deps=True)
+                if _test_llama_cpp():
+                    return
         for cu_ver in ["cu124", "cu122", "cu121"]:
+            pip_cache = _get_pip_cache_args()
             res = subprocess.run(
                 [
                     sys.executable,
@@ -315,6 +465,27 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
             )
             if res.returncode == 0 and _test_llama_cpp():
                 print(f"   -> Installed & verified llama-cpp-python ({cu_ver}) GPU wheel!")
+                if w_dir:
+                    try:
+                        subprocess.run(
+                            [
+                                sys.executable,
+                                "-m",
+                                "pip",
+                                "wheel",
+                                "-q",
+                                "--no-deps",
+                                "-w",
+                                str(w_dir),
+                                f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}",
+                                "llama-cpp-python",
+                            ],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
                 break
 
 
@@ -341,7 +512,7 @@ def main() -> int:
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)
-        if mode in ("auto", "stage2", "stage2-worker"):
+        if mode in ("stage2", "stage2-worker"):
             ensure_stage2_dependencies(constraints_path)
     else:
         print(f"\n[2/3] Lightweight mode '{mode}' — skipping heavy GPU wheel checks.")
