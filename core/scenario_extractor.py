@@ -122,6 +122,27 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
+def is_valid_dialectical_question(q_en: str, q_ar: str) -> bool:
+    """
+    Enforces quality threshold: discards conversational noise, rhetorical filler,
+    or truncated sentence fragments (e.g. 'Let her be?').
+    """
+    q_en_clean = (q_en or "").strip().lower().rstrip("?").strip()
+    words_en = q_en_clean.split()
+    if len(words_en) < 4:
+        return False
+    trivial_phrases = {
+        "let her be", "what did you say", "are you sure", "excuse me",
+        "can you hear me", "what is your name", "what's your name", "who are you",
+        "repeat that", "are you listening", "hello", "hi there", "is that so",
+        "pardon me", "listen to me", "did you hear",
+    }
+    for tp in trivial_phrases:
+        if q_en_clean.startswith(tp) or q_en_clean == tp:
+            return False
+    return True
+
+
 def build_episode_windows(
     turns: List[Dict[str, Any]],
     max_words_per_window: int = 1500,
@@ -397,6 +418,8 @@ class Stage2ScenarioExtractor:
 
             win_enriched: List[Dict[str, Any]] = []
             for raw_item in parsed:
+                if not is_valid_dialectical_question(raw_item.get("question_en", ""), raw_item.get("question_ar", "")):
+                    continue
                 enriched = anchor_and_enrich_extracted_unit(
                     raw_unit=raw_item,
                     scenario=scenario,
