@@ -315,7 +315,12 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     try:
         import importlib.util as u
         if u.find_spec("nvidia.cudnn") is not None:
-            subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "nvidia-cudnn-cu12"], check=False)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "-q", "nvidia-cudnn-cu12"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except Exception:
         pass
 
