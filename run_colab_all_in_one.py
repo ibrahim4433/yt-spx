@@ -337,7 +337,7 @@ def main() -> int:
         print("\n[2/3] Cookie test mode — ensuring yt-dlp + Deno only...")
         _ensure_deno_runtime()
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "curl_cffi"], check=False)
-    elif is_colab and mode not in ("status", "sync-db"):
+    elif is_colab and mode not in ("status", "sync-db", "reset-stage2"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)

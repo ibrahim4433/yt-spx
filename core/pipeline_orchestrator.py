@@ -716,7 +716,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="YT-SPX V2 Smart-Batch & Multi-Account Pipeline Orchestrator")
     p.add_argument(
         "--mode",
-        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies"],
+        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies", "reset-stage2"],
         default="auto",
         help="Execution mode: 'auto' runs Stage 1 -> Stage 2 in isolated GPU subprocesses.",
     )
@@ -750,6 +750,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.mode == "test-cookies":
         return run_cookie_tests(args)
+
+    if args.mode == "reset-stage2":
+        from tools.reset_stage2 import reset_stage2_extractions
+        ws = SharedWorkspace(worker_name=args.worker_id or None)
+        reset_stage2_extractions(ws)
+        return 0
 
     if args.mode == "sync-db":
         ws = SharedWorkspace(worker_name=args.worker_id or None)
