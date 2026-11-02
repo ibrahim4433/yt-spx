@@ -518,6 +518,11 @@ class WarmNeMoDiarizer:
                         torch.backends.cudnn.enabled = orig_cudnn
                 else:
                     raise
+            except ValueError as err:
+                if "silence" in str(err).lower():
+                    print(f"    [!] NeMo VAD detected silence/non-speech in audio ({err}); continuing with empty RTTM.", flush=True)
+                else:
+                    raise
             finally:
                 if "msdd" in locals():
                     del msdd

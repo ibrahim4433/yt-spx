@@ -117,16 +117,16 @@ class SharedWorkspace:
     @staticmethod
     def atomic_write_json(target: Path, payload: Any) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
         content = json.dumps(payload, ensure_ascii=False, indent=2)
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        # On Google Drive FUSE, os.replace() unparents previous file revisions into My Drive root.
+        # Direct write-in-place updates the file in place without generating Drive orphans.
+        with open(target, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             try:
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp_path, target)
 
     @staticmethod
     def read_json(target: Path, default: Any = None) -> Any:
