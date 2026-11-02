@@ -821,6 +821,7 @@ class Stage1AudioPipeline:
             srt_path.write_text(format_diarized_srt(final_turns), encoding="utf-8-sig")
 
             # Remove temporary per-window WAV clips now that scenario JSON is finalized
+            shutil.rmtree(local_tmp / f"{vid}_sep_clips", ignore_errors=True)
             shutil.rmtree(self.workspace.diarization_dir / vid / "sep_clips", ignore_errors=True)
 
             self.workspace.advance_micro_step(

@@ -54,10 +54,10 @@ def setup_colab_drive() -> bool:
     from core.drive_sync import SharedWorkspace
 
     ws = SharedWorkspace()
-    if ws.is_drive:
-        torch_cache = ws.root / "models_cache" / "torch"
-        torch_cache.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("TORCH_HOME", str(torch_cache))
+    # Cache model weights on local fast NVMe (/tmp) to keep Google Drive 100% clean of hash chunks
+    local_torch_cache = Path("/tmp/.torch_cache")
+    local_torch_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TORCH_HOME", str(local_torch_cache))
 
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")

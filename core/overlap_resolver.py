@@ -678,7 +678,9 @@ def run_overlap_separation_m4(
     on Drive so any interruption resumes at the exact unfinished overlap window!
     """
     vid_diar_dir = workspace.diarization_dir / video_id
-    sep_dir = vid_diar_dir / "sep_clips"
+    # Store temporary per-window audio clips in fast local SSD (/tmp) to prevent
+    # Google Drive FUSE orphaned WAV files when clips are later unlinked.
+    sep_dir = local_tmp_dir / f"{video_id}_sep_clips"
     sep_dir.mkdir(parents=True, exist_ok=True)
     manifest_file = vid_diar_dir / "overlap_sep.json"
 
