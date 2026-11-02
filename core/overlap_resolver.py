@@ -16,11 +16,23 @@ Fixes the 4 core street-debate limitations of MahmoudAshraf97/whisper-diarizatio
 import os
 import json
 import math
+import logging
+import warnings
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
+
+# Mute noisy internal NeMo / Megatron training and syntax warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("nemo_logger").setLevel(logging.ERROR)
+try:
+    from nemo.utils import nemo_logging
+    nemo_logging.set_verbosity(nemo_logging.ERROR)
+except Exception:
+    pass
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
 from core.vocal_cleaner import read_wav_float32, write_wav_float32, SAMPLE_RATE_16K

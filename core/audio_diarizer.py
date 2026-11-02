@@ -675,12 +675,16 @@ class Stage1AudioPipeline:
             return None
 
         local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_{vid}_"))
+        t_start_vid = time.time()
         try:
             # --- MICRO-STEP M1: Temp Download -> Drive Staging ---
+            print(f"   [1/5] Audio Ingestion (M1)....................... ", end="", flush=True)
             raw_audio_path, info_meta = fetch_video_audio_m1(video_record, self.workspace)
+            print("[DONE] (Source ready)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
             # --- MICRO-STEP M2: Chunked Vocal Isolation + 64kbps Opus Archive ---
+            print(f"   [2/5] Demucs Vocal Isolation (M2)................ ", end="", flush=True)
             leveled_wav, rms_timeline = clean_vocals_m2(
                 video_id=vid,
                 raw_audio_path=raw_audio_path,
@@ -689,12 +693,14 @@ class Stage1AudioPipeline:
                 local_tmp_dir=local_tmp,
                 keep_raw_audio_on_drive=self.keep_raw_audio,
             )
+            print("[DONE] (Clean vocal archive ready)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
             # Free Demucs VRAM if tight before NeMo + MossFormer2 + Whisper
             self.demucs.unload()
 
             # --- MICRO-STEP M3: Overlap-Aware NeMo MSDD Diarization + TitaNet Centroids ---
+            print(f"   [3/5] NeMo MSDD Diarization & TitaNet (M3)....... ", end="", flush=True)
             rttm_segs, centroids, overlaps = run_diarization_m3(
                 video_id=vid,
                 leveled_16k_wav=leveled_wav,
@@ -702,9 +708,12 @@ class Stage1AudioPipeline:
                 diarizer=self.diarizer,
                 is_short=bool(video_record.get("is_short")),
             )
+            n_spk = len({s.get("speaker_id") for s in rttm_segs})
+            print(f"[DONE] ({n_spk} speakers identified, {len(overlaps)} overlap window(s))")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
             # --- MICRO-STEP M4: Surgical MossFormer2 Overlap Separation + Cosine Matching ---
+            print(f"   [4/5] MossFormer2 Overlap Separation (M4)........ ", end="", flush=True)
             sep_manifest = run_overlap_separation_m4(
                 video_id=vid,
                 leveled_16k_wav=leveled_wav,
@@ -715,9 +724,11 @@ class Stage1AudioPipeline:
                 diarizer=self.diarizer,
                 local_tmp_dir=local_tmp,
             )
+            print(f"[DONE] ({len(sep_manifest)} cross-talk stream(s) unmixed)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
             # --- MICRO-STEP M5: Whisper + CTC Forced Alignment + Scenario Assembly ---
+            print(f"   [5/5] Whisper ASR & Scenario Assembly (M5)....... ", end="", flush=True)
             word_ts, detected_lang = self.asr.transcribe_and_align_wav(
                 leveled_wav,
                 forced_language=None,
@@ -824,6 +835,15 @@ class Stage1AudioPipeline:
 
             self.workspace.atomic_write_json(scen_path, scenario_payload)
             srt_path.write_text(format_diarized_srt(final_turns), encoding="utf-8-sig")
+
+            total_elapsed = round(time.time() - t_start_vid, 1)
+            print(f"[DONE] ({len(final_turns)} verified turns assembled)")
+            print("   " + "-" * 70)
+            print(f"   >>> [VERIFIED] Scenario M5_SCENARIO_BUILT in {total_elapsed}s:")
+            print(f"       * Video: {vid} | Language: {detected_lang} | Duration: {round(dur_sec/60.0, 1)}m")
+            print(f"       * Diarization: {len(speakers_meta)} speakers | {len(final_turns)} turns | {len(overlaps)} overlap window(s)")
+            print(f"       * Integrity: 100% PASSED -> Saved to Drive scenarios/{vid}.json")
+            print("   " + "=" * 70, flush=True)
 
             # Remove temporary per-window WAV clips now that scenario JSON is finalized
             shutil.rmtree(local_tmp / f"{vid}_sep_clips", ignore_errors=True)

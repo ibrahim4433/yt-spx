@@ -383,14 +383,15 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     manifest = load_or_create_manifest(workspace)
     candidates = select_stage2_candidates(workspace, manifest)
 
-    if not candidates:
+    should_wait = getattr(args, "wait_for_scenarios", False) or args.mode in ("stage2", "stage2-worker")
+    if not candidates and not should_wait:
         print("[Stage 2] No M5 scenarios waiting for LLM extraction.")
         return 0
 
     budget_label = f"{args.max_session_minutes} min" if args.max_session_minutes > 0 else "unlimited (until disconnect)"
     print("=" * 72)
     print(f"[Stage 2 Local LLM Extraction Worker] Worker: {workspace.worker_id}")
-    print(f"  Model: {args.llm_model} (12,288 ctx) | Max Batch: {args.stage2_batch_videos} videos")
+    print(f"  Model: {args.llm_model} (12,288 ctx) | Max Batch: {args.stage2_batch_videos} videos | Watcher: {'ON' if should_wait else 'OFF'}")
     print(f"  M5 Scenarios Ready: {len(candidates)} | Session Budget: {budget_label}")
     print("=" * 72, flush=True)
 
@@ -411,13 +412,42 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     last_error_sig = ""
     exit_code = 0
 
-    for cand in candidates:
-        if completed_count >= args.stage2_batch_videos:
-            print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
-            break
-        if deadline is not None and time.time() >= deadline:
-            print(f"\n[Stage 2] Session time budget ({args.max_session_minutes}m) reached. Exiting cleanly.")
-            break
+    while True:
+        candidates = select_stage2_candidates(workspace, manifest)
+        if not candidates:
+            if not should_wait:
+                print("\n[Stage 2] No further M5 scenarios waiting. Stopping cleanly.")
+                break
+            print("\n" + "=" * 72)
+            print("  ⏳ [Profile 2 Standby] All ready scenarios have been extracted!")
+            print("     Waiting for Profile 1 (Stage 1 worker) to finish next debate...")
+            print("     Listening on Drive (checking every 20s). Press stop to exit.")
+            print("=" * 72, flush=True)
+
+            found_new = False
+            wait_t0 = time.time()
+            while True:
+                if deadline is not None and time.time() >= deadline:
+                    break
+                time.sleep(20)
+                elapsed_wait = int(time.time() - wait_t0)
+                candidates = select_stage2_candidates(workspace, manifest)
+                if candidates:
+                    found_new = True
+                    print(f"\n[+] Profile 1 completed {len(candidates)} new scenario(s)! Resuming LLM extraction...", flush=True)
+                    break
+                print(f"     [Standby] Profile 1 is processing audio... ({elapsed_wait}s elapsed)", flush=True)
+
+            if not found_new:
+                break
+
+        for cand in candidates:
+            if not should_wait and completed_count >= args.stage2_batch_videos:
+                print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
+                return 0
+            if deadline is not None and time.time() >= deadline:
+                print(f"\n[Stage 2] Session time budget ({args.max_session_minutes}m) reached. Exiting cleanly.")
+                return 0
 
         vid = cand["video_id"]
         lock_name = f"{vid}.stage2"
@@ -733,6 +763,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
     p.add_argument("--llm-context-length", type=int, default=12288, help="Stage 2 GGUF context window.")
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")
+    p.add_argument("--wait-for-scenarios", action="store_true", help="Stage 2 standby watcher: keeps running and polls Drive for new scenarios from Profile 1.")
     p.add_argument("--keep-raw-audio", action="store_true", help="Keep original raw download alongside 64kbps Opus.")
     p.add_argument("--offline-only", action="store_true", help="Do not touch YouTube; only process M1..M5 files on Drive.")
     p.add_argument("--worker-id", default="", help="Optional friendly worker label (e.g. colab-acct-1).")
@@ -791,6 +822,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "--max-session-minutes", str(args.max_session_minutes),
             "--llm-model", args.llm_model,
             "--llm-context-length", str(args.llm_context_length),
+            "--wait-for-scenarios",
         ]
         if args.worker_id:
             cmd += ["--worker-id", args.worker_id]

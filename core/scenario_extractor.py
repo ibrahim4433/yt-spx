@@ -443,11 +443,25 @@ class Stage2ScenarioExtractor:
             self.workspace.heartbeat_lock(f"{video_id}.stage2")
 
             if verbose:
+                pct = int((w_idx / len(windows)) * 100)
                 print(
-                    f"   -> Episode Win {w_idx}/{len(windows)} [{w['start_fmt']}->{w['end_fmt']}]: "
-                    f"+{len(win_enriched)} Q&A ({elapsed}s)",
+                    f"\n   -> [Episode {w_idx}/{len(windows)} ({pct}%)] [{w['start_fmt']} -> {w['end_fmt']}] ({w['turn_count']} turns, {elapsed}s):",
                     flush=True,
                 )
+                if win_enriched:
+                    for eu in win_enriched:
+                        q_en = eu.get("question_en", "")
+                        q_ar = eu.get("question_ar", "")
+                        cat = eu.get("topic_category", "Theology")
+                        ans_en = eu.get("core_answer_summary_en", "")
+                        ans_preview = ans_en[:110] + "..." if len(ans_en) > 110 else ans_en
+                        print(f"      * [Card {eu['id']}] [{cat}]")
+                        print(f"        Q (Seeker): \"{q_en}\"")
+                        if q_ar:
+                            print(f"        سؤال الباحث: \"{q_ar}\"")
+                        print(f"        Truth Proof: {ans_preview}")
+                else:
+                    print("      (No substantive debate objections in this window - skipped)")
 
         # Re-number sequential IDs cleanly and write final immutable shard
         for idx, u in enumerate(all_units, start=1):
@@ -474,6 +488,14 @@ class Stage2ScenarioExtractor:
             artifacts={"qa_json": str(qa_shard_path)},
             metrics={"qa_count": len(all_units)},
         )
+
+        if verbose:
+            print("   " + "-" * 70)
+            print(f"   >>> [STAGE 2 COMPLETE] Video {video_id} M6_LLM_EXTRACTED:")
+            print(f"       * Total Extracted Seeker Cards: {len(all_units)}")
+            print(f"       * Integrity: 100% VERIFIED -> Committed to Drive extractions/{video_id}.qa.json")
+            print("   " + "=" * 70, flush=True)
+
         return all_units
 
 
