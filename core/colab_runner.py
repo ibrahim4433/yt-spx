@@ -25,6 +25,11 @@ os.environ["USE_TORCH"] = "1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    hf_hub_download = None
+
+try:
     from core.drive_sync import resolve_drive_root
     from core.extractor_prompt import EXTRACTION_SYSTEM_PROMPT
 except (ImportError, ValueError):
@@ -285,8 +290,15 @@ class LocalGPUClient:
 
                 if llama_supports_gpu_offload():
                     print(f"[+] Downloading/Loading 5-bit GGUF: {gguf_repo}/{gguf_filename} (~10.5 GB)...")
+                    try:
+                        from huggingface_hub import hf_hub_download
+                    except ImportError:
+                        import subprocess, sys
+                        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"], check=False)
+                        from huggingface_hub import hf_hub_download
+
                     model_path = hf_hub_download(repo_id=gguf_repo, filename=gguf_filename)
-                    # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~2.5 GB at 12,288 context)
+                    # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~1.2 GB at 12,288 context)
                     try:
                         self.llm = Llama(
                             model_path=model_path,
@@ -373,12 +385,19 @@ class LocalGPUClient:
             )
             return res["choices"][0]["message"]["content"] or "[]"
 
+        # Transformers fallback path
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         text_input = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
         )
-        max_prompt_len = max(1024, self.context_length - self.max_new_tokens - 64)
+        max_gen_tokens = min(self.max_new_tokens, 1200)
+        max_prompt_len = min(4096, max(1024, self.context_length - max_gen_tokens - 64))
         inputs = self.tokenizer(
             [text_input],
             return_tensors="pt",
@@ -392,13 +411,11 @@ class LocalGPUClient:
             if tok_id is not None and tok_id not in eos_ids:
                 eos_ids.append(tok_id)
 
-        import torch
-
         try:
             with torch.inference_mode():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=self.max_new_tokens,
+                    max_new_tokens=max_gen_tokens,
                     temperature=0.12,
                     top_p=0.9,
                     do_sample=True,
@@ -411,8 +428,35 @@ class LocalGPUClient:
                 for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
             ]
             return self.tokenizer.batch_decode(trimmed, skip_special_tokens=True)[0]
-        finally:
+        except torch.OutOfMemoryError:
+            print("[-] Transformers GPU OOM encountered; clearing cache and retrying with compact context...")
             del inputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            compact_inputs = self.tokenizer(
+                [text_input],
+                return_tensors="pt",
+                max_length=2500,
+                truncation=True,
+            ).to(self.model.device)
+            with torch.inference_mode():
+                gen_ids = self.model.generate(
+                    **compact_inputs,
+                    max_new_tokens=800,
+                    temperature=0.12,
+                    top_p=0.9,
+                    do_sample=True,
+                    eos_token_id=eos_ids,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                )
+            trimmed = [
+                output_ids[len(input_ids) :]
+                for input_ids, output_ids in zip(compact_inputs.input_ids, gen_ids)
+            ]
+            return self.tokenizer.batch_decode(trimmed, skip_special_tokens=True)[0]
+        finally:
+            if "inputs" in locals():
+                del inputs
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 

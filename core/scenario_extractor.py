@@ -124,7 +124,7 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_episode_windows(
     turns: List[Dict[str, Any]],
-    max_words_per_window: int = 2100,
+    max_words_per_window: int = 1500,
     context_carry_turns: int = 3,
 ) -> List[Dict[str, Any]]:
     """
@@ -343,7 +343,7 @@ class Stage2ScenarioExtractor:
             self.workspace.advance_micro_step(video_id, "M6_LLM_EXTRACTED", metrics={"qa_count": 0})
             return []
 
-        windows = build_episode_windows(turns, max_words_per_window=2100, context_carry_turns=3)
+        windows = build_episode_windows(turns, max_words_per_window=1500, context_carry_turns=3)
         speakers_summary = ", ".join(
             f"{s['speaker_id']}={s['role']}({s['display_name_en']})"
             for s in scenario.get("speakers", [])

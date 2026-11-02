@@ -599,6 +599,7 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
+            s1_failed = False
             if s1_before > 0:
                 print(
                     f"[Orchestrator] Launching Isolated Stage 1 Subprocess "
@@ -607,8 +608,11 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                 )
                 s1_res = subprocess.run(_build_stage1_subcmd(args, 0), env=_get_subprocess_env(), check=False)
                 if s1_res.returncode != 0:
+                    s1_failed = True
                     exit_code = s1_res.returncode
-                    break
+                    print(f"[Orchestrator] Stage 1 note: exited with code {s1_res.returncode}; processing ready Stage 2 backlog...", flush=True)
+                    if s2_before == 0:
+                        break
 
             s2_ready = len(select_stage2_candidates(workspace, manifest))
             if s2_ready > 0:
@@ -625,6 +629,10 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
             synced = workspace.sync_completed_shards_to_sqlite()
             print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
 
+            if s1_failed:
+                print(f"[Orchestrator] Stopping round loop cleanly due to Stage 1 exit code {s1_res.returncode}.", flush=True)
+                break
+
             s1_after = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
             s2_after = len(select_stage2_candidates(workspace, manifest))
             if s1_after >= s1_before and s2_after >= s2_before:
@@ -640,10 +648,14 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
         s1_res = subprocess.run(_build_stage1_subcmd(args, s1_budget_min), env=_get_subprocess_env(), check=False)
         if s1_res.returncode != 0:
             exit_code = s1_res.returncode
-        else:
-            elapsed_min = (time.time() - t_start) / 60.0
-            rem_min = max(5, int(total_budget_min - elapsed_min))
-            print(f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess (budget={rem_min}m)...", flush=True)
+            print(f"[Orchestrator] Stage 1 note: exited with code {s1_res.returncode}; checking Stage 2 backlog...", flush=True)
+
+        manifest = load_or_create_manifest(workspace)
+        s2_ready = len(select_stage2_candidates(workspace, manifest))
+        elapsed_min = (time.time() - t_start) / 60.0
+        rem_min = max(5, int(total_budget_min - elapsed_min))
+        if s2_ready > 0 and rem_min > 2:
+            print(f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess (pending={s2_ready}, budget={rem_min}m)...", flush=True)
             s2_res = subprocess.run(_build_stage2_subcmd(args, rem_min), env=_get_subprocess_env(), check=False)
             if s2_res.returncode != 0:
                 exit_code = s2_res.returncode
@@ -671,11 +683,17 @@ def run_cookie_tests(args: argparse.Namespace) -> int:
         pool.print_summary(indent="  ")
         return 1
 
-    test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    # Reset existing quarantine timestamps so all discovered cookies get freshly evaluated
+    pool.reset_quarantine()
+
+    test_url = "https://www.youtube.com/watch?v=YC86BQwvHyk"
     try:
         manifest = load_or_create_manifest(workspace)
         if manifest:
-            test_url = manifest[0].get("youtube_url") or f"https://www.youtube.com/watch?v={manifest[0]['video_id']}"
+            for entry in manifest:
+                if not entry.get("is_short"):
+                    test_url = entry.get("youtube_url") or f"https://www.youtube.com/watch?v={entry['video_id']}"
+                    break
     except Exception:
         pass
 

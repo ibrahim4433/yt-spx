@@ -54,7 +54,6 @@ COOKIE_CHALLENGED_PATTERNS = [
     r"sign in to confirm you.?re not a bot",
     r"use --cookies-from-browser or --cookies for the authentication",
     r"only images are available for download",
-    r"requested format is not available",
 ]
 RATE_LIMIT_PATTERNS = [
     r"http error 429",
@@ -335,6 +334,20 @@ class CookiePool:
         reg[key] = entry
         self._save(reg)
 
+    def reset_quarantine(self, path: Optional[Path] = None) -> None:
+        """Clears quarantine timestamps so cookie files can be freshly tested or used."""
+        reg = self._load()
+        if path is not None:
+            key = self.cookie_key(path)
+            if key in reg:
+                reg[key]["quarantined_until"] = 0.0
+                reg[key]["consecutive_failures"] = 0
+        else:
+            for k in reg:
+                reg[k]["quarantined_until"] = 0.0
+                reg[k]["consecutive_failures"] = 0
+        self._save(reg)
+
     def status_report(self) -> List[Dict[str, Any]]:
         now = time.time()
         reg = self._load()
@@ -414,8 +427,7 @@ class CookiePool:
                 "--no-playlist",
                 "--no-progress",
                 "--print", "id",
-                "--format", "ba/b/bestaudio/best",
-                "--extractor-args", "youtube:player_client=android,web,ios",
+                "--extractor-args", "youtube:player_client=android,web",
                 "--cookies", str(jar),
             ]
             runtimes = [r for r in ("deno", "node") if shutil.which(r)]

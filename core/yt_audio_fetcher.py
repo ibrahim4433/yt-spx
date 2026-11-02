@@ -119,7 +119,7 @@ def fetch_video_audio_m1(
             "yt-dlp",
             "--no-playlist",
             "--format", "ba/b/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
-            "--extractor-args", "youtube:player_client=android,web,ios",
+            "--extractor-args", "youtube:player_client=android,web",
             "--write-info-json",
             "--no-write-subs",
             "--no-progress",
