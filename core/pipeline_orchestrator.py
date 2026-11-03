@@ -762,7 +762,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--whisper-model", default="large-v3-turbo", help="Faster-Whisper model size.")
     p.add_argument("--whisper-batch-size", type=int, default=12, help="BatchedInferencePipeline batch size.")
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
-    p.add_argument("--llm-context-length", type=int, default=12288, help="Stage 2 GGUF context window.")
+    p.add_argument("--llm-context-length", type=int, default=14336, help="Stage 2 GGUF context window.")
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")
     p.add_argument("--wait-for-scenarios", action="store_true", help="Stage 2 standby watcher: keeps running and polls Drive for new scenarios from Profile 1.")
     p.add_argument("--keep-raw-audio", action="store_true", help="Keep original raw download alongside 64kbps Opus.")

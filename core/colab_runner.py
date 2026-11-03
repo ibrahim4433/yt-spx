@@ -251,7 +251,7 @@ class LocalGPUClient:
         use_gguf_q5: bool = True,
         gguf_repo: str = "bartowski/Qwen2.5-14B-Instruct-GGUF",
         gguf_filename: str = "Qwen2.5-14B-Instruct-Q5_K_M.gguf",
-        context_length: int = 12288,
+        context_length: int = 14336,
         max_new_tokens: int = 2400,
     ):
         import torch
@@ -377,13 +377,50 @@ class LocalGPUClient:
         ]
 
         if self.backend == "gguf":
-            res = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=self.max_new_tokens,
-                temperature=0.12,
-                top_p=0.9,
-            )
-            return res["choices"][0]["message"]["content"] or "[]"
+            # Exact or conservative token estimation of formatted prompt
+            try:
+                formatted = ""
+                for m in messages:
+                    formatted += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n"
+                formatted += "<|im_start|>assistant\n"
+                prompt_tokens = len(self.llm.tokenize(formatted.encode("utf-8", errors="replace")))
+            except Exception:
+                # Conservative fallback: 1 word ≈ 2.2 tokens in Arabic/English
+                total_words = sum(len(m.get("content", "").split()) for m in messages)
+                prompt_tokens = int(total_words * 2.2)
+
+            safety_margin = 64
+            avail = self.context_length - prompt_tokens - safety_margin
+
+            # If prompt alone is dangerously close to context window, trim dialogue from user prompt
+            if avail < 512:
+                excess_tokens = 800 - avail
+                chars_to_trim = int(excess_tokens * 3.5)
+                if len(prompt) > chars_to_trim + 500:
+                    messages[1]["content"] = prompt[chars_to_trim:]
+                    avail = 800
+
+            effective_max_tokens = max(256, min(self.max_new_tokens, avail))
+
+            try:
+                res = self.llm.create_chat_completion(
+                    messages=messages,
+                    max_tokens=effective_max_tokens,
+                    temperature=0.12,
+                    top_p=0.9,
+                )
+                return res["choices"][0]["message"]["content"] or "[]"
+            except ValueError as ve:
+                if "exceed context window" in str(ve).lower():
+                    # Emergency context recovery: cut max_tokens to 512 and retry
+                    res = self.llm.create_chat_completion(
+                        messages=messages,
+                        max_tokens=512,
+                        temperature=0.12,
+                        top_p=0.9,
+                    )
+                    return res["choices"][0]["message"]["content"] or "[]"
+                raise
 
         # Transformers fallback path
         import torch
@@ -468,7 +505,7 @@ class ExtractionClient:
         self,
         provider: str = "local_gpu",
         model_name: str = "Qwen/Qwen2.5-14B-Instruct",
-        context_length: int = 12288,
+        context_length: int = 14336,
     ):
         self.provider = provider.lower()
         if self.provider == "local_gpu":

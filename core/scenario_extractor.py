@@ -145,7 +145,7 @@ def is_valid_dialectical_question(q_en: str, q_ar: str) -> bool:
 
 def build_episode_windows(
     turns: List[Dict[str, Any]],
-    max_words_per_window: int = 1500,
+    max_words_per_window: int = 1100,
     context_carry_turns: int = 3,
 ) -> List[Dict[str, Any]]:
     """
@@ -320,7 +320,7 @@ class Stage2ScenarioExtractor:
         self,
         workspace: SharedWorkspace,
         model_name: str = "Qwen/Qwen2.5-14B-Instruct",
-        context_length: int = 12288,
+        context_length: int = 14336,
         llm_client: Optional[Any] = None,
     ):
         self.workspace = workspace
