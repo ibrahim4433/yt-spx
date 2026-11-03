@@ -22,6 +22,7 @@ TRANSCRIPT STRUCTURE:
 - [INTERLOCUTOR (Name/Num)]: The debate partner raising objections, false claims, Christian dogmas, atheist arguments, or philosophical doubts.
 - [PEDESTRIAN | INTERRUPTION]: A passing onlooker making brief street remarks. Ignore random crowd noise unless [MAIN_DAEE] directly answers a substantive question from them.
 - [OVERLAP]: Simultaneous speech separated so both speakers' exact words are preserved.
+- [MONOLOGUE / INTRO / AUDIENCE Q&A]: Turns where the Da'ee speaks solo—introducing a topic, explaining theological proofs, addressing live comments/chat questions, or anticipating objections while waiting for an interlocutor.
 
 PRIMARY AUDIENCE & CORE PURPOSE:
 This DATA OUTPUT will be searched by real human beings inside a website : sincere seekers of truth, non-Muslims with tough questions or misleading ideas, skeptics, and Muslims confused by viral anti-Islamic claims ....
@@ -39,6 +40,20 @@ CRITICAL RULE 2: DIRECT CONVINCING TRUTH (الجواب المقنع المبره
 CRITICAL RULE 3: ZERO CONVERSATIONAL NOISE (حظر الحشو والتفاهات اللفظية)
 - NEVER extract rhetorical interjections, fragments, or passing conversational filler (e.g., NEVER extract "Let her be?", "What did you say?", "Excuse me?", "Are you listening?").
 - Every extracted question must be a genuine, searchable intellectual objection with at least 5 words.
+
+CRITICAL RULE 4: MONOLOGUES, INTROS, LIVE COMMENTS & ANTICIPATED OBJECTIONS (استخراج الشبهات المفترضة وأسئلة البث والتعليقات والمقدمات)
+- DO NOT SKIP INTROS OR DA'EE MONOLOGUES: Never skip an episode window or output `[]` simply because the Da'ee is speaking alone without an interlocutor!
+- Da'ee Voicing Anticipated Inquiries & Objections: In intros, street pre-talk, live broadcasts, or solo monologues, the Da'ee frequently:
+  a) Poses questions or objections that a seeker, skeptic, or interlocutor would ask (e.g. "People often ask: if God is All-Powerful, why is there evil?", "Some Christians argue John 1:1 proves Jesus is God; how do we reply?", "Why do Muslims pray five times a day?").
+  b) Directly answers questions submitted by viewers in the live chat or comments while waiting for an interlocutor.
+  c) Explains an essential theological proof, foundational creedal principle, or clears a widespread misconception about Islam.
+- Protocol for Monologue / Anticipated Extractions:
+  * Formulate "question_en" and "question_ar" from the perspective of the seeker/inquirer (the question visitors actually search on the website!).
+  * Set "question_turn_id" to the turn where the Da'ee articulates the objection, question, or problem.
+  * Set "answer_turn_id" to the turn where the Da'ee delivers the core explanation or proof.
+  * Set "interlocutor_type" to the worldview/target audience of the doubt (e.g., "Inquiring Seeker", "Atheist / Materialist", "Christian / Trinitarian", "Muslim with Doubts", "Live Commenter / Seeker").
+  * Set "interlocutor_verbatim_quote" to the Da'ee's words framing the doubt or question.
+  * Provide the complete deductive proof, logical premises, analogies, and Classical Arabic fields just like a multi-speaker debate card.
 
 EXACT JSON OUTPUT SCHEMA (Array of Objects):
 [
@@ -169,9 +184,49 @@ EXAMPLE 2 (Theology & Problem of Evil / Biblical Ethics):
   "tags": ["Divine Justice", "Problem of Evil", "Inherited Sin", "Biblical Ethics"]
 }
 
+EXAMPLE 3 (Da'ee Monologue / Anticipated Dilemma / Online Comment / Intro Inquiry):
+{
+  "question_turn_id": "ABC123xyz_T0002",
+  "answer_turn_id": "ABC123xyz_T0003",
+  "question_en": "If God is completely self-sufficient and does not need anything, why did He create human beings to worship Him?",
+  "question_ar": "إذا كان الله غنياً عن العالمين ولا يحتاج إلى شيء، فلماذا خلق البشر لعبادته؟",
+  "topic_category": "Theology & God's Existence",
+  "topic_subcategory": "Purpose of Creation & Divine Self-Sufficiency (Al-Ghaniyy)",
+  "interlocutor_type": "Inquiring Seeker",
+  "core_answer_summary_en": "In Islamic ontology, Allah is Al-Ghaniyy (The Absolutely Independent and Self-Sufficient); human worship neither benefits nor harms Him in the slightest. Creation and worship exist entirely for the benefit and spiritual flourishing of the human being, just as a light benefits the one walking in the dark, not the light itself. To demand that God's actions must stem from a deficiency or 'need' is to commit an anthropomorphic fallacy, falsely projecting human dependency onto the uncreated Creator.",
+  "core_answer_summary_ar": "الله تعالى هو الغني المطلق عن خلقه ﴿يَا أَيُّهَا النَّاسُ أَنْتُمُ الْفُقَرَاءُ إِلَى اللَّهِ وَاللَّهُ هُوَ الْغَنِيُّ الْحَمِيدُ﴾، فلا تنفعه طاعة الطائعين ولا تضره معصية العاصين. وإنما خلق الله الإنسان وشرع له العبادة رحمةً به وإكراماً له لتحقيق كماله الروحي والأخلاقي ونيل السعادة الأبدية؛ فالنفع عائد على العبد لا على الرب. والزعم بأن الخلق يستلزم حاجة عند الخالق مغالطة تشبيه باطلة تقيس واجب الوجود المنزه على المخلوق الناقص.",
+  "logical_premises": [
+    "Premise 1: The Necessary Being (Allah) is absolutely self-sufficient (Ghaniyy) and ontologically independent of all contingent entities.",
+    "Premise 2: A self-sufficient Creator acts out of infinite wisdom, mercy, and justice, not out of ontological need or deficiency.",
+    "Conclusion: Therefore, the commandment to worship is a mercy for the spiritual perfection of the creature, not a fulfillment of any divine need."
+  ],
+  "logical_premises_ar": [
+    "المقدمة الأولى: الإله الحق واجب الوجود غني بالضرورة العقلية والشرعية عن كل ما سواه، ويستحيل في حقه الاحتياج والنقص.",
+    "المقدمة الثانية: أفعال الخالق الحكيم تصدر عن كمال حكمته ورحمته وفضله لا عن حاجة تعود إليه.",
+    "النتيجة: إذن، خَلْقُ الإنسان وأمرُه بالعبادة هو لخير الإنسان وكماله ونيل رضوان الله، لا لحاجة الله تعالى إلى طاعته."
+  ],
+  "fallacy_or_misconception_exposed": "Anthropomorphic Projection: Falsely projecting finite human psychological needs (ego, validation, need for service) onto the transcendent, self-sufficient Creator.",
+  "fallacy_or_misconception_exposed_ar": "مغالطة القياس التمثيلي الفاسد (قياس الغائب على الشاهد): قياس صفات الله تعالى على طباع المخلوق وحاجته النفسية للثناء والخدمة.",
+  "analogy_or_metaphor": "A brilliant master physician prescribes life-saving medicine to a patient. The physician gains nothing from the medicine; the health, healing, and benefit belong entirely to the patient who obeys the prescription.",
+  "analogy_or_metaphor_ar": "الطبيب الماهر الذي يصف للمريض الدواء الناجع؛ لا ينتفع الطبيب بتناول الدواء ولا يتضرر بتركه، بل الشفاء والنفع الخالص عائدان بالكلية على المريض المحتاج.",
+  "socratic_question": "If the sun illuminates the earth, does the sun need the earth's gratitude to continue shining, or does the earth need the sun's light to live?",
+  "socratic_question_ar": "إذا كانت الشمس تشرق على الأرض، فهل الشمس هي التي تحتاج إلى شكر أهل الأرض لتستمر في العطاء، أم أن الأرض هي المحتاجة إلى نورها وحرارتها؟",
+  "interlocutor_verbatim_quote": "A common question people ask in the comments is: why did God create us if He doesn't need us?",
+  "interlocutor_verbatim_quote_ar": "سؤال شائع يطرحه الإخوة في التعليقات: لماذا خلقنا الله إن كان لا يحتاج إلينا؟",
+  "verbatim_quote": "Allah is Al-Ghaniyy. Our worship does not add an atom's weight to His kingdom, just as our disobedience does not decrease it. The worship is for our own benefit.",
+  "verbatim_quote_ar": "الله هو الغني؛ عبادتنا لا تزيد في ملكه ذرة، ومعصيتنا لا تنقص منه شيئاً، وإنما العبادة لمنفعتنا نحن ونجاتنا.",
+  "dialogue_exchange": [
+    {"turn_id": "ABC123xyz_T0002", "role": "MAIN_DAEE", "move_type": "Anticipated Question / Inquiry", "text_en": "A common question people ask in the comments is: why did God create us if He doesn't need us?", "text_ar": "سؤال شائع يطرحه الناس في التعليقات: لماذا خلقنا الله إن كان لا يحتاج إلينا؟"},
+    {"turn_id": "ABC123xyz_T0003", "role": "MAIN_DAEE", "move_type": "Theological Proof", "text_en": "Allah is Al-Ghaniyy. Our worship does not add an atom's weight to His kingdom. The worship is for our own benefit.", "text_ar": "الله هو الغني؛ عبادتنا لا تزيد في ملكه ذرة خردل، والعبادة لمنفعتنا نحن وتزكية نفوسنا."}
+  ],
+  "timestamp_seconds": 12,
+  "timestamp_formatted": "00:12",
+  "tags": ["Purpose of Life", "Al-Ghaniyy", "Worship", "Divine Wisdom", "Creation"]
+}
+
 STRICT GENERAL RULES:
-1. ONLY SUBSTANTIVE THEOLOGICAL & PHILOSOPHICAL CONTENTIONS: If an episode window contains only greetings, setup, or casual small talk, output `[]`.
-2. ZERO ROLE REVERSAL: The question MUST represent the [INTERLOCUTOR]'s objection or false claim. The refutation MUST represent the [MAIN_DAEE]'s Islamic truth.
+1. ONLY SUBSTANTIVE THEOLOGICAL & PHILOSOPHICAL CONTENTIONS: If an episode window contains only greetings, setup, or casual small talk without any theological explanation or question, output `[]`.
+2. ZERO ROLE REVERSAL & PERSPECTIVE INTEGRITY: The question MUST represent the objection, inquiry, or false claim from the seeker's / skeptic's perspective (whether raised directly by an [INTERLOCUTOR] or articulated by the [MAIN_DAEE] as an anticipated doubt, viewer question, or theological dilemma). The answer MUST represent the [MAIN_DAEE]'s convincing Islamic truth.
 3. 100% PURE CLASSICAL ARABIC IN ALL *_ar FIELDS: Pure, grammatical, eloquent Arabic. No robotic literal translations.
 4. Output STRICTLY a valid JSON array: `[ { ... } ]`.
 """
@@ -185,5 +240,5 @@ Identified Speakers: {speakers_summary}
 DIARIZED SCENARIO TRANSCRIPT:
 {transcript_text}
 
-Extract every substantive objection, misconception, or false claim into authoritative Apologetics Dossiers adhering strictly to the system prompt guidelines and gold-standard schema. Output strictly a valid JSON array: [ {{ ... }} ]
+Extract every substantive objection, misconception, seeker inquiry, or anticipated question (including those raised and resolved by the Da'ee during monologues, intros, or addressing comments) into authoritative Apologetics Dossiers adhering strictly to the system prompt guidelines and gold-standard schema. Output strictly a valid JSON array: [ {{ ... }} ]
 """

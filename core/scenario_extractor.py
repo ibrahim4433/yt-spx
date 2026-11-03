@@ -244,7 +244,11 @@ def anchor_and_enrich_extracted_unit(
 
     if q_turn is not None:
         ts_sec = int(q_turn["start_ms"] // 1000)
-        inter_spk_id = q_turn.get("speaker_id", "")
+        q_role = q_turn.get("speaker_role", "")
+        if q_role in ("MAIN_DAEE", "CO_DAEE"):
+            inter_spk_id = ""  # Monologue / anticipated question voiced by Da'ee
+        else:
+            inter_spk_id = q_turn.get("speaker_id", "")
     else:
         ts_sec = max(int(window_start_ms // 1000), int(item.get("timestamp_seconds") or 0))
         inter_spk_id = ""
@@ -364,7 +368,7 @@ class Stage2ScenarioExtractor:
             self.workspace.advance_micro_step(video_id, "M6_LLM_EXTRACTED", metrics={"qa_count": 0})
             return []
 
-        windows = build_episode_windows(turns, max_words_per_window=1500, context_carry_turns=3)
+        windows = build_episode_windows(turns, max_words_per_window=1100, context_carry_turns=3)
         speakers_summary = ", ".join(
             f"{s['speaker_id']}={s['role']}({s['display_name_en']})"
             for s in scenario.get("speakers", [])
