@@ -296,7 +296,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             workspace.atomic_write_json(workspace.state_path(vid), st)
 
     for cand in candidates:
-        if completed_count >= args.batch_videos:
+        if args.batch_videos > 0 and completed_count >= args.batch_videos:
             print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
             break
         if deadline is not None and time.time() >= deadline:
@@ -443,51 +443,54 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
                 break
 
         for cand in candidates:
-            if not should_wait and completed_count >= args.stage2_batch_videos:
-                print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
-                return 0
             if deadline is not None and time.time() >= deadline:
                 print(f"\n[Stage 2] Session time budget ({args.max_session_minutes}m) reached. Exiting cleanly.")
                 return 0
+            if not should_wait and args.stage2_batch_videos > 0 and completed_count >= args.stage2_batch_videos:
+                print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
+                return 0
 
-        vid = cand["video_id"]
-        lock_name = f"{vid}.stage2"
-        if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
-            continue
+            vid = cand["video_id"]
+            lock_name = f"{vid}.stage2"
+            if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
+                continue
 
-        try:
-            units = extractor.extract_video_m6(vid, verbose=True)
-            if units is not None:
-                completed_count += 1
-                consecutive_errors = 0
-                last_error_sig = ""
-                for u in units:
-                    log_extracted_unit_live(u)
-                print(f"    [OK] M6_LLM_EXTRACTED [{vid}]: {len(units)} dialectical Q&A unit(s) saved.", flush=True)
-        except Exception as exc:
-            err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
-            print(f"    [ERROR] Stage 2 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
-            if consecutive_errors == 0:
-                print(traceback.format_exc(limit=5), flush=True)
+            try:
+                units = extractor.extract_video_m6(vid, verbose=True)
+                if units is not None:
+                    completed_count += 1
+                    consecutive_errors = 0
+                    last_error_sig = ""
+                    for u in units:
+                        log_extracted_unit_live(u)
+                    print(f"    [OK] M6_LLM_EXTRACTED [{vid}]: {len(units)} dialectical Q&A unit(s) saved.", flush=True)
+            except Exception as exc:
+                err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
+                print(f"    [ERROR] Stage 2 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
+                if consecutive_errors == 0:
+                    print(traceback.format_exc(limit=5), flush=True)
 
-            if err_sig == last_error_sig:
-                consecutive_errors += 1
-            else:
-                consecutive_errors = 1
-                last_error_sig = err_sig
+                if err_sig == last_error_sig:
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 1
+                    last_error_sig = err_sig
 
-            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
-                workspace.record_error(vid, err_sig)
+                if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
+                    workspace.record_error(vid, err_sig)
 
-            if consecutive_errors >= 3:
-                print(
-                    f"\n[!] ABORTING STAGE 2 BATCH: 3 consecutive identical errors ({err_sig}).",
-                    flush=True,
-                )
-                exit_code = 2
-                break
-        finally:
-            workspace.release_lock(lock_name)
+                if consecutive_errors >= 3:
+                    print(
+                        f"\n[!] ABORTING STAGE 2 BATCH: 3 consecutive identical errors ({err_sig}).",
+                        flush=True,
+                    )
+                    exit_code = 2
+                    break
+            finally:
+                workspace.release_lock(lock_name)
+
+            if completed_count > 0 and completed_count % 3 == 0:
+                workspace.sync_completed_shards_to_sqlite()
 
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 2 Summary] Extracted {completed_count} video(s). Compactor synced: {sync_stats}", flush=True)
@@ -797,37 +800,122 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.mode == "stage1":
-        cmd = [
-            sys.executable, str(Path(__file__).resolve()),
-            "--mode", "stage1-worker",
-            "--batch-videos", str(args.batch_videos),
-            "--max-session-minutes", str(args.max_session_minutes),
-            "--whisper-model", args.whisper_model,
-            "--whisper-batch-size", str(args.whisper_batch_size),
-        ]
-        if args.debates_only:
-            cmd.append("--debates-only")
-        if args.keep_raw_audio:
-            cmd.append("--keep-raw-audio")
-        if args.offline_only:
-            cmd.append("--offline-only")
-        if args.worker_id:
-            cmd += ["--worker-id", args.worker_id]
-        return subprocess.run(cmd, check=False).returncode
+        total_budget_min = float(args.max_session_minutes)
+        t_start = time.time()
+        deadline = (t_start + (total_budget_min * 60.0)) if total_budget_min > 0 else None
+        round_num = 0
+        batch_size = args.batch_videos if args.batch_videos > 0 else 8
+        exit_code = 0
+        ws = SharedWorkspace(worker_name=args.worker_id or None)
+
+        while True:
+            round_num += 1
+            if deadline is not None and time.time() >= deadline:
+                print(f"\n[Stage 1 Dedicated Worker] Session time budget ({args.max_session_minutes}m) reached. Stopping cleanly.", flush=True)
+                break
+
+            manifest = load_or_create_manifest(ws)
+            cands = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
+            if not cands:
+                print("\n[Stage 1 Dedicated Worker] All candidate videos have completed Stage 1 processing! Stopping cleanly.", flush=True)
+                break
+
+            budget_txt = f"{round((deadline - time.time()) / 60.0, 1)}m remaining" if deadline is not None else "continuous until disconnect"
+            print(
+                f"\n[Stage 1 Dedicated Worker] === Continuous Batch Round #{round_num} "
+                f"({len(cands)} candidates ready | batch size={batch_size} | {budget_txt}) ===",
+                flush=True,
+            )
+
+            rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
+            cmd = [
+                sys.executable, str(Path(__file__).resolve()),
+                "--mode", "stage1-worker",
+                "--batch-videos", str(batch_size),
+                "--max-session-minutes", str(rem_min),
+                "--whisper-model", args.whisper_model,
+                "--whisper-batch-size", str(args.whisper_batch_size),
+            ]
+            if args.debates_only:
+                cmd.append("--debates-only")
+            if args.keep_raw_audio:
+                cmd.append("--keep-raw-audio")
+            if args.offline_only:
+                cmd.append("--offline-only")
+            if args.worker_id:
+                cmd += ["--worker-id", args.worker_id]
+
+            res = subprocess.run(cmd, env=_get_subprocess_env(), check=False)
+            if res.returncode != 0:
+                exit_code = res.returncode
+                print(f"[Stage 1 Dedicated Worker] Round #{round_num} exited with code {res.returncode}.", flush=True)
+                if res.returncode == 2:  # Fatal abort (e.g. 3 consecutive identical crashes)
+                    break
+                time.sleep(10)
+
+            # If user explicitly set max-session-minutes > 0 and deadline is reached, exit cleanly
+            if total_budget_min > 0 and deadline is not None and time.time() >= deadline:
+                break
+
+            # Check if progress was made or if remaining candidates are locked
+            manifest = load_or_create_manifest(ws)
+            cands_after = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
+            if len(cands_after) >= len(cands):
+                active_locks = list(ws.locks_dir.glob("*.stage1.lock.json"))
+                if active_locks:
+                    print(f"[Stage 1 Standby] Remaining candidates currently locked by other workers. Waiting 30s...", flush=True)
+                    time.sleep(30)
+                else:
+                    print(f"[Stage 1 Standby] No candidates progressed in Round #{round_num}. Waiting 20s before retry...", flush=True)
+                    time.sleep(20)
+
+        synced = ws.sync_completed_shards_to_sqlite()
+        print(f"\n[Stage 1 Dedicated Worker] Final SQLite Sync: {synced}", flush=True)
+        return exit_code
 
     if args.mode == "stage2":
-        cmd = [
-            sys.executable, str(Path(__file__).resolve()),
-            "--mode", "stage2-worker",
-            "--stage2-batch-videos", str(args.stage2_batch_videos),
-            "--max-session-minutes", str(args.max_session_minutes),
-            "--llm-model", args.llm_model,
-            "--llm-context-length", str(args.llm_context_length),
-            "--wait-for-scenarios",
-        ]
-        if args.worker_id:
-            cmd += ["--worker-id", args.worker_id]
-        return subprocess.run(cmd, check=False).returncode
+        total_budget_min = float(args.max_session_minutes)
+        t_start = time.time()
+        deadline = (t_start + (total_budget_min * 60.0)) if total_budget_min > 0 else None
+        exit_code = 0
+        ws = SharedWorkspace(worker_name=args.worker_id or None)
+
+        while True:
+            if deadline is not None and time.time() >= deadline:
+                print(f"\n[Stage 2 Dedicated Worker] Session time budget ({args.max_session_minutes}m) reached. Stopping cleanly.", flush=True)
+                break
+
+            rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
+            cmd = [
+                sys.executable, str(Path(__file__).resolve()),
+                "--mode", "stage2-worker",
+                "--stage2-batch-videos", str(args.stage2_batch_videos),
+                "--max-session-minutes", str(rem_min),
+                "--llm-model", args.llm_model,
+                "--llm-context-length", str(args.llm_context_length),
+                "--wait-for-scenarios",
+            ]
+            if args.worker_id:
+                cmd += ["--worker-id", args.worker_id]
+
+            res = subprocess.run(cmd, env=_get_subprocess_env(), check=False)
+            if res.returncode != 0:
+                exit_code = res.returncode
+                print(f"[Stage 2 Dedicated Worker] Process exited with code {res.returncode}.", flush=True)
+                if res.returncode == 2:  # Fatal abort
+                    break
+                time.sleep(15)
+
+            if total_budget_min > 0 and deadline is not None and time.time() >= deadline:
+                break
+
+            manifest = load_or_create_manifest(ws)
+            cands = select_stage2_candidates(ws, manifest)
+            if not cands and total_budget_min > 0:
+                break
+            time.sleep(5)
+
+        return exit_code
 
     if args.mode == "stage1-worker":
         return run_stage1_worker(args)
