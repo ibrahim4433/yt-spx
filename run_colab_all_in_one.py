@@ -60,8 +60,14 @@ def setup_colab_drive() -> bool:
     local_torch_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("TORCH_HOME", str(local_torch_cache))
 
-    # Fast restore of pre-downloaded AI models from Drive archive (~15s)
-    _restore_model_archive_if_present()
+    # Clean up any legacy experimental model tar archive on Drive to save space and prevent FUSE hang
+    if ws.is_drive:
+        legacy_models_tar = ws.root / ".cache" / "models" / "stage1_models.tar"
+        if legacy_models_tar.exists():
+            try:
+                legacy_models_tar.unlink()
+            except Exception:
+                pass
 
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")
@@ -232,55 +238,6 @@ def _cache_wheel_on_drive(pkg_name: str, constraints_path: Optional[Path] = None
         )
     except Exception:
         pass
-
-
-def _restore_model_archive_if_present() -> None:
-    """Restores pre-downloaded AI models from Google Drive to fast local SSD (/root/.cache) in ~15-20s."""
-    try:
-        from core.drive_sync import SharedWorkspace
-        ws = SharedWorkspace()
-        if not ws.is_drive:
-            return
-        tar_path = ws.root / ".cache" / "models" / "stage1_models.tar"
-        root_cache = Path("/root/.cache")
-        # Check if already restored
-        if (root_cache / "torch" / "NeMo").exists() and (root_cache / "huggingface" / "hub").exists():
-            return
-        if tar_path.exists() and tar_path.stat().st_size > 50_000_000:
-            print("   -> Restoring cached AI models (Whisper, NeMo, Demucs) from Google Drive archive (~15s)...", flush=True)
-            root_cache.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["tar", "-xf", str(tar_path), "-C", str(root_cache)], check=False)
-    except Exception as exc:
-        print(f"   [-] Note on model archive restore: {exc}", flush=True)
-
-
-def save_stage1_models_to_drive_archive(workspace: Any) -> None:
-    """Creates a single persistent models archive on Drive if not already present."""
-    if not getattr(workspace, "is_drive", False):
-        return
-    tar_path = workspace.root / ".cache" / "models" / "stage1_models.tar"
-    if tar_path.exists() and tar_path.stat().st_size > 50_000_000:
-        return
-    root_cache = Path("/root/.cache")
-    if not (root_cache / "torch").exists() and not (root_cache / "huggingface").exists():
-        return
-    tar_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_tar = tar_path.parent / ".stage1_models.tmp.tar"
-    print("\n   -> [Cache] Archiving downloaded AI models to Google Drive for 15s future boot times...", flush=True)
-    dirs_to_pack = [d for d in ("torch", "huggingface") if (root_cache / d).exists()]
-    if not dirs_to_pack:
-        return
-    res = subprocess.run(
-        ["tar", "-cf", str(tmp_tar), "-C", str(root_cache)] + dirs_to_pack,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if res.returncode == 0 and tmp_tar.exists() and tmp_tar.stat().st_size > 50_000_000:
-        os.replace(tmp_tar, tar_path)
-        print("   -> [Cache] [DONE] Saved persistent model archive to Google Drive!", flush=True)
-    else:
-        tmp_tar.unlink(missing_ok=True)
 
 
 def _dist_version(dist_name: str) -> str:

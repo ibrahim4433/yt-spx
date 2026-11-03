@@ -372,13 +372,6 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 1 Summary] Completed {completed_count} scenario(s). Compactor synced: {sync_stats}", flush=True)
 
-    if completed_count > 0 and getattr(workspace, "is_drive", False):
-        try:
-            from run_colab_all_in_one import save_stage1_models_to_drive_archive
-            save_stage1_models_to_drive_archive(workspace)
-        except Exception:
-            pass
-
     return exit_code
 
 
