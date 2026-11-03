@@ -69,9 +69,12 @@ def setup_colab_drive() -> bool:
         from core.cookie_pool import CookiePool
 
         (ws.root / "cookies").mkdir(parents=True, exist_ok=True)
-        CookiePool(ws).print_summary(indent="   -> ")
+        pool = CookiePool(ws)
+        healthy = pool.healthy_cookies()
+        total_discovered = len(pool.discover())
+        print(f"   -> Ingestion strategy  : Anonymous first (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
     except Exception as exc:
-        print(f"   -> Cookies pool        : check skipped ({exc})")
+        print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True
 
 
@@ -108,10 +111,30 @@ def _get_pip_cache_args() -> List[str]:
     ]
 
 
-def _ensure_uv_runtime() -> bool:
-    """Ensures Astral's uv is available for 10x-50x faster parallel wheel installs."""
-    if shutil.which("uv") is not None or _dist_version("uv") != "":
-        return True
+def _get_uv_binary() -> Optional[str]:
+    """Locates the standalone uv executable on disk."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    candidates = [
+        Path(sys.prefix) / "bin" / "uv",
+        Path(sys.prefix) / "Scripts" / "uv.exe",
+        Path.home() / ".local" / "bin" / "uv",
+        Path.home() / ".cargo" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+        Path("/usr/bin/uv"),
+    ]
+    for c in candidates:
+        if c.exists() and (os.access(c, os.X_OK) or sys.platform == "win32"):
+            return str(c)
+    return None
+
+
+def _ensure_uv_runtime() -> Optional[str]:
+    """Ensures Astral's uv standalone executable is available for fast parallel installs."""
+    uv_bin = _get_uv_binary()
+    if uv_bin:
+        return uv_bin
     try:
         pip_cache = _get_pip_cache_args()
         subprocess.run(
@@ -120,9 +143,19 @@ def _ensure_uv_runtime() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return shutil.which("uv") is not None or _dist_version("uv") != ""
+        uv_bin = _get_uv_binary()
+        if uv_bin:
+            return uv_bin
+        subprocess.run(
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            shell=True,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return _get_uv_binary()
     except Exception:
-        return False
+        return None
 
 
 def _get_drive_wheels_dir() -> Optional[Path]:
@@ -154,13 +187,19 @@ def _fast_install(
     w_args = [f"--find-links={w_dir}"] if w_dir and w_dir.exists() else []
     extra = list(extra_args or [])
 
-    # Strategy 1: Attempt Astral's uv for ultra-fast parallel installation
-    if _ensure_uv_runtime():
-        uv_cmd = [sys.executable, "-m", "uv", "pip", "install", "--system", "-q"]
+    # Strategy 1: Attempt Astral's uv for ultra-fast parallel installation (using direct uv executable binary)
+    uv_bin = _ensure_uv_runtime()
+    if uv_bin:
+        uv_cmd = [uv_bin, "pip", "install", "--system", "-q"]
         if no_deps:
             uv_cmd.append("--no-deps")
         uv_cmd.extend(c_arg + w_args + extra + pkgs)
-        res = subprocess.run(uv_cmd, check=False)
+        res = subprocess.run(
+            uv_cmd,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         if res.returncode == 0:
             return
 

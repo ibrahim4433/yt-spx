@@ -666,6 +666,55 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         self.assertTrue(can_dl)
         self.assertEqual(rem, 0.0)
 
+    def test_fetch_video_audio_m1_cookie_fallback_when_anonymous_restricted(self):
+        import time as _t
+        import subprocess
+        from unittest.mock import patch
+        from core.yt_audio_fetcher import fetch_video_audio_m1
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        good_cookie = cdir / "good_acct.txt"
+        good_cookie.write_text(
+            f"# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t{future}\t__Secure-3PSID\tvalid_auth_token\n",
+            encoding="utf-8",
+        )
+
+        vid = "test_restricted_anon"
+        record = {"video_id": vid, "youtube_url": f"https://www.youtube.com/watch?v={vid}"}
+
+        call_log = []
+
+        def mock_subp_run(cmd, *args, **kwargs):
+            has_cookies = "--cookies" in cmd
+            call_log.append("cookie" if has_cookies else "anon")
+            if not has_cookies:
+                # Simulate bot check on anonymous
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="ERROR: Sign in to confirm you’re not a bot. This helps protect our community.",
+                )
+            # Cookie fallback succeeds
+            for i, arg in enumerate(cmd):
+                if arg == "-o" and i + 1 < len(cmd):
+                    out_pat = Path(cmd[i + 1])
+                    tmp_dir = out_pat.parent
+                    dummy_audio = tmp_dir / f"{vid}.opus"
+                    dummy_audio.write_bytes(b"OggS" + b"\x00" * 10000)
+                    dummy_info = tmp_dir / f"{vid}.info.json"
+                    dummy_info.write_text('{"duration": 90.0}', encoding="utf-8")
+                    break
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[download] 100% of 10.0KiB")
+
+        with patch("subprocess.run", side_effect=mock_subp_run), patch("time.sleep", return_value=None):
+            raw_audio, info = fetch_video_audio_m1(record, self.ws, min_global_gap_sec=0.0)
+
+        self.assertIsNotNone(raw_audio)
+        self.assertTrue(raw_audio.exists())
+        self.assertEqual(call_log, ["anon", "cookie"])
+
 
 if __name__ == "__main__":
     unittest.main()

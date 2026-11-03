@@ -149,23 +149,14 @@ def fetch_video_audio_m1(
         if runtimes:
             base_cmd.extend(["--js-runtimes", ",".join(runtimes)])
 
-        # Multi-cookie rotation: try each healthy cookies file (best first); on a bot-check / 429 /
-        # dead-cookie response, quarantine that cookie in the shared Drive registry and retry the
-        # SAME video with the next one.
-        # An anonymous attempt (None) is ALWAYS appended as the final fallback so that rotated/expired
-        # cookies never block downloads that YouTube serves cleanly without authentication!
+        # Multi-attempt strategy:
+        # 1. Anonymous download FIRST by default!
+        #    YouTube serves public debate videos cleanly without authentication via the android/web client.
+        # 2. If anonymous encounters a restriction (bot-check / rate-limit / age-gate),
+        #    only then fallback to the healthy cookie pool.
         pool = CookiePool(workspace)
-        discovered = pool.discover()
         healthy = pool.healthy_cookies()[:max_cookie_attempts]
-        if discovered and not healthy:
-            print(
-                f"    [cookies] All {len(discovered)} cookie file(s) are expired/quarantined "
-                "-> falling back to anonymous download.",
-                flush=True,
-            )
-        attempts: List[Optional[Path]] = list(healthy)
-        if None not in attempts:
-            attempts.append(None)
+        attempts: List[Optional[Path]] = [None] + list(healthy)
 
         proc = None
         last_kind = ""
@@ -189,8 +180,8 @@ def fetch_video_audio_m1(
                 cookie_label = pool.cookie_key(cookie)
             cmd.append(url)
 
-            if idx > 0 or len(attempts) > 1:
-                print(f"    [cookies] Attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
+            if idx > 0:
+                print(f"    [cookies] Fallback attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
 
             proc = subprocess.run(
                 cmd,
@@ -230,7 +221,12 @@ def fetch_video_audio_m1(
                     print(f"    [cookies] {cookie_label} failed ({fail_kind}) -> quarantined, rotating to next attempt.", flush=True)
                 continue
 
-            # If anonymous attempt failed but there are remaining attempts
+            # If anonymous attempt failed (idx == 0) and cookies are available, log fallback
+            if idx == 0 and len(attempts) > 1:
+                print(f"    [cookies] Anonymous download encountered restriction ({kind or 'code ' + str(proc.returncode)}) -> trying cookie fallback pool...", flush=True)
+                continue
+
+            # If any attempt failed but there are remaining fallback attempts
             if idx + 1 < len(attempts):
                 continue
 
