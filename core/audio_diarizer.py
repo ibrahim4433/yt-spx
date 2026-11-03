@@ -407,7 +407,7 @@ class WarmASRAlignmentEngine:
         self,
         whisper_model_name: str = "large-v3-turbo",
         device: str = "cuda",
-        batch_size: int = 12,
+        batch_size: int = 24,
     ):
         self.whisper_model_name = whisper_model_name
         self.device = device
@@ -644,7 +644,7 @@ class Stage1AudioPipeline:
         workspace: SharedWorkspace,
         whisper_model: str = "large-v3-turbo",
         device: str = "cuda",
-        batch_size: int = 12,
+        batch_size: int = 24,
         keep_raw_audio: bool = False,
     ):
         self.workspace = workspace
