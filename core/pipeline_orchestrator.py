@@ -384,7 +384,7 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     manifest = load_or_create_manifest(workspace)
     candidates = select_stage2_candidates(workspace, manifest)
 
-    should_wait = getattr(args, "wait_for_scenarios", False) or args.mode in ("stage2", "stage2-worker")
+    should_wait = bool(getattr(args, "wait_for_scenarios", False))
     if not candidates and not should_wait:
         print("[Stage 2] No M5 scenarios waiting for LLM extraction.")
         return 0
@@ -670,12 +670,21 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
             s1_after = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
             s2_after = len(select_stage2_candidates(workspace, manifest))
             if s1_after >= s1_before and s2_after >= s2_before:
-                print(
-                    "[Orchestrator] No unlocked/downloadable candidates progressed in this round "
-                    "(remaining items may be locked by another worker or offline-only). Stopping cleanly.",
-                    flush=True,
-                )
-                break
+                active_locks = list(workspace.locks_dir.glob("*.lock.json"))
+                if active_locks:
+                    print(
+                        f"[Orchestrator] Candidates currently locked by other workers ({len(active_locks)} active locks). "
+                        "Waiting 30s before next round...",
+                        flush=True,
+                    )
+                    time.sleep(30)
+                else:
+                    print(
+                        "[Orchestrator] No unlocked/downloadable candidates progressed in this round "
+                        "(remaining items may be locked by another worker or offline-only). Stopping cleanly.",
+                        flush=True,
+                    )
+                    break
     else:
         s1_budget_min = max(5, int(round(total_budget_min * 0.62)))
         print(f"[Orchestrator] Launching Isolated Stage 1 Subprocess (budget={s1_budget_min}m)...", flush=True)
