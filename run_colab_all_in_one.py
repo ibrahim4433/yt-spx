@@ -87,9 +87,7 @@ def setup_colab_drive() -> bool:
 
 
 def _ensure_deno_runtime() -> None:
-    """Installs Deno & aria2 so yt-dlp solves challenges and downloads at multi-connection speed."""
-    if not shutil.which("aria2c") and shutil.which("apt-get"):
-        subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Installs Deno so yt-dlp solves YouTube challenges cleanly."""
     for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
         if d.exists() and str(d) not in os.environ.get("PATH", ""):
             os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"

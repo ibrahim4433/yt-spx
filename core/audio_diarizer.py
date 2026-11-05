@@ -569,19 +569,26 @@ class WarmASRAlignmentEngine:
                     postprocess_results,
                 )
                 self._ensure_aligner()
-                wav_tensor = torch.from_numpy(audio_waveform).to(self._align_model.dtype).to(self._align_model.device)
-                emissions, stride = generate_emissions(
-                    self._align_model,
-                    wav_tensor,
-                    batch_size=max(4, self.batch_size // 2),
-                )
-                del wav_tensor
+                try:
+                    wav_tensor = torch.from_numpy(audio_waveform).to(self._align_model.dtype).to(self._align_model.device)
+                    emissions, stride = generate_emissions(
+                        self._align_model,
+                        wav_tensor,
+                        batch_size=max(4, self.batch_size // 2),
+                    )
+                    del wav_tensor
+                except (TypeError, RuntimeError):
+                    emissions, stride = generate_emissions(
+                        self._align_model,
+                        audio_waveform,
+                        batch_size=max(4, self.batch_size // 2),
+                    )
                 if isinstance(emissions, torch.Tensor):
-                    emissions = emissions.cpu()
+                    emissions = emissions.detach().cpu().numpy()
                 elif isinstance(emissions, (list, tuple)):
-                    emissions = [e.cpu() if isinstance(e, torch.Tensor) else e for e in emissions]
-                elif hasattr(emissions, "cpu"):
-                    emissions = emissions.cpu()
+                    emissions = [e.detach().cpu().numpy() if isinstance(e, torch.Tensor) else e for e in emissions]
+                elif hasattr(emissions, "detach"):
+                    emissions = emissions.detach().cpu().numpy()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -596,18 +603,18 @@ class WarmASRAlignmentEngine:
                     self._align_tokenizer,
                 )
                 if isinstance(scores, torch.Tensor):
-                    scores = scores.cpu()
+                    scores = scores.detach().cpu().numpy()
                 elif isinstance(scores, (list, tuple)):
-                    scores = [s.cpu() if isinstance(s, torch.Tensor) else s for s in scores]
-                elif hasattr(scores, "cpu"):
-                    scores = scores.cpu()
+                    scores = [s.detach().cpu().numpy() if isinstance(s, torch.Tensor) else s for s in scores]
+                elif hasattr(scores, "detach"):
+                    scores = scores.detach().cpu().numpy()
 
                 if isinstance(segments, torch.Tensor):
-                    segments = segments.cpu()
+                    segments = segments.detach().cpu().numpy()
                 elif isinstance(segments, (list, tuple)):
-                    segments = [s.cpu() if isinstance(s, torch.Tensor) else s for s in segments]
-                elif hasattr(segments, "cpu"):
-                    segments = segments.cpu()
+                    segments = [s.detach().cpu().numpy() if isinstance(s, torch.Tensor) else s for s in segments]
+                elif hasattr(segments, "detach"):
+                    segments = segments.detach().cpu().numpy()
 
                 spans = get_spans(tokens_starred, segments, blank_token)
                 word_timestamps = postprocess_results(text_starred, spans, stride, scores)

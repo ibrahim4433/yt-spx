@@ -137,6 +137,7 @@ def fetch_video_audio_m1(
     vid = video_record["video_id"]
     url = video_record.get("youtube_url") or f"https://www.youtube.com/watch?v={vid}"
     state = workspace.get_video_state(vid)
+    expected_dur = float(video_record.get("duration") or 0.0)
 
     # Fast-skip 1: Already past M2 and clean Opus exists on Drive -> no download ever needed!
     clean_opus = workspace.audio_clean_dir / f"{vid}.opus"
@@ -187,9 +188,6 @@ def fetch_video_audio_m1(
             "--sleep-requests", "1",
             "-o", out_tmpl,
         ]
-
-        if shutil.which("aria2c"):
-            base_cmd.extend(["--downloader", "aria2c", "--downloader-args", "aria2c:-x 4 -s 4 -k 1M"])
 
         # Detect available JS runtimes (Deno & Node in Colab)
         for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
@@ -257,6 +255,18 @@ def fetch_video_audio_m1(
             last_tail = output[-240:].strip()
 
             if proc.returncode == 0:
+                # Ensure the downloaded file is complete and not an aborted/truncated fragment
+                cand_audio = None
+                for f in tmp_dir.iterdir():
+                    if f.is_file() and not f.name.endswith((".part", ".ytdl", ".info.json", "cookies_working.txt")):
+                        cand_audio = f
+                        break
+                min_bytes = int(expected_dur * 1500) if expected_dur >= 300.0 else 5_000
+                if cand_audio is None or cand_audio.stat().st_size < min_bytes:
+                    cand_sz = cand_audio.stat().st_size if cand_audio else 0
+                    print(f"    [download] Attempt {idx + 1} produced truncated file ({cand_sz // 1024} KB < {min_bytes // 1024} KB expected) -> rotating to next attempt.", flush=True)
+                    continue
+
                 if cookie is not None:
                     if kind == "invalid":
                         # Downloaded anonymously, but this cookie is dead -> quarantine so next video uses another
@@ -331,8 +341,13 @@ def fetch_video_audio_m1(
             elif f.is_file() and not f.name.endswith((".part", ".ytdl")):
                 downloaded_audio = f
 
-        if downloaded_audio is None or downloaded_audio.stat().st_size < 5_000:
-            raise RuntimeError(f"Download pipeline completed for {vid} without producing a valid audio stream.")
+        min_bytes = int(expected_dur * 1500) if expected_dur >= 300.0 else 5_000
+        if downloaded_audio is None or downloaded_audio.stat().st_size < min_bytes:
+            cand_sz = downloaded_audio.stat().st_size if downloaded_audio else 0
+            raise RuntimeError(
+                f"Download pipeline completed for {vid} with incomplete file "
+                f"({cand_sz // 1024} KB vs >={min_bytes // 1024} KB expected)."
+            )
 
         # Atomically move raw audio + compact metadata to shared 5 TB Drive (Micro-Step M1!)
         workspace.audio_raw_dir.mkdir(parents=True, exist_ok=True)
