@@ -289,10 +289,8 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     allow_downloads = not args.offline_only
     exit_code = 0
 
-    # If Smart-TV OAuth2 is configured, clear any stale circuit breaker lock from previous anonymous attempts
-    oauth_token_file = workspace.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
-    if oauth_token_file.exists() and oauth_token_file.stat().st_size > 20:
-        workspace.clear_youtube_circuit_breaker()
+    # Auto-clear any stale circuit breaker lock from previous runs so fresh batch starts unblocked
+    workspace.clear_youtube_circuit_breaker()
 
     # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies)
     for cand in candidates:
@@ -631,10 +629,8 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
     workspace = SharedWorkspace(worker_name=args.worker_id or None)
     exit_code = 0
 
-    # Auto-clear any previous circuit breaker cooldown tripped by anonymous attempts if OAuth is present
-    oauth_token_file = workspace.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
-    if oauth_token_file.exists() and oauth_token_file.stat().st_size > 20:
-        workspace.clear_youtube_circuit_breaker()
+    # Auto-clear any previous circuit breaker cooldown so new orchestrator session starts unblocked
+    workspace.clear_youtube_circuit_breaker()
 
     if total_budget_min <= 0:
         round_num = 0

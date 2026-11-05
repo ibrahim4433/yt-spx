@@ -80,10 +80,8 @@ def setup_colab_drive() -> bool:
         total_discovered = len(pool.discover())
         oauth_token_file = ws.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
         has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
-        if has_oauth:
-            print(f"   -> Ingestion strategy  : Smart-TV OAuth2 [ACTIVE] (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
-        else:
-            print(f"   -> Ingestion strategy  : Anonymous first (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        oauth_tag = " + Smart-TV OAuth2 [ACTIVE]" if has_oauth else ""
+        print(f"   -> Ingestion strategy  : Android player (anti-bot){oauth_tag} (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True

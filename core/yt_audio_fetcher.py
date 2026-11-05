@@ -210,14 +210,14 @@ def fetch_video_audio_m1(
         has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
 
         # Multi-attempt strategy:
-        # 1. If Smart-TV OAuth2 token is paired on Google Drive, use OAuth2 FIRST!
-        #    This is fully authenticated directly from Colab's IP, avoiding datacenter bot-checks.
-        # 2. Otherwise, Anonymous download is tried first via android/web player client.
+        # 1. Anonymous Android client FIRST!
+        #    The Android player API bypasses web PO-tokens, JS deciphering, and Colab datacenter bot-checks.
+        #    Public debate videos download instantly and anonymously without authentication.
+        # 2. Fallback to Smart-TV OAuth2 (if paired) for restricted/age-gated videos.
         # 3. Fallback to the healthy rotating cookie pool.
-        attempts: List[Any] = []
+        attempts: List[Any] = [None]
         if has_oauth:
             attempts.append("__oauth2__")
-        attempts.append(None)
         attempts.extend(list(healthy))
 
         proc = None
@@ -233,18 +233,18 @@ def fetch_video_audio_m1(
                     f.unlink(missing_ok=True)
 
             cmd = list(base_cmd)
-            cookie_label = "anonymous"
+            cookie_label = "anonymous (android client)"
             if cookie == "__oauth2__":
                 cmd.extend([
                     "--username", "oauth2",
                     "--password", "",
                     "--cache-dir", str(oauth_cache_dir),
-                    "--extractor-args", "youtube:player_skip=initial_data",
+                    "--extractor-args", "youtube:player_client=android;player_skip=initial_data",
                 ])
                 cookie_label = "Smart-TV OAuth2 (Colab token)"
             else:
                 cmd.extend([
-                    "--extractor-args", "youtube:player_client=android,web;player_skip=initial_data",
+                    "--extractor-args", "youtube:player_client=android;player_skip=initial_data",
                 ])
                 if cookie is not None:
                     # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
