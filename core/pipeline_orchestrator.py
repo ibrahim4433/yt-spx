@@ -289,6 +289,11 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     allow_downloads = not args.offline_only
     exit_code = 0
 
+    # If Smart-TV OAuth2 is configured, clear any stale circuit breaker lock from previous anonymous attempts
+    oauth_token_file = workspace.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
+    if oauth_token_file.exists() and oauth_token_file.stat().st_size > 20:
+        workspace.clear_youtube_circuit_breaker()
+
     # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies)
     for cand in candidates:
         vid = cand["video_id"]

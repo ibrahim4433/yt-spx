@@ -14,6 +14,7 @@ Key Safeguards:
 
 import os
 import re
+import sys
 import shutil
 import random
 import time
@@ -154,10 +155,11 @@ def fetch_video_audio_m1(
     try:
         out_tmpl = str(tmp_dir / f"{vid}.%(ext)s")
         base_cmd = [
-            "yt-dlp",
+            sys.executable,
+            "-m",
+            "yt_dlp",
             "--no-playlist",
             "--format", "ba/b/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
-            "--extractor-args", "youtube:player_client=android,web",
             "--write-info-json",
             "--no-write-subs",
             "--no-progress",
@@ -214,20 +216,22 @@ def fetch_video_audio_m1(
             cmd = list(base_cmd)
             cookie_label = "anonymous"
             if cookie == "__oauth2__":
-                # Strip android client extractor args because OAuth2 operates on TV client
-                cmd = [c for c in base_cmd if "youtube:player_client" not in c]
                 cmd.extend([
                     "--username", "oauth2",
                     "--password", "",
                     "--cache-dir", str(oauth_cache_dir),
                 ])
                 cookie_label = "Smart-TV OAuth2 (Colab token)"
-            elif cookie is not None:
-                # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
-                cookies_tmp = tmp_dir / "cookies_working.txt"
-                sanitize_cookie_file(cookie, cookies_tmp)
-                cmd.extend(["--cookies", str(cookies_tmp)])
-                cookie_label = pool.cookie_key(cookie)
+            else:
+                cmd.extend([
+                    "--extractor-args", "youtube:player_client=android,web",
+                ])
+                if cookie is not None:
+                    # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
+                    cookies_tmp = tmp_dir / "cookies_working.txt"
+                    sanitize_cookie_file(cookie, cookies_tmp)
+                    cmd.extend(["--cookies", str(cookies_tmp)])
+                    cookie_label = pool.cookie_key(cookie)
             cmd.append(url)
 
             if idx > 0:
@@ -268,7 +272,7 @@ def fetch_video_audio_m1(
             if cookie == "__oauth2__":
                 fail_kind = kind or "oauth_restricted"
                 last_kind = fail_kind
-                print(f"    [auth] Smart-TV OAuth2 attempt failed ({fail_kind}) -> rotating to next attempt.", flush=True)
+                print(f"    [auth] Smart-TV OAuth2 attempt failed ({fail_kind}: {last_tail[:180]}) -> rotating to next attempt.", flush=True)
                 continue
 
             # If this attempt failed while using a cookie, quarantine/record it and ROTATE!
