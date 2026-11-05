@@ -567,6 +567,137 @@ def ingest_scenario_payload(scenario: Dict[str, Any], db_path: Optional[Path] = 
     conn.close()
 
 
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]")
+
+_SCRIPT_REPLACEMENTS = [
+    ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+    ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+    ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
+    ("따라서،", "لذلك،"), ("따라서", "لذلك"), ("여전히", "لا تزال"),
+    ("المiracles", "المعجزات"), ("فالمachines", "فالآلات"), ("كمessenger", "كرسول"),
+    ("للمonotheism", "للتوحيد"), ("السcribes", "النساخ"), ("للسcribes", "للنساخ"),
+    ("نihilist", "عدمي"), ("النihilists", "العدميون"), ("بprocesseات", "بعمليات"),
+    ("。，？，。", "؟"),
+    ("。", "."),
+    ("，", "،"),
+    ("？", "؟"),
+    ("！", "!"),
+]
+
+
+def sanitize_text_field(text: Optional[str]) -> str:
+    """Purges foreign scripts, Cyrillic, and CJK artifacts from text fields."""
+    if not text or not isinstance(text, str):
+        return ""
+    val = text
+    for old_s, new_s in _SCRIPT_REPLACEMENTS:
+        if old_s in val:
+            val = val.replace(old_s, new_s)
+    val = _CYRILLIC_RE.sub("", val)
+    val = _CJK_RE.sub("", val)
+    return val.strip()
+
+
+def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Root-cause ingestion guard: enforces 100% clean scripts, authentic Da'ee attribution,
+    and turn-aligned metadata before committing to SQLite.
+    """
+    u = dict(unit)
+
+    # 1. Sanitize text fields
+    for k in (
+        "question_en", "question_ar",
+        "core_answer_summary_en", "core_answer_summary_ar",
+        "fallacy_or_misconception_exposed", "fallacy_or_misconception_exposed_ar",
+        "analogy_or_metaphor", "analogy_or_metaphor_ar",
+        "socratic_question", "socratic_question_ar",
+        "interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar",
+        "verbatim_quote", "verbatim_quote_ar",
+    ):
+        if k in u:
+            u[k] = sanitize_text_field(u[k])
+
+    # 2. Sanitize premises
+    for pk in ("logical_premises", "logical_premises_ar"):
+        val = u.get(pk)
+        if isinstance(val, list):
+            u[pk] = [sanitize_text_field(p) for p in val if sanitize_text_field(p)]
+        elif isinstance(val, str) and val.startswith("["):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    u[pk] = [sanitize_text_field(p) for p in parsed if sanitize_text_field(p)]
+            except Exception:
+                pass
+
+    # 3. Swap / repair Arabic premises if misplaced in English premises
+    p_en = u.get("logical_premises") or []
+    p_ar = u.get("logical_premises_ar") or []
+    if not p_ar and p_en and any(re.search(r"[\u0600-\u06ff]", str(p)) for p in p_en):
+        u["logical_premises_ar"] = list(p_en)
+
+    # 4. Enforce Da'ee attribution integrity (block generic placeholders)
+    vid = u.get("video_id")
+    daee_ar = u.get("daee_name_ar") or ""
+    daee_prof = u.get("daee_profile_id") or ""
+    if vid and (daee_ar in ("المحاور", "المحاور 1", "المحاور 2", "") or not daee_prof):
+        spk = conn.execute(
+            "SELECT profile_id, display_name_ar, display_name_en, speaker_id FROM video_speakers WHERE video_id = ? AND role = 'MAIN_DAEE'",
+            (vid,)
+        ).fetchone()
+        if spk and spk["display_name_ar"]:
+            u["daee_profile_id"] = spk["profile_id"] or ""
+            u["daee_name_ar"] = spk["display_name_ar"]
+            u["daee_name_en"] = spk["display_name_en"] or "Main Da'ee"
+            u["daee_speaker_id"] = spk["speaker_id"] or u.get("daee_speaker_id", "")
+        else:
+            vhint = conn.execute("SELECT primary_daee_hint FROM videos WHERE video_id = ?", (vid,)).fetchone()
+            if vhint and vhint[0]:
+                prof_id = vhint[0]
+                prof = conn.execute("SELECT name_ar, name_en FROM speaker_profiles WHERE profile_id = ?", (prof_id,)).fetchone()
+                if prof:
+                    u["daee_profile_id"] = prof_id
+                    u["daee_name_ar"] = prof["name_ar"]
+                    u["daee_name_en"] = prof["name_en"]
+
+    # 5. Enrich dialogue_exchange with timestamps and localized speaker names if missing
+    exchanges = u.get("dialogue_exchange") or []
+    if isinstance(exchanges, str) and exchanges.startswith("["):
+        try:
+            exchanges = json.loads(exchanges)
+        except Exception:
+            exchanges = []
+    if isinstance(exchanges, list) and exchanges:
+        enriched = []
+        for ex in exchanges:
+            if not isinstance(ex, dict):
+                continue
+            ex_copy = dict(ex)
+            tid = ex_copy.get("turn_id", "")
+            turn = conn.execute(
+                "SELECT start_ms, start_fmt, speaker_role, speaker_label_en, speaker_label_ar FROM scenario_turns WHERE turn_id = ?",
+                (tid,)
+            ).fetchone() if tid else None
+
+            role = ex_copy.get("role") or (turn["speaker_role"] if turn else "MAIN_DAEE")
+            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+            fallback_ar = u.get("daee_name_ar") if is_daee else "المحاور"
+            fallback_en = u.get("daee_name_en") if is_daee else "Interlocutor"
+
+            ex_copy["role"] = role
+            ex_copy["speaker_label_ar"] = (turn["speaker_label_ar"] if turn and turn["speaker_label_ar"] else None) or fallback_ar
+            ex_copy["speaker_label_en"] = (turn["speaker_label_en"] if turn and turn["speaker_label_en"] else None) or fallback_en
+            if turn and ("timestamp_formatted" not in ex_copy or ex_copy["timestamp_formatted"] in ("00:00", "")):
+                ex_copy["timestamp_formatted"] = turn["start_fmt"]
+                ex_copy["timestamp_seconds"] = int(turn["start_ms"] // 1000)
+            enriched.append(ex_copy)
+        u["dialogue_exchange"] = enriched
+
+    return u
+
+
 def insert_qa_unit(unit: Dict[str, Any], db_path: Optional[Path] = None) -> None:
     conn = get_db_connection(db_path)
     with conn:
@@ -575,6 +706,7 @@ def insert_qa_unit(unit: Dict[str, Any], db_path: Optional[Path] = None) -> None
 
 
 def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> None:
+    unit = _sanitize_and_validate_qa_unit(conn, unit)
     conn.execute(
         """
         INSERT OR REPLACE INTO qa_units (
@@ -826,6 +958,65 @@ def _hydrate_qa_row(row: sqlite3.Row, serial_num: int) -> Dict[str, Any]:
             d[out_key] = json.loads(d.get(json_col) or "[]")
         except Exception:
             d[out_key] = []
+
+    # Dynamic read-time sanitization: guarantees zero Russian/CJK artifacts even if DB is untouched clone
+    for text_key in (
+        "question_en", "question_ar",
+        "core_answer_summary_en", "core_answer_summary_ar",
+        "fallacy_or_misconception_exposed", "fallacy_or_misconception_exposed_ar",
+        "analogy_or_metaphor", "analogy_or_metaphor_ar",
+        "socratic_question", "socratic_question_ar",
+        "interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar",
+        "verbatim_quote", "verbatim_quote_ar",
+    ):
+        if text_key in d and isinstance(d[text_key], str):
+            d[text_key] = sanitize_text_field(d[text_key])
+
+    # Dynamic premise repair: if logical_premises_ar is empty but logical_premises has Arabic premises
+    if not d.get("logical_premises_ar") and d.get("logical_premises"):
+        p_en = d["logical_premises"]
+        if any(re.search(r"[\u0600-\u06ff]", str(p)) for p in p_en):
+            d["logical_premises_ar"] = list(p_en)
+
+    # Dynamic Da'ee attribution resolution: if generic ('المحاور', etc.)
+    if d.get("daee_name_ar") in ("المحاور", "المحاور 1", "المحاور 2", ""):
+        title = d.get("video_title_ar") or ""
+        if "هاشم" in title:
+            d["daee_name_ar"] = "هاشم"
+            d["daee_name_en"] = "Hashim"
+            d["daee_profile_id"] = "daee_hashim"
+        elif "منصور" in title:
+            d["daee_name_ar"] = "منصور"
+            d["daee_name_en"] = "Mansur"
+            d["daee_profile_id"] = "daee_mansur"
+        elif "حجاب" in title:
+            d["daee_name_ar"] = "محمد حجاب"
+            d["daee_name_en"] = "Mohammed Hijab"
+            d["daee_profile_id"] = "daee_hijab"
+        elif "عثمان" in title or "فاروق" in title:
+            d["daee_name_ar"] = "الشيخ عثمان بن فاروق"
+            d["daee_name_en"] = "Sheikh Uthman Ibn Farooq"
+            d["daee_profile_id"] = "daee_uthman"
+
+    # Dynamic dialogue exchange enrichment: ensure localized names and proper timestamps
+    exchanges = d.get("dialogue_exchange") or []
+    if isinstance(exchanges, list) and exchanges:
+        enriched_ex = []
+        for ex in exchanges:
+            if not isinstance(ex, dict):
+                continue
+            ex_copy = dict(ex)
+            role = ex_copy.get("role") or ""
+            is_daee = "DAEE" in role.upper()
+            if not ex_copy.get("speaker_label_ar") or ex_copy.get("speaker_label_ar") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
+                ex_copy["speaker_label_ar"] = (d.get("daee_name_ar") or "الداعية المحاور") if is_daee else "المحاور"
+            if not ex_copy.get("speaker_label_en") or ex_copy.get("speaker_label_en") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
+                ex_copy["speaker_label_en"] = (d.get("daee_name_en") or "Main Da'ee") if is_daee else "Interlocutor"
+            if not ex_copy.get("timestamp_formatted"):
+                ex_copy["timestamp_formatted"] = d.get("timestamp_formatted", "00:00")
+            enriched_ex.append(ex_copy)
+        d["dialogue_exchange"] = enriched_ex
+
     return d
 
 

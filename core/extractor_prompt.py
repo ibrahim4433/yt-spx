@@ -55,6 +55,15 @@ CRITICAL RULE 4: MONOLOGUES, INTROS, LIVE COMMENTS & ANTICIPATED OBJECTIONS (ا�
   * Set "interlocutor_verbatim_quote" to the Da'ee's words framing the doubt or question.
   * Provide the complete deductive proof, logical premises, analogies, and Classical Arabic fields just like a multi-speaker debate card.
 
+CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES (حظر تلفيق أو إعادة صياغة الاقتباسات)
+- `verbatim_quote` and `interlocutor_verbatim_quote` MUST be copied EXACTLY word-for-word from the transcript turns!
+- NEVER fabricate, paraphrase, or smooth what the Da'ee or interlocutor said into an artificial written essay.
+- If you want to deliver an authoritative, polished academic refutation, put it in `core_answer_summary_en` and `core_answer_summary_ar`, but keep `verbatim_quote` 100% faithful to the actual words spoken on camera.
+
+CRITICAL RULE 6: ZERO FOREIGN SCRIPT LEAKAGE (حظر تسرب الحروف الروسية أو الصينية نهائياً)
+- All `*_ar` fields must consist of pure, eloquent Classical Arabic with standard Arabic punctuation (`؟`, `،`, `.`).
+- NEVER output Russian Cyrillic words (e.g. "педوفيليا") or Chinese CJK punctuation (e.g. "。，？") in Arabic fields under any circumstance! Always use authentic Arabic equivalents (e.g. "البيدوفيليا / استغلال الأطفال").
+
 EXACT JSON OUTPUT SCHEMA (Array of Objects):
 [
   {

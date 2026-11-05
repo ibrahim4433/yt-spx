@@ -81,19 +81,29 @@ def clean_llm_json_array(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Purges stray CJK/Hangul tokens or Latin-Arabic splices from generated Classical Arabic fields."""
+    """Purges stray Cyrillic/Russian, CJK/Hangul tokens, or Latin-Arabic splices from generated Classical Arabic fields."""
     replacements = [
         ("따라서،", "لذلك،"), ("따라서", "لذلك"), ("여전히", "لا تزال"),
         ("المiracles", "المعجزات"), ("فالمachines", "فالآلات"), ("كمessenger", "كرسول"),
         ("للمonotheism", "للتوحيد"), ("السcribes", "النساخ"), ("للسcribes", "للنساخ"),
         ("نihilist", "عدمي"), ("النihilists", "العدميون"), ("بprocesseات", "بعمليات"),
+        ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+        ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+        ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
+        ("。，？，。", "؟"),
+        ("。", "."),
+        ("，", "،"),
+        ("？", "؟"),
+        ("！", "!"),
     ]
 
     def _clean_str(val: str) -> str:
         for old_s, new_s in replacements:
             if old_s in val:
                 val = val.replace(old_s, new_s)
-        return re.sub(r"[\u4e00-\u9fff\uac00-\ud7af\ufffd]+", "", val).strip()
+        # Strip remaining Cyrillic, CJK ideographs, Hangul, and CJK punctuation
+        val = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", val)
+        return val.strip()
 
     for k in [
         "question_ar",
@@ -255,12 +265,31 @@ def anchor_and_enrich_extracted_unit(
 
     if a_turn is not None:
         ans_sec = int(a_turn["start_ms"] // 1000)
-        daee_spk_id = a_turn.get("speaker_id", main_daee["speaker_id"] if main_daee else "")
+        # Enforce that Da'ee speaker MUST come from MAIN_DAEE or CO_DAEE role
+        if a_turn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+            daee_spk_id = a_turn.get("speaker_id", main_daee["speaker_id"] if main_daee else "")
+        else:
+            # If candidate answer turn erroneously pointed to an interlocutor turn, fall back strictly to main_daee
+            daee_spk_id = main_daee["speaker_id"] if main_daee else ""
     else:
         ans_sec = ts_sec
         daee_spk_id = main_daee["speaker_id"] if main_daee else ""
 
-    matched_daee = next((s for s in speakers if s["speaker_id"] == daee_spk_id), main_daee) or {}
+    matched_daee = next(
+        (s for s in speakers if s["speaker_id"] == daee_spk_id and s.get("role") in ("MAIN_DAEE", "CO_DAEE")),
+        main_daee
+    ) or {}
+
+    daee_name_en = matched_daee.get("display_name_en") or (main_daee.get("display_name_en") if main_daee else "Main Da'ee")
+    daee_name_ar = matched_daee.get("display_name_ar") or (main_daee.get("display_name_ar") if main_daee else "الداعية المحاور")
+    daee_profile_id = matched_daee.get("profile_id") or (main_daee.get("profile_id") if main_daee else "")
+
+    # Ensure daee_name_ar never falls into generic interlocutor labels
+    if daee_name_ar in ("المحاور", "المحاور 1", "المحاور 2", ""):
+        if main_daee and main_daee.get("display_name_ar"):
+            daee_name_ar = main_daee["display_name_ar"]
+            daee_name_en = main_daee.get("display_name_en") or "Main Da'ee"
+            daee_profile_id = main_daee.get("profile_id") or ""
 
     # Collect ordered source turn IDs referenced in dialogue_exchange + q_tid + a_tid
     src_tids: List[str] = []
@@ -279,11 +308,17 @@ def anchor_and_enrich_extracted_unit(
             continue
         etid = str(ex.get("turn_id") or "").strip()
         eturn = turns_by_id.get(etid)
+        role = ex.get("role") or (eturn.get("speaker_role") if eturn else "MAIN_DAEE")
+        is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+        
+        fallback_spk_ar = daee_name_ar if is_daee else "المحاور"
+        fallback_spk_en = daee_name_en if is_daee else "Interlocutor"
+
         enriched_exchange.append({
             "turn_id": etid,
-            "role": ex.get("role") or (eturn.get("speaker_role") if eturn else "MAIN_DAEE"),
-            "speaker_label_en": eturn.get("speaker_label_en", "") if eturn else "",
-            "speaker_label_ar": eturn.get("speaker_label_ar", "") if eturn else "",
+            "role": role,
+            "speaker_label_en": (eturn.get("speaker_label_en") if eturn else None) or fallback_spk_en,
+            "speaker_label_ar": (eturn.get("speaker_label_ar") if eturn else None) or fallback_spk_ar,
             "timestamp_seconds": int(eturn["start_ms"] // 1000) if eturn else ts_sec,
             "timestamp_formatted": eturn["start_fmt"] if eturn else ms_to_fmt(ts_sec * 1000),
             "move_type": ex.get("move_type", "Turn"),
@@ -304,9 +339,9 @@ def anchor_and_enrich_extracted_unit(
         "answer_timestamp_formatted": ms_to_fmt(ans_sec * 1000),
         "episode_index": episode_index,
         "daee_speaker_id": daee_spk_id,
-        "daee_profile_id": matched_daee.get("profile_id") or "",
-        "daee_name_en": matched_daee.get("display_name_en") or "Main Da'ee",
-        "daee_name_ar": matched_daee.get("display_name_ar") or "الداعية المحاور",
+        "daee_profile_id": daee_profile_id,
+        "daee_name_en": daee_name_en,
+        "daee_name_ar": daee_name_ar,
         "interlocutor_speaker_id": inter_spk_id,
         "dialogue_exchange": enriched_exchange,
         "source_turn_ids": src_tids,

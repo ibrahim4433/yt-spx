@@ -1273,9 +1273,16 @@ function renderCards(cards) {
               .map((ex) => {
                 const isDaeeRole = String(ex.role || "").includes("DAEE");
                 const roleCls = isDaeeRole ? "exchange-role-daee" : "exchange-role-inter";
-                const spkName = isAr
-                  ? ex.speaker_label_ar || ex.speaker_label_en || ex.role || ""
-                  : ex.speaker_label_en || ex.role || "";
+                let spkName = "";
+                if (isAr) {
+                  spkName = ex.speaker_label_ar && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_ar)
+                    ? ex.speaker_label_ar
+                    : (isDaeeRole ? (card.daee_name_ar || "الداعية المحاور") : "المحاور");
+                } else {
+                  spkName = ex.speaker_label_en && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_en)
+                    ? ex.speaker_label_en
+                    : (isDaeeRole ? (card.daee_name_en || "Main Da'ee") : "Interlocutor");
+                }
                 const exTxt = isAr ? ex.text_ar || ex.text_en || "" : ex.text_en || ex.text_ar || "";
                 const exTs = ex.timestamp_formatted || card.timestamp_formatted || "00:00";
                 const exSec = Number(ex.timestamp_seconds || card.timestamp_seconds || 0);

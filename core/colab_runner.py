@@ -156,6 +156,14 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
         ("ال hypocritical", "النفاق وازدواجية المعايير"),
         ("بهomo جنسياً", "بميول مثلية"),
         ("التطهيرracial", "التطهير العرقي"),
+        ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+        ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
+        ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
+        ("。，？，。", "؟"),
+        ("。", "."),
+        ("，", "،"),
+        ("？", "؟"),
+        ("！", "!"),
     ]
     ar_keys = [
         "question_ar",
@@ -172,7 +180,7 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
             for old_s, new_s in replacements:
                 if old_s in val:
                     val = val.replace(old_s, new_s)
-            val = re.sub(r"[\u4e00-\u9fff\uac00-\ud7af\ufffd]+", "", val)
+            val = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", val)
             item[k] = val.strip()
 
     premises = item.get("logical_premises_ar")
@@ -183,7 +191,7 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
                 for old_s, new_s in replacements:
                     if old_s in p:
                         p = p.replace(old_s, new_s)
-                p = re.sub(r"[\u4e00-\u9fff\uac00-\ud7af\ufffd]+", "", p).strip()
+                p = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", p).strip()
                 clean_premises.append(p)
         item["logical_premises_ar"] = clean_premises
     return item
