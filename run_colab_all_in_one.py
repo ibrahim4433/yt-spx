@@ -78,7 +78,10 @@ def setup_colab_drive() -> bool:
         pool = CookiePool(ws)
         healthy = pool.healthy_cookies()
         total_discovered = len(pool.discover())
-        print(f"   -> Ingestion strategy  : Anonymous first (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        oauth_token_file = ws.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
+        has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
+        oauth_tag = " + Smart-TV OAuth2 [ACTIVE]" if has_oauth else ""
+        print(f"   -> Ingestion strategy  : Anonymous first{oauth_tag} (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True
@@ -337,6 +340,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
     stage1_pkgs = [
         "yt-dlp>=2025.1.15",
+        "yt-dlp-youtube-oauth2",
         "curl_cffi",
         "demucs",
         "faster-whisper>=1.1.0",
@@ -510,7 +514,11 @@ def main() -> int:
         print("\n[2/3] Cookie test mode — ensuring yt-dlp + Deno only...")
         _ensure_deno_runtime()
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "curl_cffi"], check=False)
-    elif is_colab and mode not in ("status", "sync-db", "reset-stage2"):
+    elif is_colab and mode == "auth-youtube":
+        print("\n[2/3] Preparing YouTube Smart-TV OAuth2 environment...")
+        _ensure_deno_runtime()
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "yt-dlp-youtube-oauth2", "curl_cffi"], check=False)
+    elif is_colab and mode not in ("status", "sync-db", "reset-stage2", "auth-youtube"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)

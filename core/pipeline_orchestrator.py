@@ -775,11 +775,61 @@ def run_cookie_tests(args: argparse.Namespace) -> int:
     return 0 if n_ok > 0 else 1
 
 
+def run_auth_youtube(args: argparse.Namespace) -> int:
+    """
+    Guides the user through 1-time Smart TV OAuth2 pairing for YouTube directly inside Colab.
+    Saves persistent token into workspace.root / '.cache' / 'yt-dlp' on Google Drive.
+    """
+    workspace = SharedWorkspace(worker_name=args.worker_id or None)
+    oauth_cache_dir = workspace.root / ".cache" / "yt-dlp"
+    oauth_cache_dir.mkdir(parents=True, exist_ok=True)
+    token_file = oauth_cache_dir / "youtube-oauth2" / "token_data.json"
+
+    print("=" * 74)
+    print("  YT-SPX: YOUTUBE SMART-TV OAUTH2 AUTHENTICATION")
+    print("=" * 74)
+    print(f"  Shared Token Cache Path : {oauth_cache_dir}")
+    print(f"  Existing Token On Drive : {'FOUND (will refresh/overwrite)' if token_file.exists() else 'NOT FOUND (first-time pairing)'}")
+    print("\n  [!] INSTRUCTIONS:")
+    print("      1. yt-dlp will display a URL (https://www.google.com/device) and an 8-letter code.")
+    print("      2. Click the link in your browser, enter the code, and click 'Allow'.")
+    print("      3. Once approved, the token will be permanently saved to your Google Drive.")
+    print("=" * 74 + "\n", flush=True)
+
+    # Ensure plugin is installed
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "yt-dlp-youtube-oauth2"], check=False)
+
+    test_url = "https://www.youtube.com/watch?v=YC86BQwvHyk"
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--username", "oauth2",
+        "--password", "",
+        "--cache-dir", str(oauth_cache_dir),
+        "--simulate",
+        test_url,
+    ]
+    res = subprocess.run(cmd, check=False)
+    if res.returncode == 0 and token_file.exists():
+        print("\n" + "=" * 74)
+        print("  [SUCCESS] YouTube Smart-TV OAuth2 token saved to Google Drive!")
+        print(f"  Location: {token_file}")
+        print("  All future Stage 1 workers will automatically use this authenticated session.")
+        print("=" * 74 + "\n", flush=True)
+        # Clear any active cooldown tripped by previous unauthenticated attempts
+        workspace.clear_youtube_circuit_breaker()
+        return 0
+    else:
+        print("\n" + "=" * 74)
+        print("  [!] OAuth2 pairing did not complete successfully.")
+        print("=" * 74 + "\n", flush=True)
+        return 1
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="YT-SPX V2 Smart-Batch & Multi-Account Pipeline Orchestrator")
     p.add_argument(
         "--mode",
-        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies", "reset-stage2"],
+        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies", "reset-stage2", "auth-youtube"],
         default="auto",
         help="Execution mode: 'auto' runs Stage 1 -> Stage 2 in isolated GPU subprocesses.",
     )
@@ -814,6 +864,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.mode == "test-cookies":
         return run_cookie_tests(args)
+
+    if args.mode == "auth-youtube":
+        return run_auth_youtube(args)
 
     if args.mode == "reset-stage2":
         from tools.reset_stage2 import reset_stage2_extractions

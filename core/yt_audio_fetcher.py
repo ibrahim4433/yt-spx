@@ -156,7 +156,21 @@ def fetch_video_audio_m1(
         #    only then fallback to the healthy cookie pool.
         pool = CookiePool(workspace)
         healthy = pool.healthy_cookies()[:max_cookie_attempts]
-        attempts: List[Optional[Path]] = [None] + list(healthy)
+
+        oauth_cache_dir = workspace.root / ".cache" / "yt-dlp"
+        oauth_token_file = oauth_cache_dir / "youtube-oauth2" / "token_data.json"
+        has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
+
+        # Multi-attempt strategy:
+        # 1. Anonymous download FIRST by default!
+        #    YouTube serves public debate videos cleanly without authentication via the android/web client.
+        # 2. If anonymous encounters a restriction (bot-check / rate-limit / age-gate):
+        #    a) If Smart-TV OAuth2 token exists on Drive, use OAuth2!
+        #    b) Otherwise, fallback to the healthy cookie pool.
+        attempts: List[Any] = [None]
+        if has_oauth:
+            attempts.append("__oauth2__")
+        attempts.extend(list(healthy))
 
         proc = None
         last_kind = ""
@@ -172,7 +186,16 @@ def fetch_video_audio_m1(
 
             cmd = list(base_cmd)
             cookie_label = "anonymous"
-            if cookie is not None:
+            if cookie == "__oauth2__":
+                # Strip android client extractor args because OAuth2 operates on TV client
+                cmd = [c for c in base_cmd if "youtube:player_client" not in c]
+                cmd.extend([
+                    "--username", "oauth2",
+                    "--password", "",
+                    "--cache-dir", str(oauth_cache_dir),
+                ])
+                cookie_label = "Smart-TV OAuth2 (Colab token)"
+            elif cookie is not None:
                 # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
                 cookies_tmp = tmp_dir / "cookies_working.txt"
                 sanitize_cookie_file(cookie, cookies_tmp)
@@ -181,7 +204,7 @@ def fetch_video_audio_m1(
             cmd.append(url)
 
             if idx > 0:
-                print(f"    [cookies] Fallback attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
+                print(f"    [auth] Fallback attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
 
             proc = subprocess.run(
                 cmd,
@@ -198,19 +221,28 @@ def fetch_video_audio_m1(
             last_tail = output[-240:].strip()
 
             if proc.returncode == 0:
-                if cookie is not None:
+                if cookie is not None and cookie != "__oauth2__":
                     if kind == "invalid":
                         # Downloaded anonymously, but this cookie is dead -> quarantine so next video uses another
                         pool.mark_failed(cookie, "invalid", last_tail)
                         print(f"    [cookies] {cookie_label} is no longer valid (rotated/logged out) -> quarantined.", flush=True)
                     else:
                         pool.mark_ok(cookie)
+                elif cookie == "__oauth2__":
+                    print("    [auth] Smart-TV OAuth2 download succeeded cleanly.", flush=True)
                 success = True
                 break
 
             for pat in UNAVAILABLE_VIDEO_PATTERNS:
                 if re.search(pat, output_lower):
                     raise PermanentVideoUnavailableError(f"Video {vid} is permanently unavailable on YouTube.")
+
+            # If this attempt failed while using OAuth2, rotate to cookie pool
+            if cookie == "__oauth2__":
+                fail_kind = kind or "oauth_restricted"
+                last_kind = fail_kind
+                print(f"    [auth] Smart-TV OAuth2 attempt failed ({fail_kind}) -> rotating to next attempt.", flush=True)
+                continue
 
             # If this attempt failed while using a cookie, quarantine/record it and ROTATE!
             if cookie is not None:
@@ -221,9 +253,9 @@ def fetch_video_audio_m1(
                     print(f"    [cookies] {cookie_label} failed ({fail_kind}) -> quarantined, rotating to next attempt.", flush=True)
                 continue
 
-            # If anonymous attempt failed (idx == 0) and cookies are available, log fallback
+            # If anonymous attempt failed (idx == 0) and fallbacks are available, log fallback
             if idx == 0 and len(attempts) > 1:
-                print(f"    [cookies] Anonymous download encountered restriction ({kind or 'code ' + str(proc.returncode)}) -> trying cookie fallback pool...", flush=True)
+                print(f"    [auth] Anonymous download encountered restriction ({kind or 'code ' + str(proc.returncode)}) -> trying authenticated fallback pool...", flush=True)
                 continue
 
             # If any attempt failed but there are remaining fallback attempts
