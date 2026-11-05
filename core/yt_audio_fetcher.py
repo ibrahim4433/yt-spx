@@ -178,7 +178,7 @@ def fetch_video_audio_m1(
             "-m",
             "yt_dlp",
             "--no-playlist",
-            "--format", "18/b/ba/best",
+            "--format", "234/233/140/18/ba/b/bestaudio/best",
             "--write-info-json",
             "--no-write-subs",
             "--no-progress",
@@ -192,6 +192,10 @@ def fetch_video_audio_m1(
             base_cmd.extend(["--downloader", "aria2c", "--downloader-args", "aria2c:-x 4 -s 4 -k 1M"])
 
         # Detect available JS runtimes (Deno & Node in Colab)
+        for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
+            if d.exists() and str(d) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+
         runtimes = []
         if shutil.which("deno"):
             runtimes.append("deno")
@@ -202,25 +206,12 @@ def fetch_video_audio_m1(
 
         # Multi-attempt strategy:
         # 1. Anonymous download FIRST by default!
-        #    YouTube serves public debate videos cleanly without authentication via the android/web client.
-        # 2. If anonymous encounters a restriction (bot-check / rate-limit / age-gate),
-        #    only then fallback to the healthy cookie pool.
+        #    yt-dlp uses visionos/web HLS formats (234/233) which don't require PO tokens or auth.
+        # 2. Healthy rotating cookie pool for restricted/age-gated videos.
         pool = CookiePool(workspace)
         healthy = pool.healthy_cookies()[:max_cookie_attempts]
 
-        oauth_cache_dir = workspace.root / ".cache" / "yt-dlp"
-        oauth_token_file = oauth_cache_dir / "youtube-oauth2" / "token_data.json"
-        has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
-
-        # Multi-attempt strategy:
-        # 1. Anonymous Android client FIRST!
-        #    The Android player API bypasses web PO-tokens, JS deciphering, and Colab datacenter bot-checks.
-        #    Public debate videos download instantly and anonymously without authentication.
-        # 2. Fallback to Smart-TV OAuth2 (if paired) for restricted/age-gated videos.
-        # 3. Fallback to the healthy rotating cookie pool.
         attempts: List[Any] = [None]
-        if has_oauth:
-            attempts.append("__oauth2__")
         attempts.extend(list(healthy))
 
         proc = None
@@ -236,25 +227,16 @@ def fetch_video_audio_m1(
                     f.unlink(missing_ok=True)
 
             cmd = list(base_cmd)
-            cookie_label = "anonymous (android client)"
-            if cookie == "__oauth2__":
-                cmd.extend([
-                    "--username", "oauth2",
-                    "--password", "",
-                    "--cache-dir", str(oauth_cache_dir),
-                    "--extractor-args", "youtube:player_client=android;player_skip=initial_data",
-                ])
-                cookie_label = "Smart-TV OAuth2 (Colab token)"
-            else:
-                cmd.extend([
-                    "--extractor-args", "youtube:player_client=android;player_skip=initial_data",
-                ])
-                if cookie is not None:
-                    # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
-                    cookies_tmp = tmp_dir / "cookies_working.txt"
-                    sanitize_cookie_file(cookie, cookies_tmp)
-                    cmd.extend(["--cookies", str(cookies_tmp)])
-                    cookie_label = pool.cookie_key(cookie)
+            cookie_label = "anonymous (visionos/hls)"
+            cmd.extend([
+                "--extractor-args", "youtube:player_skip=initial_data",
+            ])
+            if cookie is not None:
+                # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
+                cookies_tmp = tmp_dir / "cookies_working.txt"
+                sanitize_cookie_file(cookie, cookies_tmp)
+                cmd.extend(["--cookies", str(cookies_tmp)])
+                cookie_label = pool.cookie_key(cookie)
             cmd.append(url)
 
             if idx > 0:
@@ -275,28 +257,19 @@ def fetch_video_audio_m1(
             last_tail = output[-240:].strip()
 
             if proc.returncode == 0:
-                if cookie is not None and cookie != "__oauth2__":
+                if cookie is not None:
                     if kind == "invalid":
                         # Downloaded anonymously, but this cookie is dead -> quarantine so next video uses another
                         pool.mark_failed(cookie, "invalid", last_tail)
                         print(f"    [cookies] {cookie_label} is no longer valid (rotated/logged out) -> quarantined.", flush=True)
                     else:
                         pool.mark_ok(cookie)
-                elif cookie == "__oauth2__":
-                    print("    [auth] Smart-TV OAuth2 download succeeded cleanly.", flush=True)
                 success = True
                 break
 
             for pat in UNAVAILABLE_VIDEO_PATTERNS:
                 if re.search(pat, output_lower):
                     raise PermanentVideoUnavailableError(f"Video {vid} is permanently unavailable on YouTube.")
-
-            # If this attempt failed while using OAuth2, rotate to cookie pool
-            if cookie == "__oauth2__":
-                fail_kind = kind or "oauth_restricted"
-                last_kind = fail_kind
-                print(f"    [auth] Smart-TV OAuth2 attempt failed ({fail_kind}: {last_tail[:180]}) -> rotating to next attempt.", flush=True)
-                continue
 
             # If this attempt failed while using a cookie, quarantine/record it and ROTATE!
             if cookie is not None:
@@ -320,12 +293,14 @@ def fetch_video_audio_m1(
             break
 
         if not success:
-            # PytubeFix progressive Android download fallback (immune to datacenter bot-checks)
+            # PytubeFix fallback (WEB client uses Node.js PoToken generation)
             try:
-                print(f"    [auth] Trying PytubeFix progressive stream fallback for {vid}...", flush=True)
+                print(f"    [auth] Trying PytubeFix fallback for {vid}...", flush=True)
                 from pytubefix import YouTube
-                yt = YouTube(url, client="ANDROID")
-                st = yt.streams.filter(progressive=True).first()
+                yt = YouTube(url, client="WEB")
+                st = yt.streams.get_audio_only()
+                if not st:
+                    st = yt.streams.filter(progressive=True).first()
                 if not st:
                     st = yt.streams.filter(only_audio=True).first()
                 if st:
@@ -334,22 +309,13 @@ def fetch_video_audio_m1(
                     dl_path = tmp_dir / dl_name
                     if dl_path.exists() and dl_path.stat().st_size > 5_000:
                         success = True
-                        print(f"    [auth] PytubeFix progressive download succeeded ({dl_path.stat().st_size // 1024} KB).", flush=True)
+                        print(f"    [auth] PytubeFix fallback download succeeded ({dl_path.stat().st_size // 1024} KB).", flush=True)
             except Exception as pt_exc:
                 print(f"    [auth] PytubeFix fallback note: {pt_exc}", flush=True)
 
         if not success:
             if last_kind == "age_gate":
                 raise RuntimeError(f"Video {vid} is age-restricted and no available cookie could access it.")
-            if last_kind in ("challenged", "rate_limited"):
-                workspace.trip_youtube_circuit_breaker(
-                    reason=f"YouTube challenge ({last_kind}) on {vid} with all {len(attempts)} option(s): {last_tail}",
-                    cooldown_minutes=45,
-                )
-                raise AntiBanCircuitBreakerError(
-                    f"YouTube {last_kind} on {vid} with all {len(attempts)} option(s). "
-                    "Tripped 45-min shared Drive cooldown."
-                )
             raise RuntimeError(
                 f"Failed to fetch {vid} with all {len(attempts)} option(s) (last status: {last_kind or 'unknown'}): {last_tail}"
             )

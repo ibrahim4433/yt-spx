@@ -75,13 +75,12 @@ def setup_colab_drive() -> bool:
         from core.cookie_pool import CookiePool
 
         (ws.root / "cookies").mkdir(parents=True, exist_ok=True)
+        ws.clear_youtube_circuit_breaker()
         pool = CookiePool(ws)
+        pool.reset_quarantine()
         healthy = pool.healthy_cookies()
         total_discovered = len(pool.discover())
-        oauth_token_file = ws.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
-        has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
-        oauth_tag = " + Smart-TV OAuth2 [ACTIVE]" if has_oauth else ""
-        print(f"   -> Ingestion strategy  : Android player (anti-bot){oauth_tag} (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        print(f"   -> Ingestion strategy  : HLS 234/233 stream (anti-bot) (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True
@@ -91,9 +90,9 @@ def _ensure_deno_runtime() -> None:
     """Installs Deno & aria2 so yt-dlp solves challenges and downloads at multi-connection speed."""
     if not shutil.which("aria2c") and shutil.which("apt-get"):
         subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deno_bin = Path.home() / ".deno" / "bin"
-    if deno_bin.exists():
-        os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
+    for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
+        if d.exists() and str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
     if shutil.which("deno") or shutil.which("node"):
         return
     print("   -> Installing Deno JS runtime for yt-dlp YouTube challenge solver...")
@@ -104,8 +103,9 @@ def _ensure_deno_runtime() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if deno_bin.exists():
-        os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
+    for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
+        if d.exists() and str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
 
 
 def _get_pip_cache_args() -> List[str]:
@@ -283,7 +283,7 @@ def _verify_stage1_runtime_health() -> bool:
         "v = md.version('nemo_toolkit').split('.'); "
         "assert int(v[0]) == 2 and int(''.join(c for c in v[1] if c.isdigit())) >= 6; "
         "md.version('clearvoice'); "
-        "assert all(u.find_spec(m) is not None for m in ('faster_whisper', 'demucs', 'ctc_forced_aligner', 'yt_dlp', 'pytubefix'))"
+        "assert all(u.find_spec(m) is not None for m in ('faster_whisper', 'demucs', 'ctc_forced_aligner', 'yt_dlp', 'yt_dlp_ejs', 'pytubefix'))"
     )
     res = subprocess.run(
         [sys.executable, "-c", check_code],
@@ -341,8 +341,8 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     pip_cache = _get_pip_cache_args()
     c_arg = ["-c", str(constraints_path)] if constraints_path.exists() else []
     stage1_pkgs = [
-        "yt-dlp>=2025.1.15",
-        "yt-dlp-youtube-oauth2",
+        "yt-dlp[default]>=2025.1.15",
+        "yt-dlp-ejs>=0.8.0",
         "pytubefix",
         "curl_cffi",
         "demucs",
