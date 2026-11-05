@@ -41,7 +41,11 @@ if str(BASE_DIR) not in sys.path:
 
 from core.drive_sync import SharedWorkspace, MICRO_STEPS, STEP_RANK
 from core.metadata_linker import build_manifest
-from core.yt_audio_fetcher import AntiBanCircuitBreakerError, PermanentVideoUnavailableError
+from core.yt_audio_fetcher import (
+    AntiBanCircuitBreakerError,
+    PermanentVideoUnavailableError,
+    patch_youtube_oauth2_plugin,
+)
 
 
 def load_or_create_manifest(workspace: SharedWorkspace) -> List[Dict[str, Any]]:
@@ -778,51 +782,151 @@ def run_cookie_tests(args: argparse.Namespace) -> int:
 def run_auth_youtube(args: argparse.Namespace) -> int:
     """
     Guides the user through 1-time Smart TV OAuth2 pairing for YouTube directly inside Colab.
+    Waits up to 15-30 minutes for user approval with live progress heartbeats.
     Saves persistent token into workspace.root / '.cache' / 'yt-dlp' on Google Drive.
     """
+    import urllib.request
+    import urllib.error
+    import uuid
+    import datetime
+
+    CLIENT_ID = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
+    CLIENT_SECRET = "SboVhoG9s0rNafixCSGGKXAT"
+    SCOPES = "https://gdata.youtube.com https://www.googleapis.com/auth/youtube"
+
     workspace = SharedWorkspace(worker_name=args.worker_id or None)
     oauth_cache_dir = workspace.root / ".cache" / "yt-dlp"
     oauth_cache_dir.mkdir(parents=True, exist_ok=True)
     token_file = oauth_cache_dir / "youtube-oauth2" / "token_data.json"
 
+    # Make sure plugin is installed & patched against Google RFC 8628 parameter rejection
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "yt-dlp-youtube-oauth2"], check=False)
+    patch_youtube_oauth2_plugin()
+
     print("=" * 74)
-    print("  YT-SPX: YOUTUBE SMART-TV OAUTH2 AUTHENTICATION")
+    print("  DAWAH DIALECTICS (YT-SPX): YOUTUBE SMART-TV OAUTH2 AUTHENTICATION")
     print("=" * 74)
     print(f"  Shared Token Cache Path : {oauth_cache_dir}")
     print(f"  Existing Token On Drive : {'FOUND (will refresh/overwrite)' if token_file.exists() else 'NOT FOUND (first-time pairing)'}")
-    print("\n  [!] INSTRUCTIONS:")
-    print("      1. yt-dlp will display a URL (https://www.google.com/device) and an 8-letter code.")
-    print("      2. Click the link in your browser, enter the code, and click 'Allow'.")
-    print("      3. Once approved, the token will be permanently saved to your Google Drive.")
-    print("=" * 74 + "\n", flush=True)
 
-    # Ensure plugin is installed
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "yt-dlp-youtube-oauth2"], check=False)
+    # Request device code directly from Google
+    try:
+        req_data = json.dumps({
+            "client_id": CLIENT_ID,
+            "scope": SCOPES,
+            "device_id": uuid.uuid4().hex,
+            "device_model": "ytlr::",
+        }).encode("utf-8")
 
-    test_url = "https://www.youtube.com/watch?v=YC86BQwvHyk"
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--username", "oauth2",
-        "--password", "",
-        "--cache-dir", str(oauth_cache_dir),
-        "--simulate",
-        test_url,
-    ]
-    res = subprocess.run(cmd, check=False)
-    if res.returncode == 0 and token_file.exists():
-        print("\n" + "=" * 74)
-        print("  [SUCCESS] YouTube Smart-TV OAuth2 token saved to Google Drive!")
-        print(f"  Location: {token_file}")
-        print("  All future Stage 1 workers will automatically use this authenticated session.")
-        print("=" * 74 + "\n", flush=True)
-        # Clear any active cooldown tripped by previous unauthenticated attempts
-        workspace.clear_youtube_circuit_breaker()
-        return 0
-    else:
-        print("\n" + "=" * 74)
-        print("  [!] OAuth2 pairing did not complete successfully.")
-        print("=" * 74 + "\n", flush=True)
+        req = urllib.request.Request(
+            "https://www.youtube.com/o/oauth2/device/code",
+            data=req_data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            code_resp = json.loads(r.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"\n[!] Failed to initialize OAuth2 device flow with Google: {exc}")
         return 1
+
+    verification_url = code_resp.get("verification_url", "https://www.google.com/device")
+    user_code = code_resp.get("user_code", "")
+    device_code = code_resp.get("device_code", "")
+    interval = max(5, int(code_resp.get("interval", 5)))
+    expires_in = int(code_resp.get("expires_in", 1800))  # 30 minutes!
+
+    print("\n" + "#" * 74)
+    print("  >>> STEP 1: Open this link in your browser:")
+    print(f"              {verification_url}")
+    print("\n  >>> STEP 2: Enter this code:")
+    print(f"              >>>  {user_code}  <<<")
+    print("\n  >>> STEP 3: Choose your Google/YouTube account and click 'Allow'.")
+    print("#" * 74)
+    print(f"\n[*] The pipeline is waiting for you to enter the code (timeout: {expires_in // 60} minutes)...")
+    print("[*] Waiting for approval: ", end="", flush=True)
+
+    poll_payload = json.dumps({
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }).encode("utf-8")
+
+    poll_url = "https://www.youtube.com/o/oauth2/token"
+    start_time = time.time()
+    token_data = None
+
+    while time.time() - start_time < expires_in:
+        time.sleep(interval)
+        poll_req = urllib.request.Request(
+            poll_url,
+            data=poll_payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=30) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            try:
+                resp_json = json.loads(err.read().decode("utf-8"))
+            except Exception:
+                resp_json = {"error": f"HTTP_{err.code}"}
+        except Exception as ex:
+            resp_json = {"error": str(ex)}
+
+        err = resp_json.get("error")
+        if not err and "access_token" in resp_json:
+            token_data = resp_json
+            break
+        elif err == "authorization_pending":
+            print(".", end="", flush=True)
+            continue
+        elif err == "slow_down":
+            interval += 5
+            print("s", end="", flush=True)
+            continue
+        elif err == "expired_token":
+            print("\n\n[!] Device code expired. Please re-run Cell 0.")
+            return 1
+        elif err == "access_denied":
+            print("\n\n[!] Access denied by user.")
+            return 1
+        else:
+            print(f"\n[!] Polling status: {resp_json}")
+            time.sleep(interval)
+
+    if not token_data or "access_token" not in token_data:
+        print("\n\n[!] Timed out waiting for authorization. Please re-run Cell 0.")
+        return 1
+
+    print(" [APPROVED!]", flush=True)
+
+    token_record = {
+        "access_token": token_data["access_token"],
+        "expires": datetime.datetime.now(datetime.timezone.utc).timestamp() + token_data.get("expires_in", 3600),
+        "token_type": token_data.get("token_type", "Bearer"),
+        "refresh_token": token_data.get("refresh_token", ""),
+    }
+
+    try:
+        import yt_dlp
+        ydl = yt_dlp.YoutubeDL({"cachedir": str(oauth_cache_dir), "quiet": True})
+        ydl.cache.store("youtube-oauth2", "token_data", token_record)
+    except Exception:
+        dest_dir = oauth_cache_dir / "youtube-oauth2"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(json.dumps({"yt-dlp_version": "2025.01.15", "data": token_record}), encoding="utf-8")
+
+    # Clear any active cooldown tripped by previous unauthenticated attempts
+    workspace.clear_youtube_circuit_breaker()
+
+    print("\n" + "=" * 74)
+    print("  [SUCCESS] YouTube Smart-TV OAuth2 token saved to Google Drive!")
+    print(f"  Location: {token_file}")
+    print("  Shared Drive cooldowns cleared.")
+    print("  All future Stage 1 workers will now use this authenticated session!")
+    print("=" * 74 + "\n", flush=True)
+    return 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

@@ -80,8 +80,10 @@ def setup_colab_drive() -> bool:
         total_discovered = len(pool.discover())
         oauth_token_file = ws.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
         has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
-        oauth_tag = " + Smart-TV OAuth2 [ACTIVE]" if has_oauth else ""
-        print(f"   -> Ingestion strategy  : Anonymous first{oauth_tag} (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        if has_oauth:
+            print(f"   -> Ingestion strategy  : Smart-TV OAuth2 [ACTIVE] (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        else:
+            print(f"   -> Ingestion strategy  : Anonymous first (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True
@@ -518,6 +520,11 @@ def main() -> int:
         print("\n[2/3] Preparing YouTube Smart-TV OAuth2 environment...")
         _ensure_deno_runtime()
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "yt-dlp-youtube-oauth2", "curl_cffi"], check=False)
+        try:
+            from core.yt_audio_fetcher import patch_youtube_oauth2_plugin
+            patch_youtube_oauth2_plugin()
+        except Exception:
+            pass
     elif is_colab and mode not in ("status", "sync-db", "reset-stage2", "auth-youtube"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):

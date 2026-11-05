@@ -51,6 +51,33 @@ class PermanentVideoUnavailableError(RuntimeError):
     """Raised when a YouTube video was deleted or made private."""
 
 
+def patch_youtube_oauth2_plugin() -> bool:
+    """
+    Patches yt-dlp-youtube-oauth2 plugin in site-packages if installed:
+    Google's OAuth2 device endpoint strictly requires parameter 'device_code'
+    and rejects 'code' with HTTP 400 Bad Request. Upstream plugin used 'code'.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("yt_dlp_plugins.extractor.youtubeoauth")
+        if spec and spec.origin:
+            p = Path(spec.origin)
+            content = p.read_text(encoding="utf-8")
+            target = "'code': code_response['device_code']"
+            replacement = "'device_code': code_response['device_code']"
+            if target in content:
+                content = content.replace(target, replacement)
+                p.write_text(content, encoding="utf-8")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# Auto-patch plugin on import if present
+patch_youtube_oauth2_plugin()
+
+
 def _find_cookies_source(workspace: SharedWorkspace) -> Optional[Path]:
     """Returns the best currently-healthy cookies file from the rotation pool (see core/cookie_pool.py)."""
     healthy = CookiePool(workspace).healthy_cookies()
@@ -162,14 +189,14 @@ def fetch_video_audio_m1(
         has_oauth = oauth_token_file.exists() and oauth_token_file.stat().st_size > 20
 
         # Multi-attempt strategy:
-        # 1. Anonymous download FIRST by default!
-        #    YouTube serves public debate videos cleanly without authentication via the android/web client.
-        # 2. If anonymous encounters a restriction (bot-check / rate-limit / age-gate):
-        #    a) If Smart-TV OAuth2 token exists on Drive, use OAuth2!
-        #    b) Otherwise, fallback to the healthy cookie pool.
-        attempts: List[Any] = [None]
+        # 1. If Smart-TV OAuth2 token is paired on Google Drive, use OAuth2 FIRST!
+        #    This is fully authenticated directly from Colab's IP, avoiding datacenter bot-checks.
+        # 2. Otherwise, Anonymous download is tried first via android/web player client.
+        # 3. Fallback to the healthy rotating cookie pool.
+        attempts: List[Any] = []
         if has_oauth:
             attempts.append("__oauth2__")
+        attempts.append(None)
         attempts.extend(list(healthy))
 
         proc = None
