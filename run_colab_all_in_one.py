@@ -88,7 +88,9 @@ def setup_colab_drive() -> bool:
 
 
 def _ensure_deno_runtime() -> None:
-    """Installs Deno (<3s) so yt-dlp solves YouTube JS signature/n-parameter challenges cleanly."""
+    """Installs Deno & aria2 so yt-dlp solves challenges and downloads at multi-connection speed."""
+    if not shutil.which("aria2c") and shutil.which("apt-get"):
+        subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deno_bin = Path.home() / ".deno" / "bin"
     if deno_bin.exists():
         os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
@@ -281,7 +283,7 @@ def _verify_stage1_runtime_health() -> bool:
         "v = md.version('nemo_toolkit').split('.'); "
         "assert int(v[0]) == 2 and int(''.join(c for c in v[1] if c.isdigit())) >= 6; "
         "md.version('clearvoice'); "
-        "assert all(u.find_spec(m) is not None for m in ('faster_whisper', 'demucs', 'ctc_forced_aligner', 'yt_dlp'))"
+        "assert all(u.find_spec(m) is not None for m in ('faster_whisper', 'demucs', 'ctc_forced_aligner', 'yt_dlp', 'pytubefix'))"
     )
     res = subprocess.run(
         [sys.executable, "-c", check_code],
@@ -341,6 +343,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     stage1_pkgs = [
         "yt-dlp>=2025.1.15",
         "yt-dlp-youtube-oauth2",
+        "pytubefix",
         "curl_cffi",
         "demucs",
         "faster-whisper>=1.1.0",

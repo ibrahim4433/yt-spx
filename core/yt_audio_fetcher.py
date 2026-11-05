@@ -106,7 +106,7 @@ def _find_cookies_source(workspace: SharedWorkspace) -> Optional[Path]:
 
 def find_existing_raw_audio(workspace: SharedWorkspace, video_id: str) -> Optional[Path]:
     """Returns existing complete raw audio file on Drive if already downloaded."""
-    valid_exts = {".m4a", ".opus", ".webm", ".mp3", ".ogg", ".wav", ".aac", ".flac"}
+    valid_exts = {".mp4", ".m4a", ".opus", ".webm", ".mp3", ".ogg", ".wav", ".aac", ".flac", ".m4v", ".mkv"}
     info_cached = workspace.read_json(workspace.audio_raw_dir / f"{video_id}.info.json", default={}) or {}
     expected_dur = float(info_cached.get("duration") or 0.0)
 
@@ -178,7 +178,7 @@ def fetch_video_audio_m1(
             "-m",
             "yt_dlp",
             "--no-playlist",
-            "--format", "ba/b/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
+            "--format", "18/b/ba/best",
             "--write-info-json",
             "--no-write-subs",
             "--no-progress",
@@ -187,6 +187,9 @@ def fetch_video_audio_m1(
             "--sleep-requests", "1",
             "-o", out_tmpl,
         ]
+
+        if shutil.which("aria2c"):
+            base_cmd.extend(["--downloader", "aria2c", "--downloader-args", "aria2c:-x 4 -s 4 -k 1M"])
 
         # Detect available JS runtimes (Deno & Node in Colab)
         runtimes = []
@@ -313,11 +316,27 @@ def fetch_video_audio_m1(
             if idx + 1 < len(attempts):
                 continue
 
-            if kind in ("invalid", "challenged", "rate_limited", "age_gate"):
-                last_kind = kind
-                break
+            last_kind = kind or f"code_{proc.returncode}"
+            break
 
-            raise RuntimeError(f"yt-dlp exited with code {proc.returncode}: {output[-300:].strip()}")
+        if not success:
+            # PytubeFix progressive Android download fallback (immune to datacenter bot-checks)
+            try:
+                print(f"    [auth] Trying PytubeFix progressive stream fallback for {vid}...", flush=True)
+                from pytubefix import YouTube
+                yt = YouTube(url, client="ANDROID")
+                st = yt.streams.filter(progressive=True).first()
+                if not st:
+                    st = yt.streams.filter(only_audio=True).first()
+                if st:
+                    dl_name = f"{vid}.mp4"
+                    st.download(output_path=str(tmp_dir), filename=dl_name)
+                    dl_path = tmp_dir / dl_name
+                    if dl_path.exists() and dl_path.stat().st_size > 5_000:
+                        success = True
+                        print(f"    [auth] PytubeFix progressive download succeeded ({dl_path.stat().st_size // 1024} KB).", flush=True)
+            except Exception as pt_exc:
+                print(f"    [auth] PytubeFix fallback note: {pt_exc}", flush=True)
 
         if not success:
             if last_kind == "age_gate":
@@ -347,7 +366,7 @@ def fetch_video_audio_m1(
                 downloaded_audio = f
 
         if downloaded_audio is None or downloaded_audio.stat().st_size < 5_000:
-            raise RuntimeError(f"yt-dlp completed for {vid} without producing a valid audio stream.")
+            raise RuntimeError(f"Download pipeline completed for {vid} without producing a valid audio stream.")
 
         # Atomically move raw audio + compact metadata to shared 5 TB Drive (Micro-Step M1!)
         workspace.audio_raw_dir.mkdir(parents=True, exist_ok=True)
@@ -369,7 +388,18 @@ def fetch_video_audio_m1(
                 "acodec": raw_info.get("acodec", ""),
                 "abr": raw_info.get("abr", 0),
             }
-            workspace.atomic_write_json(workspace.audio_raw_dir / f"{vid}.info.json", compact_info)
+        else:
+            compact_info = {
+                "id": vid,
+                "title": video_record.get("title_ar", ""),
+                "duration": float(video_record.get("duration") or 0.0),
+                "upload_date": video_record.get("upload_date", ""),
+                "channel": video_record.get("channel", "SCDawah Arabic"),
+                "chapters": video_record.get("chapters") or [],
+                "acodec": "aac",
+                "abr": 128,
+            }
+        workspace.atomic_write_json(workspace.audio_raw_dir / f"{vid}.info.json", compact_info)
 
         workspace.advance_micro_step(
             vid,
