@@ -55,8 +55,10 @@ class PermanentVideoUnavailableError(RuntimeError):
 def patch_youtube_oauth2_plugin() -> bool:
     """
     Patches yt-dlp-youtube-oauth2 plugin in site-packages if installed:
-    Google's OAuth2 device endpoint strictly requires parameter 'device_code'
-    and rejects 'code' with HTTP 400 Bad Request. Upstream plugin used 'code'.
+    1. Google's OAuth2 device endpoint strictly requires parameter 'device_code'
+       and rejects 'code' with HTTP 400 Bad Request. Upstream plugin used 'code'.
+    2. Google's /v1/next and /watch endpoints reject TV OAuth tokens with
+       'ERROR - Request contains an invalid argument'. OAuth should only be sent to player APIs.
     """
     try:
         import importlib.util
@@ -64,10 +66,27 @@ def patch_youtube_oauth2_plugin() -> bool:
         if spec and spec.origin:
             p = Path(spec.origin)
             content = p.read_text(encoding="utf-8")
-            target = "'code': code_response['device_code']"
-            replacement = "'device_code': code_response['device_code']"
-            if target in content:
-                content = content.replace(target, replacement)
+            modified = False
+
+            # Fix 1: RFC 8628 device_code parameter
+            target1 = "'code': code_response['device_code']"
+            replacement1 = "'device_code': code_response['device_code']"
+            if target1 in content:
+                content = content.replace(target1, replacement1)
+                modified = True
+
+            # Fix 2: Do not attach TV OAuth token to non-player endpoints like /v1/next or /watch
+            target2 = "if not urllib.parse.urlparse(request.url).netloc.endswith('youtube.com'):\n            return"
+            replacement2 = (
+                "_p_url = urllib.parse.urlparse(request.url)\n"
+                "        if not _p_url.netloc.endswith('youtube.com') or '/v1/next' in _p_url.path or '/watch' in _p_url.path:\n"
+                "            return"
+            )
+            if target2 in content:
+                content = content.replace(target2, replacement2)
+                modified = True
+
+            if modified:
                 p.write_text(content, encoding="utf-8")
                 return True
     except Exception:
@@ -220,11 +239,12 @@ def fetch_video_audio_m1(
                     "--username", "oauth2",
                     "--password", "",
                     "--cache-dir", str(oauth_cache_dir),
+                    "--extractor-args", "youtube:player_skip=initial_data",
                 ])
                 cookie_label = "Smart-TV OAuth2 (Colab token)"
             else:
                 cmd.extend([
-                    "--extractor-args", "youtube:player_client=android,web",
+                    "--extractor-args", "youtube:player_client=android,web;player_skip=initial_data",
                 ])
                 if cookie is not None:
                     # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax

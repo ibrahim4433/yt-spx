@@ -631,6 +631,11 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
     workspace = SharedWorkspace(worker_name=args.worker_id or None)
     exit_code = 0
 
+    # Auto-clear any previous circuit breaker cooldown tripped by anonymous attempts if OAuth is present
+    oauth_token_file = workspace.root / ".cache" / "yt-dlp" / "youtube-oauth2" / "token_data.json"
+    if oauth_token_file.exists() and oauth_token_file.stat().st_size > 20:
+        workspace.clear_youtube_circuit_breaker()
+
     if total_budget_min <= 0:
         round_num = 0
         while True:
