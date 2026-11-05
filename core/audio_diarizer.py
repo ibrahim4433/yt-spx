@@ -576,7 +576,11 @@ class WarmASRAlignmentEngine:
                     batch_size=max(4, self.batch_size // 2),
                 )
                 del wav_tensor
-                if hasattr(emissions, "cpu"):
+                if isinstance(emissions, torch.Tensor):
+                    emissions = emissions.cpu()
+                elif isinstance(emissions, (list, tuple)):
+                    emissions = [e.cpu() if isinstance(e, torch.Tensor) else e for e in emissions]
+                elif hasattr(emissions, "cpu"):
                     emissions = emissions.cpu()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -591,6 +595,20 @@ class WarmASRAlignmentEngine:
                     tokens_starred,
                     self._align_tokenizer,
                 )
+                if isinstance(scores, torch.Tensor):
+                    scores = scores.cpu()
+                elif isinstance(scores, (list, tuple)):
+                    scores = [s.cpu() if isinstance(s, torch.Tensor) else s for s in scores]
+                elif hasattr(scores, "cpu"):
+                    scores = scores.cpu()
+
+                if isinstance(segments, torch.Tensor):
+                    segments = segments.cpu()
+                elif isinstance(segments, (list, tuple)):
+                    segments = [s.cpu() if isinstance(s, torch.Tensor) else s for s in segments]
+                elif hasattr(segments, "cpu"):
+                    segments = segments.cpu()
+
                 spans = get_spans(tokens_starred, segments, blank_token)
                 word_timestamps = postprocess_results(text_starred, spans, stride, scores)
                 return word_timestamps, lang

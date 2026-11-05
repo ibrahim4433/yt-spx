@@ -442,13 +442,16 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
             if not found_new:
                 break
 
+        batch_target_reached = False
         for cand in candidates:
             if deadline is not None and time.time() >= deadline:
                 print(f"\n[Stage 2] Session time budget ({args.max_session_minutes}m) reached. Exiting cleanly.")
-                return 0
+                batch_target_reached = True
+                break
             if not should_wait and args.stage2_batch_videos > 0 and completed_count >= args.stage2_batch_videos:
                 print(f"\n[Stage 2] Reached target batch size ({args.stage2_batch_videos} videos). Stopping cleanly.")
-                return 0
+                batch_target_reached = True
+                break
 
             vid = cand["video_id"]
             lock_name = f"{vid}.stage2"
@@ -491,6 +494,9 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
 
             if completed_count > 0 and completed_count % 3 == 0:
                 workspace.sync_completed_shards_to_sqlite()
+
+        if batch_target_reached:
+            break
 
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 2 Summary] Extracted {completed_count} video(s). Compactor synced: {sync_stats}", flush=True)
@@ -644,9 +650,7 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                 if s1_res.returncode != 0:
                     s1_failed = True
                     exit_code = s1_res.returncode
-                    print(f"[Orchestrator] Stage 1 note: exited with code {s1_res.returncode}; processing ready Stage 2 backlog...", flush=True)
-                    if s2_before == 0:
-                        break
+                    print(f"[Orchestrator] Stage 1 note: exited with code {s1_res.returncode}; checking Stage 2 backlog...", flush=True)
 
             s2_ready = len(select_stage2_candidates(workspace, manifest))
             if s2_ready > 0:
@@ -658,20 +662,36 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                 s2_res = subprocess.run(_build_stage2_subcmd(args, 0), env=_get_subprocess_env(), check=False)
                 if s2_res.returncode != 0:
                     exit_code = s2_res.returncode
-                    break
+                    print(f"[Orchestrator] Stage 2 note: exited with code {s2_res.returncode}.", flush=True)
 
             synced = workspace.sync_completed_shards_to_sqlite()
             print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
 
             if s1_failed:
-                print(f"[Orchestrator] Stopping round loop cleanly due to Stage 1 exit code {s1_res.returncode}.", flush=True)
-                break
+                print(
+                    f"[Orchestrator] Stage 1 exited with code {s1_res.returncode}. "
+                    "Pausing 15s to let resources/locks settle before next round...",
+                    flush=True,
+                )
+                time.sleep(15)
 
             s1_after = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
             s2_after = len(select_stage2_candidates(workspace, manifest))
             if s1_after >= s1_before and s2_after >= s2_before:
+                # Check if YouTube circuit breaker / rate-limit cooldown is active
+                allowed, wait_sec, reason = workspace.check_youtube_download_slot()
                 active_locks = list(workspace.locks_dir.glob("*.lock.json"))
-                if active_locks:
+                if not allowed and wait_sec > 0:
+                    rem_m = int(wait_sec // 60)
+                    rem_s = int(wait_sec % 60)
+                    print(
+                        f"\n[Orchestrator Standby] YouTube Anti-Ban Cooldown is active ({rem_m}m {rem_s}s remaining). "
+                        f"Reason: {reason[:120]}...\n"
+                        f"                      Sleeping 60s before re-checking (continuous pipeline will resume automatically)...",
+                        flush=True,
+                    )
+                    time.sleep(min(wait_sec, 60.0))
+                elif active_locks:
                     print(
                         f"[Orchestrator] Candidates currently locked by other workers ({len(active_locks)} active locks). "
                         "Waiting 30s before next round...",
@@ -680,11 +700,11 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
                     time.sleep(30)
                 else:
                     print(
-                        "[Orchestrator] No unlocked/downloadable candidates progressed in this round "
-                        "(remaining items may be locked by another worker or offline-only). Stopping cleanly.",
+                        f"[Orchestrator Standby] Round #{round_num} had no unlocked/offline candidates ready. "
+                        "Waiting 30s before retry (continuous loop until disconnect)...",
                         flush=True,
                     )
-                    break
+                    time.sleep(30)
     else:
         s1_budget_min = max(5, int(round(total_budget_min * 0.62)))
         print(f"[Orchestrator] Launching Isolated Stage 1 Subprocess (budget={s1_budget_min}m)...", flush=True)
