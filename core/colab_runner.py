@@ -159,6 +159,20 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
         ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
         ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
         ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
+        ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
+        ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
+        ("condemn", "يُدين"), ("Cause", "سبب أول"), ("causes", "أسباب أولى"),
+        ("والincest", "وزنا المحارم"),
+        ("الincest", "زنا المحارم"),
+        ("incest", "زنا المحارم"), ("two wills", "إرادتين"), ("wills", "إرادات"),
+        ("natures", "طبائع"), ("divine", "إلهي"), ("human", "بشري"),
+        ("bikinis", "لباس البحر الفاضح"),
+        ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
+        ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
+        ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
+        ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
+        ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
+        ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
         ("。，？，。", "؟"),
         ("。", "."),
         ("，", "،"),
@@ -259,7 +273,7 @@ class LocalGPUClient:
         use_gguf_q5: bool = True,
         gguf_repo: str = "bartowski/Qwen2.5-14B-Instruct-GGUF",
         gguf_filename: str = "Qwen2.5-14B-Instruct-Q5_K_M.gguf",
-        context_length: int = 14336,
+        context_length: int = 16384,
         max_new_tokens: int = 2400,
     ):
         import torch
@@ -400,14 +414,7 @@ class LocalGPUClient:
             safety_margin = 64
             avail = self.context_length - prompt_tokens - safety_margin
 
-            # If prompt alone is dangerously close to context window, trim dialogue from user prompt
-            if avail < 512:
-                excess_tokens = 800 - avail
-                chars_to_trim = int(excess_tokens * 3.5)
-                if len(prompt) > chars_to_trim + 500:
-                    messages[1]["content"] = prompt[chars_to_trim:]
-                    avail = 800
-
+            # Ensure effective_max_tokens respects the remaining context without trimming critical metadata
             effective_max_tokens = max(256, min(self.max_new_tokens, avail))
 
             try:
@@ -442,7 +449,7 @@ class LocalGPUClient:
             add_generation_prompt=True,
         )
         max_gen_tokens = min(self.max_new_tokens, 1200)
-        max_prompt_len = min(4096, max(1024, self.context_length - max_gen_tokens - 64))
+        max_prompt_len = min(16384, max(1024, self.context_length - max_gen_tokens - 64))
         inputs = self.tokenizer(
             [text_input],
             return_tensors="pt",

@@ -90,6 +90,20 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
         ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
         ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
+        ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
+        ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
+        ("condemn", "يُدين"), ("Cause", "سبب أول"), ("causes", "أسباب أولى"),
+        ("والincest", "وزنا المحارم"),
+        ("الincest", "زنا المحارم"),
+        ("incest", "زنا المحارم"), ("two wills", "إرادتين"), ("wills", "إرادات"),
+        ("natures", "طبائع"), ("divine", "إلهي"), ("human", "بشري"),
+        ("bikinis", "لباس البحر الفاضح"),
+        ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
+        ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
+        ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
+        ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
+        ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
+        ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
         ("。，？，。", "؟"),
         ("。", "."),
         ("，", "،"),
@@ -132,25 +146,123 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
+CANONICAL_TOPIC_PILLARS = {
+    "Comparative Religion & Christianity": [
+        "Comparative Religion", "Christianity", "Trinity", "Biblical", "Textual Preservation",
+        "Manuscript", "Inerrancy", "Crucifixion", "Atonement", "Bible"
+    ],
+    "Theology & God's Existence": [
+        "Theology", "God's Existence", "First Cause", "Causality", "Tawheed", "Divine Unity", "Creation"
+    ],
+    "Problem of Evil & Suffering": [
+        "Problem of Evil", "Suffering", "Theodicy", "Disasters", "Evil"
+    ],
+    "Objective Morality & Ethics": [
+        "Objective Morality", "Moral Ontology", "Ethics & Morality", "Moral"
+    ],
+    "Epistemology & Science": [
+        "Epistemology", "Science", "Evolution", "Darwin", "Scientific"
+    ],
+    "Prophethood & Quran": [
+        "Prophethood", "Quran", "Prophet", "Miracles", "Inimitability"
+    ],
+    "Shariah & Social Inquiries": [
+        "Shariah", "Social Inquiries", "Feminism", "Women", "Hijab", "Polygamy", "Inheritance", "Apostasy"
+    ],
+}
+
+
+def canonicalize_topic_category(raw_category: str) -> str:
+    """Enforces strict mapping of ad-hoc LLM categories to the 7 Canonical Pillars."""
+    if not raw_category:
+        return "Theology & God's Existence"
+    cat_clean = raw_category.strip()
+    if cat_clean in CANONICAL_TOPIC_PILLARS:
+        return cat_clean
+    for pillar, variants in CANONICAL_TOPIC_PILLARS.items():
+        if any(v.lower() in cat_clean.lower() for v in variants):
+            return pillar
+    return cat_clean
+
+
 def is_valid_dialectical_question(q_en: str, q_ar: str) -> bool:
     """
     Enforces quality threshold: discards conversational noise, rhetorical filler,
-    or truncated sentence fragments (e.g. 'Let her be?').
+    personal street interview chit-chat, or truncated sentence fragments.
     """
     q_en_clean = (q_en or "").strip().lower().rstrip("?").strip()
+    q_ar_clean = (q_ar or "").strip().rstrip("؟").strip()
     words_en = q_en_clean.split()
-    if len(words_en) < 4:
+    words_ar = q_ar_clean.split()
+    if len(words_en) < 4 or len(words_ar) < 3:
         return False
-    trivial_phrases = {
+
+    trivial_phrases_en = {
         "let her be", "what did you say", "are you sure", "excuse me",
         "can you hear me", "what is your name", "what's your name", "who are you",
         "repeat that", "are you listening", "hello", "hi there", "is that so",
-        "pardon me", "listen to me", "did you hear",
+        "pardon me", "listen to me", "did you hear", "where were you shot",
+        "how old are you", "where do you live", "can i take a picture",
+        "nice to meet you",
     }
-    for tp in trivial_phrases:
+    for tp in trivial_phrases_en:
         if q_en_clean.startswith(tp) or q_en_clean == tp:
             return False
+
+    trivial_phrases_ar = [
+        "أين أصبت", "كم عمرك", "ما اسمك", "من أنت", "هل تسمعني",
+        "ماذا قلت", "عفوا", "معذرة", "أهلا", "مرحبا", "أين تسكن",
+        "هل يمكن التقاط صورة", "تشرفنا"
+    ]
+    for tp in trivial_phrases_ar:
+        if q_ar_clean.startswith(tp) or q_ar_clean == tp:
+            return False
+
     return True
+
+
+def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int = 2500) -> List[Dict[str, Any]]:
+    """
+    Merges rapid consecutive micro-turns spoken by the same speaker.
+    Prevents chopped speech fragments from confusing the LLM and enables clean verbatim quotes.
+    """
+    if not turns:
+        return []
+    merged: List[Dict[str, Any]] = []
+    for t in turns:
+        t_copy = dict(t)
+        if (
+            merged
+            and merged[-1].get("speaker_id") == t_copy.get("speaker_id")
+            and merged[-1].get("episode_index") == t_copy.get("episode_index")
+            and not t_copy.get("is_pedestrian_interruption")
+            and not merged[-1].get("is_pedestrian_interruption")
+            and (int(t_copy.get("start_ms", 0)) - int(merged[-1].get("end_ms", 0))) <= max_gap_ms
+        ):
+            # Concatenate text
+            prev_text = (merged[-1].get("text_original") or "").strip()
+            curr_text = (t_copy.get("text_original") or "").strip()
+            if prev_text and curr_text:
+                merged[-1]["text_original"] = f"{prev_text} {curr_text}"
+            elif curr_text:
+                merged[-1]["text_original"] = curr_text
+
+            prev_ar = (merged[-1].get("text_ar") or "").strip()
+            curr_ar = (t_copy.get("text_ar") or "").strip()
+            if prev_ar and curr_ar:
+                merged[-1]["text_ar"] = f"{prev_ar} {curr_ar}"
+            elif curr_ar:
+                merged[-1]["text_ar"] = curr_ar
+
+            merged[-1]["end_ms"] = t_copy.get("end_ms", merged[-1]["end_ms"])
+            merged[-1]["end_fmt"] = t_copy.get("end_fmt", merged[-1]["end_fmt"])
+            words_a = merged[-1].get("words") or []
+            words_b = t_copy.get("words") or []
+            if isinstance(words_a, list) and isinstance(words_b, list):
+                merged[-1]["words"] = words_a + words_b
+        else:
+            merged.append(t_copy)
+    return merged
 
 
 def build_episode_windows(
@@ -160,14 +272,18 @@ def build_episode_windows(
 ) -> List[Dict[str, Any]]:
     """
     Groups ScenarioTurns by `episode_index` (interlocutor encounter).
+    Pre-merges rapid consecutive turns to maintain coherent argumentation units.
     If a single debate episode exceeds `max_words_per_window` (~10-12 minutes of speech),
     splits cleanly at a MAIN_DAEE turn completion and carries 3 context turns forward.
     """
     if not turns:
         return []
 
+    # Pre-merge rapid micro-turns by the same speaker
+    cohesive_turns = merge_consecutive_speaker_turns(turns)
+
     by_ep: Dict[int, List[Dict[str, Any]]] = {}
-    for t in turns:
+    for t in cohesive_turns:
         ep = int(t.get("episode_index", 1))
         by_ep.setdefault(ep, []).append(t)
 
@@ -271,6 +387,17 @@ def anchor_and_enrich_extracted_unit(
         else:
             # If candidate answer turn erroneously pointed to an interlocutor turn, fall back strictly to main_daee
             daee_spk_id = main_daee["speaker_id"] if main_daee else ""
+            # Redirect answer_turn_id to the closest real Da'ee turn following the question
+            q_ms = int(q_turn["start_ms"]) if q_turn else int(a_turn["start_ms"])
+            daee_turns_after = [
+                t for t in scenario.get("turns", [])
+                if t.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE") and int(t.get("start_ms", 0)) >= q_ms
+            ]
+            if daee_turns_after:
+                a_turn = daee_turns_after[0]
+                a_tid = a_turn.get("turn_id", a_tid)
+                item["answer_turn_id"] = a_tid
+                ans_sec = int(a_turn["start_ms"] // 1000)
     else:
         ans_sec = ts_sec
         daee_spk_id = main_daee["speaker_id"] if main_daee else ""
@@ -325,6 +452,37 @@ def anchor_and_enrich_extracted_unit(
             "text_en": ex.get("text_en", ""),
             "text_ar": ex.get("text_ar", ""),
         })
+
+    raw_cat = str(item.get("topic_category") or "").strip()
+    canonical_cat = canonicalize_topic_category(raw_cat)
+    if not item.get("topic_subcategory") and raw_cat != canonical_cat:
+        item["topic_subcategory"] = raw_cat
+    item["topic_category"] = canonical_cat
+
+    # Programmatic Verbatim Quote Validation Guard:
+    # Strictly ensures verbatim_quote is grounded in actual spoken turns rather than AI-hallucinated essays.
+    raw_vq = (item.get("verbatim_quote") or "").strip()
+    all_turns = scenario.get("turns", [])
+    all_transcript = " ".join([(t.get("text_original") or "").strip() for t in all_turns])
+    if raw_vq and raw_vq not in all_transcript:
+        w_vq = set(re.findall(r'\w+', raw_vq.lower()))
+        w_all = set(re.findall(r'\w+', all_transcript.lower()))
+        overlap = len(w_vq & w_all) / max(len(w_vq), 1) if w_vq else 0.0
+        # If low overlap (< 0.45), the quote was an AI-hallucinated essay; anchor to real Da'ee answer turn!
+        if overlap < 0.45 and a_turn and a_turn.get("text_original"):
+            item["verbatim_quote"] = a_turn["text_original"].strip()
+            if a_turn.get("text_ar") and item.get("verbatim_quote_ar"):
+                item["verbatim_quote_ar"] = a_turn["text_ar"].strip()
+
+    raw_ivq = (item.get("interlocutor_verbatim_quote") or "").strip()
+    if raw_ivq and raw_ivq not in all_transcript:
+        w_ivq = set(re.findall(r'\w+', raw_ivq.lower()))
+        w_all = set(re.findall(r'\w+', all_transcript.lower()))
+        ivq_overlap = len(w_ivq & w_all) / max(len(w_ivq), 1) if w_ivq else 0.0
+        if ivq_overlap < 0.45 and q_turn and q_turn.get("text_original"):
+            item["interlocutor_verbatim_quote"] = q_turn["text_original"].strip()
+            if q_turn.get("text_ar") and item.get("interlocutor_verbatim_quote_ar"):
+                item["interlocutor_verbatim_quote_ar"] = q_turn["text_ar"].strip()
 
     item.update({
         "id": f"{vid}_{unit_seq_num:03d}",
@@ -440,6 +598,10 @@ class Stage2ScenarioExtractor:
                 completed_win_ids.append(w_idx)
                 continue
 
+            main_daee = next((s for s in scenario.get("speakers", []) if s.get("role") == "MAIN_DAEE"), None)
+            target_name = (main_daee.get("display_name_en") if main_daee else "Main Da'ee") or "Main Da'ee"
+            target_id = (main_daee.get("speaker_id") if main_daee else "SPK_00") or "SPK_00"
+
             prompt = USER_EXTRACTION_PROMPT_TEMPLATE.format(
                 title_ar=scenario.get("title_ar", ""),
                 youtube_url=scenario.get("youtube_url", ""),
@@ -447,6 +609,8 @@ class Stage2ScenarioExtractor:
                 start_fmt=w["start_fmt"],
                 end_fmt=w["end_fmt"],
                 speakers_summary=speakers_summary or "MAIN_DAEE vs INTERLOCUTOR",
+                target_daee_name=target_name,
+                target_daee_id=target_id,
                 transcript_text=w["formatted_transcript"],
             )
 

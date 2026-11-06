@@ -215,6 +215,88 @@ class TestRootCauseGuards(unittest.TestCase):
         self.assertEqual(ex[1]["timestamp_formatted"], "01:12")
         self.assertEqual(ex[1]["speaker_label_ar"], "الشيخ عثمان بن فاروق")
 
+    def test_category_canonicalization(self):
+        """Tests that micro-categories map cleanly to the extensible canonical domains."""
+        from db.database import canonicalize_topic_category, get_category_arabic_name
+        self.assertEqual(
+            canonicalize_topic_category("Textual Preservation & Biblical Manuscripts"),
+            "Textual Preservation & Manuscripts"
+        )
+        self.assertEqual(
+            canonicalize_topic_category("Social Inquiries & Feminism"),
+            "Shariah & Social Inquiries"
+        )
+        self.assertEqual(
+            get_category_arabic_name("Textual Preservation & Biblical Manuscripts"),
+            "حفظ النصوص والمخطوطات"
+        )
+        self.assertEqual(
+            get_category_arabic_name("Social Inquiries & Feminism"),
+            "الشريعة والشبهات الاجتماعية"
+        )
+
+    def test_invalid_street_interview_questions(self):
+        """Tests that casual street interview questions are rejected."""
+        from core.scenario_extractor import is_valid_dialectical_question
+        self.assertFalse(is_valid_dialectical_question("Where were you shot?", "أين أصبت بالرصاصة؟"))
+        self.assertFalse(is_valid_dialectical_question("How old are you?", "كم عمرك؟"))
+        self.assertTrue(
+            is_valid_dialectical_question(
+                "If everything has a creator, who created God?",
+                "إذا كان لكل شيء خالق، فمن خلق الله؟"
+            )
+        )
+
+    def test_turn_pre_merging(self):
+        """Tests that consecutive rapid turns by the same speaker are merged into cohesive dialogue."""
+        from core.scenario_extractor import merge_consecutive_speaker_turns
+        turns = [
+            {"turn_id": "T01", "speaker_id": "SPK_00", "episode_index": 1, "start_ms": 1000, "end_ms": 2500, "start_fmt": "00:01", "end_fmt": "00:02", "text_original": "Who is the", "text_ar": "من هو"},
+            {"turn_id": "T02", "speaker_id": "SPK_00", "episode_index": 1, "start_ms": 2700, "end_ms": 4000, "start_fmt": "00:02", "end_fmt": "00:04", "text_original": "lamb of God?", "text_ar": "حمل الله؟"},
+            {"turn_id": "T03", "speaker_id": "SPK_01", "episode_index": 1, "start_ms": 5000, "end_ms": 8000, "start_fmt": "00:05", "end_fmt": "00:08", "text_original": "Jesus is the sacrifice.", "text_ar": "يسوع هو الذبيحة."}
+        ]
+        merged = merge_consecutive_speaker_turns(turns, max_gap_ms=2500)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0]["text_original"], "Who is the lamb of God?")
+        self.assertEqual(merged[0]["text_ar"], "من هو حمل الله؟")
+        self.assertEqual(merged[0]["end_fmt"], "00:04")
+        self.assertEqual(merged[1]["speaker_id"], "SPK_01")
+
+    def test_latin_token_purification(self):
+        """Tests that leaked English words in Classical Arabic fields are cleaned."""
+        from db.database import sanitize_text_field
+        self.assertEqual(sanitize_text_field("العالم والInstinctive للإنسان"), "العالم والفطري للإنسان")
+        self.assertEqual(sanitize_text_field("الإسلام يرفض الincest والpedophilia"), "الإسلام يرفض زنا المحارم والبيدوفيليا (استغلال الأطفال)")
+        self.assertEqual(sanitize_text_field("الكون يحتاج إلى Cause"), "الكون يحتاج إلى سبب أول")
+
+    def test_programmatic_verbatim_recovery(self):
+        """Tests that hallucinated quotes are automatically recovered from real spoken Da'ee turns."""
+        from core.scenario_extractor import anchor_and_enrich_extracted_unit
+        scenario = {
+            "video_id": "vid_hashim_01",
+            "youtube_url": "https://www.youtube.com/watch?v=vid_hashim_01",
+            "title_ar": "مناظرة الشيخ هاشم",
+            "speakers": [
+                {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_hashim", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Interlocutor", "display_name_ar": "المحاور"}
+            ],
+            "turns": [
+                {"turn_id": "T01", "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 5000, "start_fmt": "00:01", "text_original": "Is Jesus God?"},
+                {"turn_id": "T02", "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 6000, "end_ms": 12000, "start_fmt": "00:06", "text_original": "No, Jesus clearly said the Father is greater than I."}
+            ]
+        }
+        # LLM generated a totally fabricated essay for verbatim_quote
+        raw_unit = {
+            "question_turn_id": "T01",
+            "answer_turn_id": "T02",
+            "question_en": "Is Jesus God?",
+            "question_ar": "هل عيسى هو الله؟",
+            "verbatim_quote": "The biblical depiction of Christ as a divine essence is a philosophical contradiction to Monotheism." # Fabricated essay!
+        }
+        enriched = anchor_and_enrich_extracted_unit(raw_unit, scenario, 1, 0, 1)
+        # MUST be recovered from real spoken words in T02!
+        self.assertEqual(enriched["verbatim_quote"], "No, Jesus clearly said the Father is greater than I.")
+
 
 if __name__ == "__main__":
     unittest.main()

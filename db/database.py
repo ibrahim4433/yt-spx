@@ -578,12 +578,143 @@ _SCRIPT_REPLACEMENTS = [
     ("المiracles", "المعجزات"), ("فالمachines", "فالآلات"), ("كمessenger", "كرسول"),
     ("للمonotheism", "للتوحيد"), ("السcribes", "النساخ"), ("للسcribes", "للنساخ"),
     ("نihilist", "عدمي"), ("النihilists", "العدميون"), ("بprocesseات", "بعمليات"),
+    ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
+    ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
+    ("condemn", "يُدين"), ("Cause", "سبب أول"), ("causes", "أسباب أولى"),
+    ("والincest", "وزنا المحارم"),
+    ("الincest", "زنا المحارم"),
+    ("incest", "زنا المحارم"), ("two wills", "إرادتين"), ("wills", "إرادات"),
+    ("natures", "طبائع"), ("divine", "إلهي"), ("human", "بشري"),
+    ("bikinis", "لباس البحر الفاضح"),
+    ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
+    ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
+    ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
+    ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
+    ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
+    ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
     ("。，？，。", "؟"),
     ("。", "."),
     ("，", "،"),
     ("？", "؟"),
     ("！", "!"),
 ]
+
+
+BILINGUAL_TOPIC_DOMAINS = {
+    "Textual Preservation & Manuscripts": {
+        "ar": "حفظ النصوص والمخطوطات",
+        "variants": ["Textual Preservation", "Manuscript", "Inerrancy", "Biblical Criticism", "Biblical Reliability", "Biblical Manuscripts", "Dead Sea Scrolls", "Codex"]
+    },
+    "Comparative Religion & Christianity": {
+        "ar": "مقارنة الأديان والمسيحية",
+        "variants": ["Christianity", "Trinity", "Crucifixion", "Atonement", "Christology", "Gospel"]
+    },
+    "Theology & God's Existence": {
+        "ar": "العقيدة ووجود الله",
+        "variants": ["Theology", "God's Existence", "First Cause", "Causality", "Tawheed", "Divine Unity", "Creation", "Contingency"]
+    },
+    "Prophethood & Quran": {
+        "ar": "النبوة وإعجاز القرآن",
+        "variants": ["Prophethood", "Quran", "Prophet", "Miracles", "Inimitability", "Seerah"]
+    },
+    "Problem of Evil & Suffering": {
+        "ar": "معضلة الشر والمعاناة",
+        "variants": ["Problem of Evil", "Suffering", "Theodicy", "Disasters", "Evil", "Ibtilaa"]
+    },
+    "Objective Morality & Ethics": {
+        "ar": "الأخلاق الموضوعية والقيم",
+        "variants": ["Objective Morality", "Moral Ontology", "Ethics & Morality", "Moral Argument", "Nihilism"]
+    },
+    "Epistemology & Science": {
+        "ar": "المعرفة والعلم التجريبي",
+        "variants": ["Epistemology", "Science", "Evolution", "Darwin", "Scientism", "Consciousness", "Philosophy of Mind"]
+    },
+    "Shariah & Social Inquiries": {
+        "ar": "الشريعة والشبهات الاجتماعية",
+        "variants": ["Shariah", "Social Inquiries", "Women", "Hijab", "Polygamy", "Inheritance", "Apostasy", "Hudood", "Slavery Context"]
+    },
+    "Comparative Religion & Judaism": {
+        "ar": "مقارنة الأديان واليهودية",
+        "variants": ["Judaism", "Jewish", "Torah", "Talmud", "Old Testament Prophecies"]
+    },
+    "Comparative Religion & Eastern Traditions": {
+        "ar": "مقارنة الأديان والمعتقدات الشرقية",
+        "variants": ["Hinduism", "Buddhism", "Reincarnation", "Karma", "Eastern Traditions"]
+    },
+    "Hadith & Sunnah Preservation": {
+        "ar": "حفظ السنة والحديث النبوي",
+        "variants": ["Hadith", "Sunnah", "Isnad", "Bukhari", "Fabrication", "Narrators"]
+    },
+    "Islamic History & Civilizations": {
+        "ar": "التاريخ والحضارة الإسلامية",
+        "variants": ["Islamic History", "Caliphate", "Conquests", "Andalusia", "Crusades", "Ottoman"]
+    },
+    "Eschatology & Free Will": {
+        "ar": "القدر واليوم الآخر والجنة والنار",
+        "variants": ["Eschatology", "Free Will", "Qadr", "Destiny", "Afterlife", "Hell", "Heaven", "Resurrection"]
+    },
+}
+
+CANONICAL_TOPIC_PILLARS = {k: v["variants"] for k, v in BILINGUAL_TOPIC_DOMAINS.items()}
+
+
+def get_category_arabic_name(en_category: str) -> str:
+    """Returns authentic Classical Arabic title for any category, existing or new."""
+    if not en_category:
+        return "العقيدة ووجود الله"
+    en_clean = en_category.strip()
+    if en_clean in BILINGUAL_TOPIC_DOMAINS:
+        return BILINGUAL_TOPIC_DOMAINS[en_clean]["ar"]
+    for dom_name, dom_info in BILINGUAL_TOPIC_DOMAINS.items():
+        if any(v.lower() in en_clean.lower() for v in dom_info["variants"]):
+            return dom_info["ar"]
+    # Semantic word-level fallback translation for arbitrary new domains:
+    word_map = {
+        "Comparative Religion": "مقارنة الأديان",
+        "Textual Preservation": "حفظ النصوص",
+        "Manuscripts": "المخطوطات",
+        "Theology": "العقيدة",
+        "God's Existence": "وجود الله",
+        "Prophethood": "النبوة",
+        "Quran": "القرآن",
+        "Hadith": "الحديث النبوي",
+        "Sunnah": "السنة النبوية",
+        "History": "التاريخ",
+        "Civilization": "الحضارة",
+        "Philosophy": "الفلسفة",
+        "Ethics": "الأخلاق",
+        "Morality": "القيم",
+        "Science": "العلوم",
+        "Epistemology": "نظرية المعرفة",
+        "Shariah": "الشريعة",
+        "Feminism": "النسوية",
+        "Social": "المجتمع",
+        "Inquiries": "القضايا والشبهات",
+        "Suffering": "المعاناة",
+        "Evil": "الشر",
+        "Christianity": "المسيحية",
+        "Judaism": "اليهودية",
+        "Islam": "الإسلام",
+        "&": "و"
+    }
+    ar_name = en_clean
+    for en_word, ar_word in word_map.items():
+        ar_name = re.sub(r'\b' + re.escape(en_word) + r'\b', ar_word, ar_name, flags=re.IGNORECASE)
+    ar_name = ar_name.replace("&", "و").strip()
+    return ar_name if re.search(r'[\u0600-\u06ff]', ar_name) else "قضايا فكرية وبحوث مقارنة"
+
+
+def canonicalize_topic_category(raw_category: str) -> str:
+    """Normalizes minor semantic variants without artificially restricting new major domains."""
+    if not raw_category:
+        return "Theology & God's Existence"
+    cat_clean = raw_category.strip()
+    if cat_clean in BILINGUAL_TOPIC_DOMAINS:
+        return cat_clean
+    for pillar, dom_info in BILINGUAL_TOPIC_DOMAINS.items():
+        if any(v.lower() in cat_clean.lower() for v in dom_info["variants"]):
+            return pillar
+    return cat_clean
 
 
 def sanitize_text_field(text: Optional[str]) -> str:
@@ -910,8 +1041,15 @@ def _build_search_where(
         sql_parts.append("(" + " OR ".join(sub_clauses) + ")")
 
     if category and category != "all":
-        sql_parts.append("topic_category = ?")
-        params.append(category)
+        variants = CANONICAL_TOPIC_PILLARS.get(category, [])
+        if variants:
+            clauses = ["topic_category = ?"] + ["topic_category LIKE ?" for _ in variants]
+            sql_parts.append(f"({' OR '.join(clauses)})")
+            params.append(category)
+            params.extend([f"%{v}%" for v in variants])
+        else:
+            sql_parts.append("topic_category = ?")
+            params.append(category)
 
     if interlocutor and interlocutor != "all":
         sql_parts.append("interlocutor_type = ?")
@@ -1017,6 +1155,17 @@ def _hydrate_qa_row(row: sqlite3.Row, serial_num: int) -> Dict[str, Any]:
             enriched_ex.append(ex_copy)
         d["dialogue_exchange"] = enriched_ex
 
+    # Dynamic category canonicalization
+    raw_cat = d.get("topic_category") or ""
+    canonical_cat = canonicalize_topic_category(raw_cat)
+    if canonical_cat != raw_cat:
+        if not d.get("topic_subcategory"):
+            d["topic_subcategory"] = raw_cat
+        d["topic_category"] = canonical_cat
+
+    # Ensure topic_category_ar is always populated with authentic Classical Arabic
+    d["topic_category_ar"] = get_category_arabic_name(d.get("topic_category") or "")
+
     return d
 
 
@@ -1057,7 +1206,40 @@ def get_categories_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, A
         ORDER BY count DESC
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    from collections import defaultdict
+    counts = defaultdict(int)
+    for r in rows:
+        c_pillar = canonicalize_topic_category(r["topic_category"])
+        counts[c_pillar] += r["count"]
+
+    ordered_pillars = [
+        "Comparative Religion & Christianity",
+        "Theology & God's Existence",
+        "Prophethood & Quran",
+        "Shariah & Social Inquiries",
+        "Problem of Evil & Suffering",
+        "Epistemology & Science",
+        "Objective Morality & Ethics"
+    ]
+
+    res = []
+    for p in ordered_pillars:
+        if counts[p] > 0:
+            res.append({
+                "topic_category": p,
+                "topic_category_ar": get_category_arabic_name(p),
+                "count": counts[p]
+            })
+    for p, cnt in counts.items():
+        if p not in ordered_pillars and cnt > 0:
+            res.append({
+                "topic_category": p,
+                "topic_category_ar": get_category_arabic_name(p),
+                "count": cnt
+            })
+
+    return res
 
 
 def get_interlocutor_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:

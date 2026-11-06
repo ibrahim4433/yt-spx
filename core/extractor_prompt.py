@@ -63,6 +63,14 @@ CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES (حظر تلفيق أو إ�
 CRITICAL RULE 6: ZERO FOREIGN SCRIPT LEAKAGE (حظر تسرب الحروف الروسية أو الصينية نهائياً)
 - All `*_ar` fields must consist of pure, eloquent Classical Arabic with standard Arabic punctuation (`؟`, `،`, `.`).
 - NEVER output Russian Cyrillic words (e.g. "педوفيليا") or Chinese CJK punctuation (e.g. "。，？") in Arabic fields under any circumstance! Always use authentic Arabic equivalents (e.g. "البيدوفيليا / استغلال الأطفال").
+- NEVER leak English or Latin words (e.g. "Instinctive", "condemn", "Cause", "natures") inside Arabic text. Always translate them into proper Classical Arabic ("فطري", "يُدين", "سبب أول", "طبائع").
+
+CRITICAL RULE 7: SOCRATIC CROSS-EXAMINATIONS (حظر الخلط عند هجوم الداعية بالسؤال السقراطي)
+- In street debates, the Muslim Da'ee often takes the intellectual offensive by asking the interlocutor probing Socratic questions (e.g., "Who is the lamb of God?", "Can God die?", "Who died on the cross?", "Can you create a fly?").
+- DO NOT CONFUSE THE DA'EE'S COUNTER-QUESTION WITH THE SKEPTIC'S OBJECTION!
+- The card's question MUST reflect the false dogma or doubt being refuted (e.g., "Isn't Jesus the sacrifice and the lamb of God sitting on the throne in Revelation?", "Did God die on the cross for our sins?").
+- `answer_turn_id` MUST be spoken by the Muslim Da'ee ([MAIN_DAEE] or [CO_DAEE]), NEVER by an interlocutor!
+- The interlocutor is the debate opponent and CAN NEVER be assigned as the Da'ee (`daee_speaker_id`).
 
 EXACT JSON OUTPUT SCHEMA (Array of Objects):
 [
@@ -71,9 +79,10 @@ EXACT JSON OUTPUT SCHEMA (Array of Objects):
     "answer_turn_id": "Exact Turn ID where the Da'ee began the core response (e.g. 'YC86BQwvHyk_T0015')",
     "question_en": "The exact question, misconception, or false claim as a seeker/interlocutor would ask or search it in English",
     "question_ar": "صياغة الشبهة أو السؤال أو الزعم كما يطرحه المحاور أو الباحث عن الحقيقة بالعربية الفصحى",
-    "topic_category": "One of: [Theology & God's Existence, Comparative Religion & Christianity, Problem of Evil & Suffering, Objective Morality & Ethics, Epistemology & Science, Prophethood & Quran, Shariah & Social Inquiries, .....]",
-    "topic_subcategory": "Specific subtopic (e.g. Divinity of Christ, Divine Justice, First Cause, Textual Preservation, Moral Ontology, ....)",
-    "interlocutor_type": "One of: [Atheist / Materialist, Christian / Trinitarian, Agnostic / Skeptic, Secular Humanist, Inquiring Seeker, Muslim with Doubts , ....]",
+    "topic_category": "Primary thematic domain in English (Standard domains: 'Theology & God's Existence', 'Comparative Religion & Christianity', 'Textual Preservation & Manuscripts', 'Comparative Religion & Judaism', 'Comparative Religion & Eastern Traditions', 'Prophethood & Quran', 'Hadith & Sunnah Preservation', 'Problem of Evil & Suffering', 'Objective Morality & Ethics', 'Epistemology & Science', 'Shariah & Social Inquiries', 'Islamic History & Civilizations', 'Eschatology & Free Will', or a well-defined new thematic domain)",
+    "topic_category_ar": "الاسم العربي الفصيح للمجال الموضوعي الرئيسي (مثال: 'العقيدة ووجود الله'، 'مقارنة الأديان والمسيحية'، 'حفظ النصوص والمخطوطات'، 'مقارنة الأديان واليهودية'، 'النبوة وإعجاز القرآن'، 'حفظ السنة النبوية'، 'معضلة الشر والمعاناة'، 'الأخلاق الموضوعية والقيم'، 'المعرفة والعلم التجريبي'، 'الشريعة والقضايا المجتمعية'، 'التاريخ والحضارة الإسلامية'، 'القدر واليوم الآخر')",
+    "topic_subcategory": "Specific subtopic (e.g. Divinity of Christ, Council of Nicaea, First Cause, Moral Ontology, Feminism, Evolution, Animal Suffering, Slavery Context)",
+    "interlocutor_type": "Worldview or archetype of the seeker/interlocutor: ['Christian / Trinitarian', 'Atheist / Materialist', 'Agnostic / Skeptic', 'Inquiring Seeker', 'Muslim with Doubts', 'Secular Humanist', 'Jewish / Rabbinic', 'Hindu / Eastern', 'Shiite', or specific worldview]",
     "core_answer_summary_en": "Direct, authoritative, convincing Islamic refutation and explanation in English (NO 'The Da'ee said' narrative). State the truth that dissolves the doubt.",
     "core_answer_summary_ar": "بيان برهاني حاسم ومحرر بالعربية الفصحى يقرر أصل العقيدة والرد المقنع الشافي (ممنوع تماماً الصياغات السردية مثل 'يرد الداعية بكذا')",
     "logical_premises": [
@@ -245,6 +254,7 @@ Video Title: {title_ar}
 YouTube URL: {youtube_url}
 Episode: #{episode_index} ({start_fmt} -> {end_fmt})
 Identified Speakers: {speakers_summary}
+Target Da'ee: {target_daee_name} ({target_daee_id}) — All answer fields MUST represent this Muslim Da'ee!
 
 DIARIZED SCENARIO TRANSCRIPT:
 {transcript_text}

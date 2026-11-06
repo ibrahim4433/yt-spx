@@ -54,14 +54,24 @@ let lastHighlightedTurnId = "";
 
 const CATEGORY_MAP = {
   "Prophethood & Quran": { en: "Prophethood & Quran", ar: "النبوة والقرآن الكريم" },
-  "Comparative Religion & Christianity": { en: "Comparative Religion & Trinity", ar: "مقارنة الأديان والتثليث" },
+  "Comparative Religion & Christianity": { en: "Comparative Religion & Christianity", ar: "مقارنة الأديان والمسيحية" },
   "Theology & God's Existence": { en: "Theology & God's Existence", ar: "العقيدة ووجود الله" },
   "Epistemology & Science": { en: "Epistemology & Science", ar: "المعرفة والعلم التجريبي" },
   "Shariah & Social Inquiries": { en: "Shariah & Social Inquiries", ar: "الشريعة والشبهات الاجتماعية" },
   "Ethics & Morality": { en: "Ethics & Morality", ar: "الأخلاق والقيم" },
-  "Objective Morality & Ethics": { en: "Objective Morality & Ethics", ar: "الأخلاق الموضوعية والإلحاد" },
-  "Problem of Evil & Suffering": { en: "Problem of Evil & Suffering", ar: "مشكلة الشر والمعاناة" },
+  "Objective Morality & Ethics": { en: "Objective Morality & Ethics", ar: "الأخلاق الموضوعية والقيم" },
+  "Problem of Evil & Suffering": { en: "Problem of Evil & Suffering", ar: "معضلة الشر والمعاناة" },
   "Dawah & Social Inquiries": { en: "Dawah & Social Inquiries", ar: "الدعوة والحوار الاجتماعي" },
+  "Comparative Religion & Shariah": { en: "Comparative Religion & Shariah", ar: "مقارنة الأديان والتشريع" },
+  "Comparative Religion & History": { en: "Comparative Religion & History", ar: "مقارنة الأديان والتاريخ" },
+  "Comparative Religion & Ethics": { en: "Comparative Religion & Ethics", ar: "مقارنة الأديان والأخلاق" },
+  "Social Inquiries & Feminism": { en: "Social Inquiries & Feminism", ar: "الشريعة والنسوية والقضايا المجتمعية" },
+  "Textual Preservation & Reliability": { en: "Textual Preservation & Reliability", ar: "مقارنة الأديان وحفظ النصوص" },
+  "Textual Preservation & Manuscript Evidence": { en: "Manuscript Evidence & Preservation", ar: "مقارنة الأديان والمخطوطات" },
+  "Textual Preservation & Biblical Reliability": { en: "Biblical Reliability & Manuscripts", ar: "مقارنة الأديان وموثوقية الكتاب المقدس" },
+  "Textual Preservation & Biblical Manuscripts": { en: "Biblical Manuscripts & Preservation", ar: "مقارنة الأديان ومخطوطات الكتاب المقدس" },
+  "Textual Preservation & Biblical Inerrancy": { en: "Biblical Inerrancy & Criticism", ar: "مقارنة الأديان ونقد دعوى عصمة الإنجيل" },
+  "Textual Preservation & Biblical Criticism": { en: "Biblical Criticism & Preservation", ar: "مقارنة الأديان والنقد النصي" },
   "Miscellaneous": { en: "General Philosophical Inquiries", ar: "مباحث فكرية عامة" }
 };
 
@@ -73,7 +83,9 @@ const INTERLOCUTOR_MAP = {
   "Materialist": { en: "Materialist", ar: "مادي طبيعي" },
   "Secular Humanist / Christian": { en: "Secular / Christian", ar: "علماني / مسيحي" },
   "Agnostic / Skeptic": { en: "Agnostic / Skeptic", ar: "لاأدري / متشكك" },
-  "Muslim with Doubts": { en: "Muslim Seeking Proof", ar: "مسلم يطلب البرهان" }
+  "Muslim with Doubts": { en: "Muslim Seeking Proof", ar: "مسلم يطلب البرهان" },
+  "Shiite": { en: "Shiite", ar: "شيعي" },
+  "Shia": { en: "Shia", ar: "شيعي" }
 };
 
 const SVG_ICONS = {
@@ -573,7 +585,36 @@ function updateTelemetryStripUI() {
 
 function getLocalizedCategory(catKey, lang = currentLang) {
   if (!catKey) return "";
-  return (CATEGORY_MAP[catKey] && CATEGORY_MAP[catKey][lang]) || catKey;
+  if (CATEGORY_MAP[catKey] && CATEGORY_MAP[catKey][lang]) {
+    return CATEGORY_MAP[catKey][lang];
+  }
+  if (lang === "ar") {
+    if (catKey.includes("Textual Preservation") || catKey.includes("Manuscript") || catKey.includes("Biblical")) {
+      return "مقارنة الأديان والمخطوطات";
+    }
+    if (catKey.includes("Feminism") || catKey.includes("Social Inquiries")) {
+      return "الشريعة والقضايا المجتمعية";
+    }
+    if (catKey.includes("Comparative Religion")) {
+      return "مقارنة الأديان والمسيحية";
+    }
+    if (catKey.includes("Theology") || catKey.includes("God")) {
+      return "العقيدة ووجود الله";
+    }
+    if (catKey.includes("Morality") || catKey.includes("Ethics")) {
+      return "الأخلاق الموضوعية والقيم";
+    }
+    if (catKey.includes("Prophethood") || catKey.includes("Quran")) {
+      return "النبوة والقرآن الكريم";
+    }
+    if (catKey.includes("Evil") || catKey.includes("Suffering")) {
+      return "معضلة الشر والمعاناة";
+    }
+    if (catKey.includes("Epistemology") || catKey.includes("Science")) {
+      return "المعرفة والعلم التجريبي";
+    }
+  }
+  return catKey;
 }
 
 function getLocalizedInterlocutor(interKey, lang = currentLang) {
@@ -601,12 +642,17 @@ function renderFacetRails() {
       </button>
       ${categoriesData
         .map(
-          (item) => `
+          (item) => {
+            const catLabel = currentLang === "ar"
+              ? (item.topic_category_ar || getLocalizedCategory(item.topic_category, "ar"))
+              : (item.topic_category || getLocalizedCategory(item.topic_category, "en"));
+            return `
         <button type="button" class="facet-btn ${currentCategory === item.topic_category ? "active" : ""}" onclick="setCategoryFilter('${escapeJsStr(item.topic_category)}')">
-          <span>${escapeHtml(getLocalizedCategory(item.topic_category))}</span>
+          <span>${escapeHtml(catLabel)}</span>
           <span class="facet-count">${item.count}</span>
         </button>
-      `
+      `;
+          }
         )
         .join("")}
     `;
@@ -669,10 +715,13 @@ function renderStatsTables() {
       catTable.innerHTML = categoriesData
         .map((item) => {
           const pct = Math.max(Math.round((item.count / totalQa) * 100), 2);
+          const catLabel = isAr
+            ? (item.topic_category_ar || getLocalizedCategory(item.topic_category, "ar"))
+            : (item.topic_category || getLocalizedCategory(item.topic_category, "en"));
           return `
             <button type="button" class="arch-bar-row" onclick="jumpToCategoryFromStats('${escapeJsStr(item.topic_category)}')">
               <div class="arch-bar-top">
-                <span>${escapeHtml(getLocalizedCategory(item.topic_category))}</span>
+                <span>${escapeHtml(catLabel)}</span>
                 <span class="arch-bar-count">${item.count} (${pct}%)</span>
               </div>
               <div class="arch-bar-track">
@@ -1077,7 +1126,9 @@ function renderCards(cards) {
     const primaryQuestion = isAr ? qAr : qEn;
     const primarySummary = isAr ? sumAr : sumEn;
 
-    const categoryName = getLocalizedCategory(card.topic_category);
+    const categoryName = isAr
+      ? (card.topic_category_ar || getLocalizedCategory(card.topic_category, "ar"))
+      : (card.topic_category || getLocalizedCategory(card.topic_category, "en"));
     const interlocutorName = getLocalizedInterlocutor(card.interlocutor_type);
     const subcategoryText = card.topic_subcategory && !isNoneText(card.topic_subcategory) ? card.topic_subcategory : "";
 
