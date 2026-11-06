@@ -221,16 +221,29 @@ def is_valid_dialectical_question(q_en: str, q_ar: str) -> bool:
     return True
 
 
+def collapse_repetition_loops(text: str) -> str:
+    """Collapses ASR acoustic hallucination loops (e.g. 'Listen. Listen. Listen.' -> 'Listen.')."""
+    if not text:
+        return ""
+    # Collapse repetitive single-word phrases repeated 3+ times
+    collapsed = re.sub(r'\b(\w+[\s,.]*)\s*(?:\1){2,}', r'\1 ', text, flags=re.IGNORECASE)
+    return " ".join(collapsed.split()).strip()
+
+
 def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int = 2500) -> List[Dict[str, Any]]:
     """
     Merges rapid consecutive micro-turns spoken by the same speaker.
     Prevents chopped speech fragments from confusing the LLM and enables clean verbatim quotes.
+    Also suppresses Faster-Whisper repetition loops.
     """
     if not turns:
         return []
     merged: List[Dict[str, Any]] = []
     for t in turns:
         t_copy = dict(t)
+        # Suppress any Whisper repetition loops in raw text
+        if t_copy.get("text_original"):
+            t_copy["text_original"] = collapse_repetition_loops(t_copy["text_original"])
         if (
             merged
             and merged[-1].get("speaker_id") == t_copy.get("speaker_id")

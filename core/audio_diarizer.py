@@ -498,6 +498,7 @@ class WarmASRAlignmentEngine:
                         waveform,
                         language=target_lang,
                         initial_prompt=init_prompt,
+                        condition_on_previous_text=False,
                         vad_filter=True,
                         word_timestamps=not use_ctc_aligner,
                     )
