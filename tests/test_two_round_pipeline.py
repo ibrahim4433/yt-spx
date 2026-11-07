@@ -384,6 +384,45 @@ class TestTwoRoundPipelineExecutionAndResume(unittest.TestCase):
         self.assertEqual(len(units), 1)
         self.assertEqual(units[0]["question_ar"], "من خلق الخالق؟")
 
+    def test_extract_video_m6_verbose_logging_prints_elapsed(self):
+        """Regression test: verifies verbose=True prints [Episode ...] with elapsed without NameError."""
+        import io
+        from contextlib import redirect_stdout
+
+        r1_output = [
+            {
+                "question_turn_id": f"{self.vid}_T0001",
+                "answer_turn_id": f"{self.vid}_T0002",
+                "topic_category": "Theology & God's Existence",
+                "question_en": "If God created everything, who created God?",
+                "core_answer_summary_en": "Infinite regress fallacy.",
+                "logical_premises": ["Causes cannot regress infinitely."],
+            }
+        ]
+        r2_output = [
+            {
+                "question_ar": "إذا كان الله خلق كل شيء فمن خلق الله؟",
+                "core_answer_summary_ar": "مغالطة التسلسل اللانهائي.",
+            }
+        ]
+
+        class VerboseMockLLM:
+            def extract_round1_english(self, prompt: str) -> str:
+                return json.dumps(r1_output)
+
+            def extract_round2_arabic(self, r1_json_str: str, prompt: str) -> str:
+                return json.dumps(r2_output)
+
+        mock_llm = VerboseMockLLM()
+        extractor = Stage2ScenarioExtractor(workspace=self.ws, llm_client=mock_llm)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            units = extractor.extract_video_m6(self.vid, verbose=True)
+        out = buf.getvalue()
+        self.assertEqual(len(units), 1)
+        self.assertIn("turns,", out)
+        self.assertIn("s):", out)
+
 
 class TestDatabaseSchemaAndFTS5(unittest.TestCase):
     def setUp(self):

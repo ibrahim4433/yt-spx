@@ -951,7 +951,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0,
         help="Graceful stop timer in minutes (default 0 = continuous until disconnect; or e.g. 165 for 2h45m).",
     )
-    p.add_argument("--whisper-model", default="large-v3-turbo", help="Faster-Whisper model size.")
+    p.add_argument("--whisper-model", default="large-v3", help="Faster-Whisper model size.")
     p.add_argument("--whisper-batch-size", type=int, default=24, help="BatchedInferencePipeline batch size.")
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
     p.add_argument("--llm-context-length", type=int, default=14336, help="Stage 2 GGUF context window.")

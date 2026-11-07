@@ -1099,6 +1099,9 @@ class Stage2ScenarioExtractor:
                 continue
 
             # 2. Check for intermediate Round 1 checkpoint (.en.json)
+            elapsed_r1 = 0.0
+            elapsed_r2 = 0.0
+            elapsed = 0.0
             r1_units = None
             if partial_en_file.exists():
                 cached_en = self.workspace.read_json(partial_en_file, default=None)
@@ -1157,6 +1160,7 @@ class Stage2ScenarioExtractor:
             else:
                 raw_out_r2 = self.client.extract(prompt_r2, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
             elapsed_r2 = round(time.time() - t0_r2, 1)
+            elapsed = round(elapsed_r1 + elapsed_r2, 1)
 
             parsed_r2 = clean_llm_json_array(raw_out_r2)
             final_raw_units = merge_round1_and_round2_units(r1_units, parsed_r2)

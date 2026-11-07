@@ -2,7 +2,7 @@
 """
 core/audio_diarizer.py
 Micro-Step M5 (and End-to-End Stage 1 Runner M1 -> M5):
-Combines Warm Faster-Whisper (large-v3-turbo float16), CTC Word Forced Aligner
+Combines Warm Faster-Whisper (large-v3 float16), CTC Word Forced Aligner
 (mms-300m-1130-forced-aligner), Multilingual Punctuation Restoration, Overlap Stream
 Transcription, Interval-IoU Speaker Mapping, and 3-Tier Semantic Role Classification
 to produce complete, accurate Scenario Transcripts on Shared 5 TB Google Drive.
@@ -399,13 +399,13 @@ def format_diarized_srt(turns: List[Dict[str, Any]]) -> str:
 
 class WarmASRAlignmentEngine:
     """
-    Keeps Faster-Whisper (large-v3-turbo float16), CTC Forced Aligner (mms-300m-1130),
+    Keeps Faster-Whisper (large-v3 float16), CTC Forced Aligner (mms-300m-1130),
     and Multilingual Punctuation warm in GPU memory across a batch of videos (~4.2 GB VRAM).
     """
 
     def __init__(
         self,
-        whisper_model_name: str = "large-v3-turbo",
+        whisper_model_name: str = "large-v3",
         device: str = "cuda",
         batch_size: int = 24,
     ):
@@ -491,16 +491,20 @@ class WarmASRAlignmentEngine:
                         language=target_lang,
                         initial_prompt=init_prompt,
                         batch_size=self.batch_size,
-                        word_timestamps=not use_ctc_aligner,
+                        word_timestamps=True,
                     )
                 else:
                     return self._whisper.transcribe(
                         waveform,
                         language=target_lang,
                         initial_prompt=init_prompt,
+                        beam_size=5,
+                        best_of=5,
+                        temperature=[0.0, 0.2, 0.4],
                         condition_on_previous_text=False,
                         vad_filter=True,
-                        word_timestamps=not use_ctc_aligner,
+                        vad_parameters=dict(min_silence_duration_ms=500),
+                        word_timestamps=True,
                     )
             except RuntimeError as err:
                 err_str = str(err).lower()
@@ -538,6 +542,7 @@ class WarmASRAlignmentEngine:
                 for w in seg.words:
                     if w.word and w.word.strip():
                         fallback_words.append({
+                            "word": w.word.strip(),
                             "text": w.word.strip(),
                             "start": float(w.start),
                             "end": float(w.end),
@@ -549,6 +554,7 @@ class WarmASRAlignmentEngine:
                     dur = max(0.05, float(seg.end - seg.start)) / len(ws_tokens)
                     for i_tok, tok in enumerate(ws_tokens):
                         fallback_words.append({
+                            "word": tok,
                             "text": tok,
                             "start": float(seg.start) + i_tok * dur,
                             "end": float(seg.start) + (i_tok + 1) * dur,
@@ -570,26 +576,90 @@ class WarmASRAlignmentEngine:
                     postprocess_results,
                 )
                 self._ensure_aligner()
-                try:
-                    wav_tensor = torch.from_numpy(audio_waveform).to(self._align_model.dtype).to(self._align_model.device)
-                    emissions, stride = generate_emissions(
-                        self._align_model,
-                        wav_tensor,
-                        batch_size=max(4, self.batch_size // 2),
-                    )
-                    del wav_tensor
-                except (TypeError, RuntimeError):
-                    emissions, stride = generate_emissions(
-                        self._align_model,
-                        audio_waveform,
-                        batch_size=max(4, self.batch_size // 2),
-                    )
-                if isinstance(emissions, torch.Tensor):
-                    emissions = emissions.detach().cpu().numpy()
+                ratio = getattr(getattr(self._align_model, "config", None), "inputs_to_logits_ratio", 320)
+                stride = float(ratio) / 16000.0
+                emissions = None
+
+                if hasattr(self._align_model, "run"):
+                    try:
+                        wav_tensor = torch.from_numpy(audio_waveform).to(self._align_model.dtype).to(self._align_model.device)
+                        emissions, stride = generate_emissions(
+                            self._align_model,
+                            wav_tensor,
+                            batch_size=max(4, self.batch_size // 2),
+                        )
+                        del wav_tensor
+                    except Exception:
+                        try:
+                            emissions, stride = generate_emissions(
+                                self._align_model,
+                                audio_waveform,
+                                batch_size=max(4, self.batch_size // 2),
+                            )
+                        except Exception:
+                            emissions = None
+
+                if emissions is None:
+                    # HuggingFace AutoModelForCTC (Wav2Vec2ForCTC) chunked PyTorch forward pass
+                    # Chunk into 30s segments (480,000 samples) so VRAM never exceeds ~100MB even on 3-hour audio
+                    chunk_size = 16000 * 30
+                    total_len = len(audio_waveform)
+                    if total_len <= chunk_size:
+                        wav_tensor = torch.from_numpy(audio_waveform)
+                        if hasattr(self._align_model, "dtype"):
+                            wav_tensor = wav_tensor.to(self._align_model.dtype)
+                        if hasattr(self._align_model, "device"):
+                            wav_tensor = wav_tensor.to(self._align_model.device)
+                        if hasattr(wav_tensor, "ndim") and wav_tensor.ndim == 1 and hasattr(wav_tensor, "unsqueeze"):
+                            wav_tensor = wav_tensor.unsqueeze(0)
+                        with torch.inference_mode():
+                            logits = self._align_model(wav_tensor).logits
+                            emissions = torch.log_softmax(logits, dim=-1)
+                        del wav_tensor
+                    else:
+                        emissions_list = []
+                        for offset in range(0, total_len, chunk_size):
+                            chunk = audio_waveform[offset : min(offset + chunk_size, total_len)]
+                            rem = len(chunk) % 320
+                            if rem != 0:
+                                chunk = np.pad(chunk, (0, 320 - rem))
+                            c_tensor = torch.from_numpy(chunk)
+                            if hasattr(self._align_model, "dtype"):
+                                c_tensor = c_tensor.to(self._align_model.dtype)
+                            if hasattr(self._align_model, "device"):
+                                c_tensor = c_tensor.to(self._align_model.device)
+                            if hasattr(c_tensor, "ndim") and c_tensor.ndim == 1 and hasattr(c_tensor, "unsqueeze"):
+                                c_tensor = c_tensor.unsqueeze(0)
+                            with torch.inference_mode():
+                                c_logits = self._align_model(c_tensor).logits
+                                c_em = torch.log_softmax(c_logits, dim=-1)
+                                if hasattr(c_em, "cpu"):
+                                    c_em = c_em.cpu()
+                            emissions_list.append(c_em)
+                            del c_tensor, c_logits
+                        if hasattr(torch, "cat") and emissions_list:
+                            emissions = torch.cat(emissions_list, dim=1)
+                            if total_len % 320 != 0 and hasattr(emissions, "__getitem__"):
+                                emissions = emissions[:, : (total_len // 320), :]
+                        elif emissions_list:
+                            emissions = emissions_list[0]
+
+                if isinstance(emissions, torch.Tensor) or hasattr(emissions, "is_cpu"):
+                    if hasattr(emissions, "cpu"):
+                        emissions = emissions.cpu()
+                    if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.size(0) == 1:
+                        emissions = emissions.squeeze(0)
+                elif isinstance(emissions, np.ndarray):
+                    if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.shape[0] == 1:
+                        emissions = np.squeeze(emissions, axis=0)
+                    if hasattr(torch, "from_numpy"):
+                        try:
+                            emissions = torch.from_numpy(emissions)
+                        except Exception:
+                            pass
                 elif isinstance(emissions, (list, tuple)):
-                    emissions = [e.detach().cpu().numpy() if isinstance(e, torch.Tensor) else e for e in emissions]
-                elif hasattr(emissions, "detach"):
-                    emissions = emissions.detach().cpu().numpy()
+                    emissions = [e.cpu() if hasattr(e, "cpu") else e for e in emissions]
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -598,24 +668,29 @@ class WarmASRAlignmentEngine:
                     romanize=True,
                     language=iso3,
                 )
-                segments, scores, blank_token = get_alignments(
-                    emissions,
-                    tokens_starred,
-                    self._align_tokenizer,
-                )
-                if isinstance(scores, torch.Tensor):
-                    scores = scores.detach().cpu().numpy()
-                elif isinstance(scores, (list, tuple)):
-                    scores = [s.detach().cpu().numpy() if isinstance(s, torch.Tensor) else s for s in scores]
-                elif hasattr(scores, "detach"):
-                    scores = scores.detach().cpu().numpy()
+                try:
+                    segments, scores, blank_token = get_alignments(
+                        emissions,
+                        tokens_starred,
+                        self._align_tokenizer,
+                    )
+                except AttributeError as ae:
+                    if "is_cpu" in str(ae) and isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
+                        em_tensor = torch.from_numpy(emissions)
+                        if hasattr(em_tensor, "ndim") and em_tensor.ndim == 3 and em_tensor.size(0) == 1:
+                            em_tensor = em_tensor.squeeze(0)
+                        segments, scores, blank_token = get_alignments(
+                            em_tensor,
+                            tokens_starred,
+                            self._align_tokenizer,
+                        )
+                    else:
+                        raise
 
-                if isinstance(segments, torch.Tensor):
-                    segments = segments.detach().cpu().numpy()
-                elif isinstance(segments, (list, tuple)):
-                    segments = [s.detach().cpu().numpy() if isinstance(s, torch.Tensor) else s for s in segments]
-                elif hasattr(segments, "detach"):
-                    segments = segments.detach().cpu().numpy()
+                if hasattr(scores, "cpu"):
+                    scores = scores.cpu()
+                if hasattr(scores, "numpy"):
+                    scores = scores.numpy()
 
                 spans = get_spans(tokens_starred, segments, blank_token)
                 word_timestamps = postprocess_results(text_starred, spans, stride, scores)
@@ -668,7 +743,7 @@ class Stage1AudioPipeline:
     def __init__(
         self,
         workspace: SharedWorkspace,
-        whisper_model: str = "large-v3-turbo",
+        whisper_model: str = "large-v3",
         device: str = "cuda",
         batch_size: int = 24,
         keep_raw_audio: bool = False,

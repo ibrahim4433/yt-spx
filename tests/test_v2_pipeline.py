@@ -716,5 +716,272 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         self.assertEqual(call_log, ["anon", "cookie"])
 
 
+class TestStage1WhisperAndCTCAlignment(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_whisper_models(self):
+        from core.audio_diarizer import WarmASRAlignmentEngine, Stage1AudioPipeline
+        from core.pipeline_orchestrator import build_arg_parser
+        from core.drive_sync import SharedWorkspace
+
+        engine = WarmASRAlignmentEngine()
+        self.assertEqual(engine.whisper_model_name, "large-v3")
+
+        ws = SharedWorkspace(root_dir=Path(self.tmp.name))
+        stage1 = Stage1AudioPipeline(workspace=ws)
+        self.assertEqual(stage1.asr.whisper_model_name, "large-v3")
+
+        parser = build_arg_parser()
+        self.assertEqual(parser.get_default("whisper_model"), "large-v3")
+
+    def test_transcribe_stream_whisper_parameters_and_word_timestamps(self):
+        import types
+        from unittest.mock import MagicMock, patch
+        from core.audio_diarizer import WarmASRAlignmentEngine
+
+        engine = WarmASRAlignmentEngine(batch_size=0)
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock()
+        mock_seg.text = "In the name of Allah"
+        mock_seg.no_speech_prob = 0.01
+        mock_seg.compression_ratio = 1.0
+        mock_w1 = MagicMock()
+        mock_w1.word = "In"
+        mock_w1.start = 0.0
+        mock_w1.end = 0.2
+        mock_w2 = MagicMock()
+        mock_w2.word = "Allah"
+        mock_w2.start = 0.3
+        mock_w2.end = 0.9
+        mock_seg.words = [mock_w1, mock_w2]
+
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_whisper.transcribe.return_value = ([mock_seg], mock_info)
+        engine._whisper = mock_whisper
+
+        dummy_wav = np.zeros(16000 * 3, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            fake_torch = types.ModuleType("torch")
+            fake_fw = types.ModuleType("faster_whisper")
+            with patch.dict(sys.modules, {"torch": fake_torch, "faster_whisper": fake_fw}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_wav):
+                words, lang = engine.transcribe_and_align_wav(wav_path, forced_language="en", use_ctc_aligner=False)
+
+            self.assertEqual(lang, "en")
+            self.assertEqual(len(words), 2)
+            self.assertEqual(words[0]["text"], "In")
+            self.assertEqual(words[1]["text"], "Allah")
+
+            calls = mock_whisper.transcribe.call_args_list
+            self.assertGreater(len(calls), 0)
+            last_call_kwargs = calls[-1].kwargs
+            self.assertTrue(last_call_kwargs.get("word_timestamps"))
+            self.assertEqual(last_call_kwargs.get("beam_size"), 5)
+            self.assertEqual(last_call_kwargs.get("best_of"), 5)
+            self.assertEqual(last_call_kwargs.get("temperature"), [0.0, 0.2, 0.4])
+            self.assertFalse(last_call_kwargs.get("condition_on_previous_text"))
+            self.assertTrue(last_call_kwargs.get("vad_filter"))
+            self.assertEqual(last_call_kwargs.get("vad_parameters"), {"min_silence_duration_ms": 500})
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def test_ctc_pytorch_forward_pass_without_run_method(self):
+        import types
+        from unittest.mock import MagicMock, patch
+        from core.audio_diarizer import WarmASRAlignmentEngine
+
+        engine = WarmASRAlignmentEngine(batch_size=0)
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock()
+        mock_seg.text = "God exists"
+        mock_seg.no_speech_prob = 0.0
+        mock_seg.compression_ratio = 1.0
+        mock_w1 = MagicMock(word="God", start=0.1, end=0.4)
+        mock_w2 = MagicMock(word="exists", start=0.5, end=0.9)
+        mock_seg.words = [mock_w1, mock_w2]
+        mock_info = MagicMock(language="en")
+        mock_whisper.transcribe.return_value = ([mock_seg], mock_info)
+        engine._whisper = mock_whisper
+
+        # Create mock PyTorch align model WITHOUT a .run attribute
+        class MockPyTorchModel:
+            def __init__(self):
+                self.config = MagicMock(inputs_to_logits_ratio=320)
+                self.dtype = "float32"
+                self.device = "cpu"
+                self.forward_called = False
+
+            def __call__(self, x):
+                self.forward_called = True
+                res = MagicMock()
+                res.logits = MagicMock()
+                return res
+
+        pytorch_model = MockPyTorchModel()
+        self.assertFalse(hasattr(pytorch_model, "run"))
+        engine._align_model = pytorch_model
+        engine._align_tokenizer = MagicMock()
+
+        # Mock torch and ctc_forced_aligner
+        fake_torch = types.ModuleType("torch")
+        fake_torch.inference_mode = MagicMock()
+        fake_torch.log_softmax = MagicMock(return_value=np.zeros((1, 10, 32)))
+        fake_torch.from_numpy = MagicMock(return_value=MagicMock(ndim=1, to=MagicMock(return_value=MagicMock(ndim=1, unsqueeze=MagicMock(return_value=MagicMock(ndim=2))))))
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=False))
+        fake_torch.Tensor = type("Tensor", (), {})
+
+        fake_fw = types.ModuleType("faster_whisper")
+        fake_ctc = types.ModuleType("ctc_forced_aligner")
+        fake_ctc.generate_emissions = MagicMock()
+        fake_ctc.preprocess_text = MagicMock(return_value=(["God", "exists"], "God exists"))
+        fake_ctc.get_alignments = MagicMock(return_value=([0, 1], [0.9, 0.9], 0))
+        fake_ctc.get_spans = MagicMock(return_value=[(5, 20), (25, 45)])
+        fake_ctc.postprocess_results = MagicMock(return_value=[{"word": "God", "start": 0.1, "end": 0.4}, {"word": "exists", "start": 0.5, "end": 0.9}])
+
+        dummy_wav = np.zeros(16000 * 2, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            with patch.dict(sys.modules, {"torch": fake_torch, "faster_whisper": fake_fw, "ctc_forced_aligner": fake_ctc}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_wav):
+                words, lang = engine.transcribe_and_align_wav(wav_path, forced_language="en", use_ctc_aligner=True)
+            self.assertTrue(pytorch_model.forward_called)
+            fake_ctc.generate_emissions.assert_not_called()
+            self.assertEqual(lang, "en")
+            self.assertEqual(len(words), 2)
+            self.assertEqual(words[0]["word"], "God")
+            self.assertEqual(words[1]["word"], "exists")
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def test_ctc_failure_falls_back_to_whisper_dtw_words(self):
+        import types
+        from unittest.mock import MagicMock, patch
+        from core.audio_diarizer import WarmASRAlignmentEngine
+
+        engine = WarmASRAlignmentEngine(batch_size=0)
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock()
+        mock_seg.text = "God exists"
+        mock_seg.no_speech_prob = 0.0
+        mock_seg.compression_ratio = 1.0
+        mock_w1 = MagicMock(word="God", start=0.12, end=0.45)
+        mock_w2 = MagicMock(word="exists", start=0.52, end=0.91)
+        mock_seg.words = [mock_w1, mock_w2]
+        mock_info = MagicMock(language="en")
+        mock_whisper.transcribe.return_value = ([mock_seg], mock_info)
+        engine._whisper = mock_whisper
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.inference_mode = MagicMock()
+        fake_torch.log_softmax = MagicMock(side_effect=RuntimeError("PyTorch forward failed"))
+        fake_torch.from_numpy = MagicMock(return_value=MagicMock(ndim=1, to=MagicMock(return_value=MagicMock(ndim=1, unsqueeze=MagicMock(return_value=MagicMock(ndim=2))))))
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=False))
+        fake_torch.Tensor = type("Tensor", (), {})
+
+        fake_fw = types.ModuleType("faster_whisper")
+        fake_ctc = types.ModuleType("ctc_forced_aligner")
+
+        engine._align_model = MagicMock(spec=["config", "dtype", "device"])  # no .run
+        engine._align_tokenizer = MagicMock()
+
+        dummy_wav = np.zeros(16000 * 2, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            with patch.dict(sys.modules, {"torch": fake_torch, "faster_whisper": fake_fw, "ctc_forced_aligner": fake_ctc}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_wav):
+                words, lang = engine.transcribe_and_align_wav(wav_path, forced_language="en", use_ctc_aligner=True)
+            self.assertEqual(lang, "en")
+            # Proves high-precision Whisper DTW fallback worked instead of crude division!
+            self.assertEqual(len(words), 2)
+            self.assertEqual(words[0]["text"], "God")
+            self.assertEqual(words[0]["word"], "God")
+            self.assertEqual(words[0]["start"], 0.12)
+            self.assertEqual(words[0]["end"], 0.45)
+            self.assertEqual(words[1]["text"], "exists")
+            self.assertEqual(words[1]["word"], "exists")
+            self.assertEqual(words[1]["start"], 0.52)
+            self.assertEqual(words[1]["end"], 0.91)
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def test_ctc_chunked_forward_pass_long_audio(self):
+        import types
+        from unittest.mock import MagicMock, patch
+        from core.audio_diarizer import WarmASRAlignmentEngine
+
+        engine = WarmASRAlignmentEngine(batch_size=0)
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock()
+        mock_seg.text = "God exists"
+        mock_seg.no_speech_prob = 0.0
+        mock_seg.compression_ratio = 1.0
+        mock_w1 = MagicMock(word="God", start=0.1, end=0.4)
+        mock_w2 = MagicMock(word="exists", start=0.5, end=0.9)
+        mock_seg.words = [mock_w1, mock_w2]
+        mock_info = MagicMock(language="en")
+        mock_whisper.transcribe.return_value = ([mock_seg], mock_info)
+        engine._whisper = mock_whisper
+
+        call_count = 0
+        class MockPyTorchModel:
+            def __init__(self):
+                self.config = MagicMock(inputs_to_logits_ratio=320)
+                self.dtype = "float32"
+                self.device = "cpu"
+
+            def __call__(self, x):
+                nonlocal call_count
+                call_count += 1
+                res = MagicMock()
+                res.logits = MagicMock()
+                return res
+
+        pytorch_model = MockPyTorchModel()
+        engine._align_model = pytorch_model
+        engine._align_tokenizer = MagicMock()
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.inference_mode = MagicMock()
+        fake_torch.log_softmax = MagicMock(return_value=np.zeros((1, 10, 32)))
+        fake_torch.from_numpy = MagicMock(return_value=MagicMock(ndim=1, to=MagicMock(return_value=MagicMock(ndim=1, unsqueeze=MagicMock(return_value=MagicMock(ndim=2))))))
+        fake_torch.cat = MagicMock(return_value=np.zeros((1, 30, 32)))
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=False))
+        fake_torch.Tensor = type("Tensor", (), {})
+
+        fake_fw = types.ModuleType("faster_whisper")
+        fake_ctc = types.ModuleType("ctc_forced_aligner")
+        fake_ctc.generate_emissions = MagicMock()
+        fake_ctc.preprocess_text = MagicMock(return_value=(["God", "exists"], "God exists"))
+        fake_ctc.get_alignments = MagicMock(return_value=([0, 1], [0.9, 0.9], 0))
+        fake_ctc.get_spans = MagicMock(return_value=[(5, 20), (25, 45)])
+        fake_ctc.postprocess_results = MagicMock(return_value=[{"word": "God", "start": 0.1, "end": 0.4}, {"word": "exists", "start": 0.5, "end": 0.9}])
+
+        # 70 seconds audio = 3 chunks (30s, 30s, 10s)
+        dummy_wav = np.zeros(16000 * 70, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            with patch.dict(sys.modules, {"torch": fake_torch, "faster_whisper": fake_fw, "ctc_forced_aligner": fake_ctc}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_wav):
+                words, lang = engine.transcribe_and_align_wav(wav_path, forced_language="en", use_ctc_aligner=True)
+            self.assertEqual(call_count, 3)
+            fake_torch.cat.assert_called_once()
+            self.assertEqual(lang, "en")
+            self.assertEqual(len(words), 2)
+            self.assertEqual(words[0]["word"], "God")
+            self.assertEqual(words[1]["word"], "exists")
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
