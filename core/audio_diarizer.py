@@ -407,7 +407,7 @@ class WarmASRAlignmentEngine:
         self,
         whisper_model_name: str = "large-v3",
         device: str = "cuda",
-        batch_size: int = 24,
+        batch_size: int = 8,
     ):
         self.whisper_model_name = whisper_model_name
         self.device = device
@@ -446,6 +446,11 @@ class WarmASRAlignmentEngine:
 
     def _ensure_aligner(self):
         if self._align_model is None:
+            try:
+                import unidecode
+            except ImportError:
+                import subprocess, sys
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "unidecode"], check=False)
             import torch
             dtype = torch.float16 if self.device == "cuda" else torch.float32
             try:
@@ -481,84 +486,102 @@ class WarmASRAlignmentEngine:
         if len(audio_waveform) < 3200:
             return [], forced_language or "en"
 
-        def _transcribe_stream(waveform: np.ndarray, target_lang: Optional[str], is_probe: bool = False):
-            try:
-                if is_probe:
-                    return self._whisper.transcribe(waveform, vad_filter=True)
-                if self.batch_size > 0 and len(waveform) > 16000 * 25 and self._whisper_batched:
-                    return self._whisper_batched.transcribe(
-                        waveform,
-                        language=target_lang,
-                        initial_prompt=init_prompt,
-                        batch_size=self.batch_size,
-                        word_timestamps=True,
-                    )
-                else:
-                    return self._whisper.transcribe(
-                        waveform,
-                        language=target_lang,
-                        initial_prompt=init_prompt,
-                        beam_size=5,
-                        best_of=5,
-                        temperature=[0.0, 0.2, 0.4],
-                        condition_on_previous_text=False,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=500),
-                        word_timestamps=True,
-                    )
-            except RuntimeError as err:
-                err_str = str(err).lower()
-                if ("libcublas" in err_str or "libcudnn" in err_str) and self.device == "cuda":
-                    print(f"   [!] Faster-Whisper cuBLAS/CUDA error ({err}); falling back to CPU int8 inference...")
-                    self.device = "cpu"
-                    self._whisper = faster_whisper.WhisperModel(
-                        self.whisper_model_name,
-                        device="cpu",
-                        compute_type="int8",
-                    )
-                    self._whisper_batched = faster_whisper.BatchedInferencePipeline(model=self._whisper)
-                    return _transcribe_stream(waveform, target_lang, is_probe=is_probe)
-                raise
-
         # Detect language on first 45s if not forced
         lang = forced_language
         if not lang:
-            probe_audio = audio_waveform[: min(len(audio_waveform), 16000 * 45)]
-            _, info_probe = _transcribe_stream(probe_audio, None, is_probe=True)
-            lang = info_probe.language or "en"
+            try:
+                probe_audio = audio_waveform[: min(len(audio_waveform), 16000 * 45)]
+                _, info_probe = self._whisper.transcribe(probe_audio, vad_filter=True)
+                lang = info_probe.language or "en"
+            except Exception as e:
+                print(f"   [!] Language probe note ({e}); defaulting to 'en'", flush=True)
+                lang = "en"
 
         init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN if lang == "en" else None
-        segments_iter, info = _transcribe_stream(audio_waveform, lang, is_probe=False)
 
-        clean_segs = []
-        fallback_words: List[Dict[str, Any]] = []
-        for seg in segments_iter:
-            no_sp = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
-            comp = float(getattr(seg, "compression_ratio", 1.0) or 1.0)
-            if is_hallucinated_segment(seg.text, no_sp, comp):
-                continue
-            clean_segs.append(seg.text.strip())
-            if getattr(seg, "words", None):
-                for w in seg.words:
-                    if w.word and w.word.strip():
-                        fallback_words.append({
-                            "word": w.word.strip(),
-                            "text": w.word.strip(),
-                            "start": float(w.start),
-                            "end": float(w.end),
-                        })
-            else:
-                # Approximate proportional word slices if CTC aligner is skipped on tiny overlap clip
-                ws_tokens = seg.text.strip().split()
-                if ws_tokens:
-                    dur = max(0.05, float(seg.end - seg.start)) / len(ws_tokens)
-                    for i_tok, tok in enumerate(ws_tokens):
-                        fallback_words.append({
-                            "word": tok,
-                            "text": tok,
-                            "start": float(seg.start) + i_tok * dur,
-                            "end": float(seg.start) + (i_tok + 1) * dur,
-                        })
+        def _consume_segments(waveform: np.ndarray, target_lang: Optional[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
+            # Batched inference uses higher activation memory; clamp to at most 8 on Colab T4
+            use_batched = bool(self.batch_size > 0 and len(waveform) > 16000 * 25 and self._whisper_batched)
+            effective_batch = min(self.batch_size, 8) if use_batched else 0
+
+            for attempt in range(3):
+                try:
+                    if effective_batch > 0 and self._whisper_batched:
+                        seg_gen, _ = self._whisper_batched.transcribe(
+                            waveform,
+                            language=target_lang,
+                            initial_prompt=init_prompt,
+                            batch_size=effective_batch,
+                            word_timestamps=True,
+                        )
+                    else:
+                        seg_gen, _ = self._whisper.transcribe(
+                            waveform,
+                            language=target_lang,
+                            initial_prompt=init_prompt,
+                            beam_size=5,
+                            best_of=5,
+                            temperature=[0.0, 0.2, 0.4],
+                            condition_on_previous_text=False,
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500),
+                            word_timestamps=True,
+                        )
+
+                    clean_segs: List[str] = []
+                    fallback_words: List[Dict[str, Any]] = []
+                    for seg in seg_gen:
+                        no_sp = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
+                        comp = float(getattr(seg, "compression_ratio", 1.0) or 1.0)
+                        if is_hallucinated_segment(seg.text, no_sp, comp):
+                            continue
+                        clean_segs.append(seg.text.strip())
+                        if getattr(seg, "words", None):
+                            for w in seg.words:
+                                if w.word and w.word.strip():
+                                    fallback_words.append({
+                                        "word": w.word.strip(),
+                                        "text": w.word.strip(),
+                                        "start": float(w.start),
+                                        "end": float(w.end),
+                                    })
+                        else:
+                            # Approximate proportional word slices if word timestamps are missing
+                            ws_tokens = seg.text.strip().split()
+                            if ws_tokens:
+                                dur = max(0.05, float(seg.end - seg.start)) / len(ws_tokens)
+                                for i_tok, tok in enumerate(ws_tokens):
+                                    fallback_words.append({
+                                        "word": tok,
+                                        "text": tok,
+                                        "start": float(seg.start) + i_tok * dur,
+                                        "end": float(seg.start) + (i_tok + 1) * dur,
+                                    })
+                    return clean_segs, fallback_words
+                except (RuntimeError, Exception) as err:
+                    err_str = str(err).lower()
+                    print(f"\n   [!] Faster-Whisper execution warning (attempt {attempt+1}/3): {err}", flush=True)
+                    is_oom = "out of memory" in err_str or "cuda failed" in err_str
+                    is_dev_err = "invalid device" in err_str or "parallel_for" in err_str or "cublas" in err_str or "cudnn" in err_str
+
+                    if effective_batch > 0:
+                        print("   [!] Batched inference memory pressure -> falling back to sequential VAD Whisper on CUDA...", flush=True)
+                        effective_batch = 0
+                        self.unload()
+                        self._ensure_whisper()
+                        continue
+                    elif is_oom or is_dev_err or self.device == "cuda":
+                        print("   [!] CUDA unrecoverable/OOM -> falling back to CPU int8 Whisper inference...", flush=True)
+                        self.device = "cpu"
+                        effective_batch = 0
+                        self.unload()
+                        self._ensure_whisper()
+                        continue
+                    else:
+                        raise
+            return [], []
+
+        clean_segs, fallback_words = _consume_segments(audio_waveform, lang)
 
         full_text = " ".join(clean_segs).strip()
         if not full_text:
@@ -745,7 +768,7 @@ class Stage1AudioPipeline:
         workspace: SharedWorkspace,
         whisper_model: str = "large-v3",
         device: str = "cuda",
-        batch_size: int = 24,
+        batch_size: int = 8,
         keep_raw_audio: bool = False,
     ):
         self.workspace = workspace
@@ -827,6 +850,17 @@ class Stage1AudioPipeline:
             )
             print(f"[DONE] ({len(sep_manifest)} cross-talk stream(s) unmixed)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
+
+            # Free NeMo Diarizer & MossFormer2 VRAM so Whisper large-v3 has ~13 GB free VRAM
+            self.diarizer.unload()
+            self.separator.unload()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gc.collect()
 
             # --- MICRO-STEP M5: Whisper + CTC Forced Alignment + Scenario Assembly ---
             print(f"   [5/5] Whisper ASR & Scenario Assembly (M5)....... ", end="", flush=True)

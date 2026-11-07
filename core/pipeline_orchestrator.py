@@ -292,12 +292,12 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     # Auto-clear any stale circuit breaker lock from previous runs so fresh batch starts unblocked
     workspace.clear_youtube_circuit_breaker()
 
-    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies)
+    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies, CUDA OOM)
     for cand in candidates:
         vid = cand["video_id"]
         st = workspace.get_video_state(vid)
-        last_err = str(st.get("last_error") or "")
-        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "NeuralDiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker")):
+        last_err = str(st.get("last_error") or "").lower()
+        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "neuraldiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker", "out of memory", "invalid device", "cuda failed")):
             st["error_count"] = 0
             st["last_error"] = None
             workspace.atomic_write_json(workspace.state_path(vid), st)
@@ -353,6 +353,17 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             print(f"    [ERROR] Stage 1 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
             if consecutive_errors == 0:
                 print(traceback.format_exc(limit=5), flush=True)
+
+            # Evict models from GPU so a memory crash never poisons subsequent videos
+            try:
+                pipeline.asr.unload()
+                pipeline.diarizer.unload()
+                pipeline.separator.unload()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gc.collect()
 
             if err_sig == last_error_sig:
                 consecutive_errors += 1
@@ -952,7 +963,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Graceful stop timer in minutes (default 0 = continuous until disconnect; or e.g. 165 for 2h45m).",
     )
     p.add_argument("--whisper-model", default="large-v3", help="Faster-Whisper model size.")
-    p.add_argument("--whisper-batch-size", type=int, default=24, help="BatchedInferencePipeline batch size.")
+    p.add_argument("--whisper-batch-size", type=int, default=8, help="BatchedInferencePipeline batch size (default 8 fits T4 GPU safely).")
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
     p.add_argument("--llm-context-length", type=int, default=14336, help="Stage 2 GGUF context window.")
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")

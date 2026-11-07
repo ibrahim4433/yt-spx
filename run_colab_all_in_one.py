@@ -346,6 +346,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
         "demucs",
         "faster-whisper>=1.1.0",
         "ctc-forced-aligner",
+        "unidecode",
         "deepmultilingualpunctuation",
         "soundfile",
         "huggingface_hub",

@@ -555,10 +555,12 @@ class WarmNeMoDiarizer:
     def unload(self):
         if self._titanet is not None:
             import torch
+            import gc
             del self._titanet
             self._titanet = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            gc.collect()
 
 
 class WarmMossFormerSeparator:
@@ -591,10 +593,12 @@ class WarmMossFormerSeparator:
     def unload(self):
         if self._cv is not None:
             import torch
+            import gc
             del self._cv
             self._cv = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            gc.collect()
 
 
 # ==============================================================================
