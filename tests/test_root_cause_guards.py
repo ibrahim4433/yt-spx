@@ -62,7 +62,7 @@ class TestRootCauseGuards(unittest.TestCase):
     def test_speaker_inversion_protection(self):
         """
         Ensures that if the LLM points answer_turn_id to an INTERLOCUTOR turn,
-        anchor_and_enrich_extracted_unit strictly rejects it and assigns MAIN_DAEE.
+        anchor_and_enrich_extracted_unit strictly drops the unit (returns None).
         """
         scenario = {
             "video_id": "test_vid_001",
@@ -132,16 +132,14 @@ class TestRootCauseGuards(unittest.TestCase):
             unit_seq_num=1
         )
 
-        # MUST NOT be assigned 'المحاور 1'! MUST be assigned 'هاشم' / 'daee_hashim'!
-        self.assertEqual(enriched["daee_profile_id"], "daee_hashim")
-        self.assertEqual(enriched["daee_name_ar"], "هاشم")
-        self.assertEqual(enriched["daee_name_en"], "Hashim")
-        self.assertEqual(enriched["daee_speaker_id"], "SPK_00")
+        # Strictly dropped: must return None rather than force-renaming to Da'ee
+        self.assertIsNone(enriched, "anchor_and_enrich_extracted_unit must drop units whose answer_turn_id is an interlocutor")
 
     def test_db_ingestion_sanitization_and_enrichment(self):
         """
         Tests that when data is inserted into SQLite, _sanitize_and_validate_qa_unit
-        automatically sanitizes text and enriches dialogue exchange.
+        automatically sanitizes text and enriches dialogue exchange, while strictly refusing
+        to force-rename 'المحاور' to the Da'ee.
         """
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -200,9 +198,15 @@ class TestRootCauseGuards(unittest.TestCase):
 
         sanitized = _sanitize_and_validate_qa_unit(conn, raw_unit)
 
-        # 1. Daee name resolved
-        self.assertEqual(sanitized["daee_name_ar"], "الشيخ عثمان بن فاروق")
-        self.assertEqual(sanitized["daee_profile_id"], "daee_uthman")
+        # 1. Daee name must NOT be force-renamed from المحاور
+        self.assertEqual(sanitized["daee_name_ar"], "المحاور 1")
+        self.assertEqual(sanitized["daee_profile_id"], "")
+
+        # When daee_name_ar is a genuine Daee without profile, it resolves properly
+        unit_with_daee = dict(raw_unit, daee_name_ar="الشيخ عثمان بن فاروق")
+        sanitized_daee = _sanitize_and_validate_qa_unit(conn, unit_with_daee)
+        self.assertEqual(sanitized_daee["daee_name_ar"], "الشيخ عثمان بن فاروق")
+        self.assertEqual(sanitized_daee["daee_profile_id"], "daee_uthman")
 
         # 2. Foreign script cleaned
         self.assertNotIn("педوفيليا", sanitized["question_ar"])
@@ -296,6 +300,251 @@ class TestRootCauseGuards(unittest.TestCase):
         enriched = anchor_and_enrich_extracted_unit(raw_unit, scenario, 1, 0, 1)
         # MUST be recovered from real spoken words in T02!
         self.assertEqual(enriched["verbatim_quote"], "No, Jesus clearly said the Father is greater than I.")
+
+    def test_theological_bias_rejection(self):
+        """Ensures that units asserting opponent theological bias or heresy are strictly rejected."""
+        from core.scenario_extractor import check_theological_bias as core_bias_check, anchor_and_enrich_extracted_unit
+        from db.database import check_theological_bias as db_bias_check
+
+        heretical_units = [
+            {"core_answer_summary_en": "The speaker argues that incest is justified under utilitarian philosophy."},
+            {"verbatim_quote": "Incest is permissible if there is no reproductive risk."},
+            {"core_answer_summary_ar": "الدفاع عن زنا المحارم في حالة عدم الإنجاب."},
+            {"core_answer_summary_en": "The Comforter is the Holy Spirit, not Muhammad."},
+            {"core_answer_summary_ar": "روح الحق هو الروح القدس وليس نبي الإسلام."},
+            {"core_answer_summary_en": "Old Testament laws are void and no longer apply."},
+            {"core_answer_summary_ar": "الناموس باطل وملغى بالكامل."},
+            {"core_answer_summary_en": "Jesus is the true God incarnate."},
+            {"core_answer_summary_ar": "المسيح هو الله الظاهر في الجسد."},
+            {"core_answer_summary_en": "Christ died for our sins on the cross."},
+            {"core_answer_summary_ar": "يسوع مات تكفيراً عن خطايانا."},
+        ]
+
+        for u in heretical_units:
+            self.assertIsNotNone(core_bias_check(u), f"Core bias check failed to catch: {u}")
+            self.assertIsNotNone(db_bias_check(u), f"DB bias check failed to catch: {u}")
+
+        # Ensure anchor_and_enrich_extracted_unit drops such units entirely (returns None)
+        scenario = {
+            "video_id": "test_heresy_01",
+            "youtube_url": "https://www.youtube.com/watch?v=test_heresy_01",
+            "title_ar": "حوار",
+            "speakers": [
+                {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_01", "display_name_en": "Daee", "display_name_ar": "داعية"},
+                {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Inter", "display_name_ar": "محاور"}
+            ],
+            "turns": [
+                {"turn_id": "T01", "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 4000, "start_fmt": "00:01", "text_original": "Is incest moral?"},
+                {"turn_id": "T02", "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 5000, "end_ms": 10000, "start_fmt": "00:05", "text_original": "Incest is justified under my moral view."}
+            ]
+        }
+        bad_raw_unit = {
+            "question_turn_id": "T01",
+            "answer_turn_id": "T02",
+            "question_en": "Is incest moral?",
+            "question_ar": "هل زنا المحارم أخلاقي؟",
+            "core_answer_summary_en": "Incest is justified under our worldview.",
+            "verbatim_quote": "Incest is justified under my moral view."
+        }
+        res = anchor_and_enrich_extracted_unit(bad_raw_unit, scenario, 1, 0, 1)
+        self.assertIsNone(res, "anchor_and_enrich_extracted_unit should have dropped unit with theological bias")
+
+    def test_quote_quality_and_dangling_preposition(self):
+        """Ensures dangling prepositions/conjunctions are trimmed from quotes."""
+        from core.scenario_extractor import clean_dangling_quote
+        quote_with_and = "We believe that God is the creator of the heavens and"
+        cleaned = clean_dangling_quote(quote_with_and)
+        self.assertEqual(cleaned, "We believe that God is the creator of the heavens")
+
+        # Test double dangling prepositions and 7-word quote cleaning
+        quote_double = "He went to Jerusalem and then spoke to to"
+        cleaned_double = clean_dangling_quote(quote_double)
+        self.assertEqual(cleaned_double, "He went to Jerusalem and then spoke")
+
+        quote_seven_words = "He went to Jerusalem and then to"
+        cleaned_seven = clean_dangling_quote(quote_seven_words)
+        self.assertEqual(cleaned_seven, "He went to Jerusalem and then")
+
+    def test_canonical_pillars_textual_preservation(self):
+        """Ensures 'Textual Preservation & Manuscripts' is a top-level canonical domain."""
+        from core.scenario_extractor import CANONICAL_TOPIC_PILLARS, canonicalize_topic_category as core_canonicalize
+        from db.database import BILINGUAL_TOPIC_DOMAINS, canonicalize_topic_category as db_canonicalize
+
+        pillar = "Textual Preservation & Manuscripts"
+        self.assertIn(pillar, CANONICAL_TOPIC_PILLARS)
+        self.assertIn(pillar, BILINGUAL_TOPIC_DOMAINS)
+
+        self.assertEqual(core_canonicalize("Biblical Manuscripts"), pillar)
+        self.assertEqual(core_canonicalize("Dead Sea Scrolls"), pillar)
+        self.assertEqual(db_canonicalize("Inerrancy & Preservation"), pillar)
+        self.assertEqual(db_canonicalize("Codex Sinaiticus"), pillar)
+
+    def test_colab_runner_q5_k_m_default(self):
+        """Ensures LocalGPUClient defaults to Qwen2.5-14B-Instruct-Q5_K_M.gguf for maximum reasoning precision."""
+        import inspect
+        from core.colab_runner import LocalGPUClient
+        sig = inspect.signature(LocalGPUClient.__init__)
+        self.assertEqual(sig.parameters["gguf_filename"].default, "Qwen2.5-14B-Instruct-Q5_K_M.gguf")
+        self.assertEqual(sig.parameters["gguf_repo"].default, "bartowski/Qwen2.5-14B-Instruct-GGUF")
+
+    def test_expanded_philosophical_vocabulary(self):
+        """Ensures new philosophical vocabulary (singular/plural, existence, dependence) is sanitized in Arabic."""
+        from db.database import sanitize_text_field
+        self.assertEqual(sanitize_text_field("المسيحية تقول بـ two wills و two natures"), "المسيحية تقول بـ إرادتين و طبيعتين")
+        self.assertEqual(sanitize_text_field("المخلوق في حالة dependence و existence ممكن"), "المخلوق في حالة افتقار واحتياج و وجود ممكن")
+        self.assertEqual(sanitize_text_field("الكون يحتاج إلى First Cause"), "الكون يحتاج إلى سبب أول")
+
+    def test_theological_bias_refutation_not_falsely_rejected(self):
+        """Ensures sound Islamic refutations mentioning opponent dogmas are not falsely rejected."""
+        from core.scenario_extractor import check_theological_bias as core_bias_check
+        from db.database import check_theological_bias as db_bias_check
+
+        sound_refutation_units = [
+            {"core_answer_summary_en": "The Da'ee refutes the Christian dogma that Jesus is God by citing Mark 13:32."},
+            {"core_answer_summary_ar": "يبطل الإسلام زعم النصارى أن عيسى هو الله بالنصوص الصريحة من الأناجيل."},
+            {"core_answer_summary_en": "Islam firmly rejects the notion that Christ died for our sins (Surah 4:157)."},
+            {"core_answer_summary_ar": "القرآن يرد شبهة أن المسيح مات فداء عن خطايانا بنفي صلبه وقتله."},
+            {"core_answer_summary_en": "The speaker exposes the false claim that biblical laws are void by quoting Matthew 5:17."},
+            {"core_answer_summary_ar": "الداعية يدحض دعوى أن الناموس باطل ببيان تصريح المسيح أنه لم يأت لينقض."},
+        ]
+
+        for u in sound_refutation_units:
+            self.assertIsNone(core_bias_check(u), f"Core bias check falsely rejected sound refutation: {u}")
+            self.assertIsNone(db_bias_check(u), f"DB bias check falsely rejected sound refutation: {u}")
+
+    def test_stray_latin_token_regex_purging(self):
+        """Ensures unmapped stray Latin tokens in Arabic fields are purged by regex."""
+        from db.database import sanitize_text_field
+        res = sanitize_text_field("هذا كلام English و randomWord في النص الفصيح.", is_arabic=True)
+        self.assertNotIn("English", res)
+        self.assertNotIn("randomWord", res)
+        self.assertIn("هذا كلام", res)
+        self.assertIn("النص الفصيح", res)
+
+        # Tatweel prefix cleaning
+        res_prefix = sanitize_text_field("المسألة لـ unknownTerm غير مقبولة.", is_arabic=True)
+        self.assertNotIn("unknownTerm", res_prefix)
+        self.assertIn("المسألة غير مقبولة", res_prefix)
+
+        # Valid Arabic with tatweel prefix is preserved
+        res_valid = sanitize_text_field("المسيحية تقول بـ إرادتين وطبيعتين.", is_arabic=True)
+        self.assertEqual(res_valid, "المسيحية تقول بـ إرادتين وطبيعتين.")
+
+    def test_rich_prompt_and_generous_windowing(self):
+        """Ensures the extractor prompt is comprehensive with 3 gold-standard examples and windows are generous."""
+        import inspect
+        from core.extractor_prompt import EXTRACTION_SYSTEM_PROMPT, USER_EXTRACTION_PROMPT_TEMPLATE
+        from core.scenario_extractor import build_episode_windows
+
+        # 1. Prompt depth and few-shot coverage
+        self.assertIn("EXAMPLE 1 (Comparative Religion & Christianity", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("EXAMPLE 2 (Theology & God's Existence", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("EXAMPLE 3 (Problem of Evil & Suffering", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("CRITICAL RULE 7: SOCRATIC CROSS-EXAMINATIONS", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("CRITICAL RULE 8: RIGOROUS DEDUCTIVE SYLLOGISMS", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("socratic_question_ar", EXTRACTION_SYSTEM_PROMPT)
+        self.assertIn("logical_premises_ar", EXTRACTION_SYSTEM_PROMPT)
+
+        # Ensure prompt template formats correctly without KeyError
+        formatted_prompt = USER_EXTRACTION_PROMPT_TEMPLATE.format(
+            title_ar="مناظرة تجريبية",
+            youtube_url="https://www.youtube.com/watch?v=sample123",
+            episode_index=1,
+            start_fmt="00:00",
+            end_fmt="05:00",
+            speakers_summary="SPK_00=MAIN_DAEE",
+            target_daee_name="Sheikh Uthman",
+            target_daee_id="SPK_00",
+            transcript_text="[T01] [00:00 -> 00:05] [MAIN_DAEE]: Bismillah",
+        )
+        self.assertIn("مناظرة تجريبية", formatted_prompt)
+        self.assertIn("Sheikh Uthman", formatted_prompt)
+
+        # 2. Generous window sizing defaults (2400 words, 4 carry turns)
+        sig = inspect.signature(build_episode_windows)
+        self.assertEqual(sig.parameters["max_words_per_window"].default, 2400)
+        self.assertEqual(sig.parameters["context_carry_turns"].default, 4)
+
+        # An episode with 1500 words must stay whole (1 window)
+        dummy_turns = [
+            {
+                "turn_id": f"turn_{i}",
+                "episode_index": 1,
+                "speaker_id": "SPK_00" if i % 2 == 0 else "SPK_01",
+                "speaker_role": "MAIN_DAEE" if i % 2 == 0 else "INTERLOCUTOR",
+                "start_ms": i * 10000,
+                "end_ms": (i + 1) * 10000,
+                "start_fmt": "00:00",
+                "end_fmt": "00:10",
+                "text_original": " ".join(f"word_{i}_{j}" for j in range(150)),  # 150 distinct words per turn
+            }
+            for i in range(10)  # 1500 words total
+        ]
+        windows_1500 = build_episode_windows(dummy_turns)
+        self.assertEqual(len(windows_1500), 1, "1500 words should not be split under generous 2400-word window")
+
+        # An episode with 3000 words must split cleanly and carry forward 4 context turns
+        dummy_long = [
+            {
+                "turn_id": f"turn_{i}",
+                "episode_index": 1,
+                "speaker_id": "SPK_00" if i % 2 == 0 else "SPK_01",
+                "speaker_role": "MAIN_DAEE" if i % 2 == 0 else "INTERLOCUTOR",
+                "start_ms": i * 10000,
+                "end_ms": (i + 1) * 10000,
+                "start_fmt": "00:00",
+                "end_fmt": "00:10",
+                "text_original": " ".join(f"speech_{i}_{j}" for j in range(150)),
+            }
+            for i in range(20)  # 3000 words total
+        ]
+        windows_3000 = build_episode_windows(dummy_long)
+        self.assertEqual(len(windows_3000), 2, "3000 words should split into 2 windows")
+        self.assertEqual(windows_3000[0]["episode_index"], 1)
+        self.assertEqual(windows_3000[1]["episode_index"], 1)
+
+    def test_is_valid_dialectical_question_theological_coverage(self):
+        """Ensures concise foundational theological questions are accepted and trivia is rejected."""
+        from core.scenario_extractor import is_valid_dialectical_question
+
+        # Foundational theological questions (3 English words, 2-4 Arabic words)
+        self.assertTrue(is_valid_dialectical_question("Who created God?", "من خلق الله؟"))
+        self.assertTrue(is_valid_dialectical_question("Is Jesus God?", "هل عيسى هو الله؟"))
+        self.assertTrue(is_valid_dialectical_question("Can God die?", "هل يمكن للإله أن يموت؟"))
+        self.assertTrue(is_valid_dialectical_question("Who made God?", "من صنع الله؟"))
+        self.assertTrue(is_valid_dialectical_question("Did Jesus die?", "هل مات يسوع؟"))
+        self.assertTrue(is_valid_dialectical_question("Why worship God?", "لماذا نعبد الله؟"))
+
+        # Rejection of trivial street noise and conversational filler
+        self.assertFalse(is_valid_dialectical_question("what did you say?", "ماذا قلت؟"))
+        self.assertFalse(is_valid_dialectical_question("excuse me?", "عفوا؟"))
+        self.assertFalse(is_valid_dialectical_question("let her be?", "دعها وشأنها؟"))
+        self.assertFalse(is_valid_dialectical_question("what's your name?", "ما اسمك؟"))
+        self.assertFalse(is_valid_dialectical_question("can you hear me?", "هل تسمعني؟"))
+        self.assertFalse(is_valid_dialectical_question("why?", "لماذا؟"))
+
+    def test_stray_latin_token_parentheses_cleaning(self):
+        """Ensures purging stray Latin tokens in Arabic fields removes residual empty parentheses/brackets."""
+        from db.database import sanitize_text_field
+
+        res_paren = sanitize_text_field("إنجيل مرقس (Mark)", is_arabic=True)
+        self.assertEqual(res_paren, "إنجيل مرقس")
+        self.assertNotIn("()", res_paren)
+
+        res_bracket = sanitize_text_field("الدليل العقلي [First Cause]", is_arabic=True)
+        self.assertEqual(res_bracket, "الدليل العقلي [سبب أول]")
+
+        res_unmapped_bracket = sanitize_text_field("مسألة الوجود [RandomLatinWord]", is_arabic=True)
+        self.assertEqual(res_unmapped_bracket, "مسألة الوجود")
+        self.assertNotIn("[]", res_unmapped_bracket)
+
+    def test_stage2_extractor_default_context_length(self):
+        """Ensures Stage2ScenarioExtractor defaults to 16,384 context length matching LocalGPUClient."""
+        import inspect
+        from core.scenario_extractor import Stage2ScenarioExtractor
+
+        sig = inspect.signature(Stage2ScenarioExtractor.__init__)
+        self.assertEqual(sig.parameters["context_length"].default, 16384)
 
 
 if __name__ == "__main__":

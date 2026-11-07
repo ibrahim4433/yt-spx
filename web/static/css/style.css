@@ -1933,6 +1933,108 @@ body {
   color: var(--ink-primary);
 }
 
+.exchange-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 0.35rem 0.65rem;
+  background-color: var(--bg-surface);
+  border: 1px dashed var(--border-hairline);
+  border-radius: var(--radius-xs);
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.exchange-toggle-btn:hover {
+  border-color: var(--emerald-primary);
+  color: var(--emerald-primary);
+  background-color: var(--emerald-wash);
+}
+
+/* Scriptural & Historical Proofs Panel */
+.scriptural-panel {
+  background-color: #F8F6F0;
+  border: 1px solid #D9D2C2;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.scriptural-bar {
+  background-color: rgba(120, 95, 55, 0.08);
+  border-bottom: 1px solid #D9D2C2;
+  padding: 0.42rem 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6B5532;
+}
+
+.scriptural-body {
+  padding: 0.65rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.scripture-item {
+  background-color: var(--bg-surface);
+  border: 1px solid #E5E0D4;
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.scripture-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.scripture-source-badge {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #6B5532;
+  background-color: rgba(120, 95, 55, 0.12);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-xs);
+  text-transform: uppercase;
+}
+
+.scripture-ref {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-primary);
+}
+
+.scripture-sig {
+  font-size: 0.85rem;
+  color: var(--ink-secondary);
+  line-height: 1.5;
+}
+
+.scripture-badge {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #6B5532;
+}
+
+
 /* VIEW 2: Scenario Transcripts Catalog & Direct Turn Search */
 .scenarios-controls-grid {
   display: flex;

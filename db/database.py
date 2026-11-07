@@ -274,6 +274,10 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 dialogue_exchange_json TEXT DEFAULT '[]',
                 source_turn_ids_json TEXT DEFAULT '[]',
                 tags_json TEXT DEFAULT '[]',
+                analogies_json TEXT DEFAULT '[]',
+                analogies_ar_json TEXT DEFAULT '[]',
+                scriptural_citations_json TEXT DEFAULT '[]',
+                dialogue_trajectory_turns_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE SET NULL
             );
@@ -292,11 +296,24 @@ def init_db(db_path: Optional[Path] = None) -> None:
             ("interlocutor_verbatim_quote_ar", "TEXT DEFAULT ''"),
             ("dialogue_exchange_json", "TEXT DEFAULT '[]'"),
             ("source_turn_ids_json", "TEXT DEFAULT '[]'"),
+            ("analogies_json", "TEXT DEFAULT '[]'"),
+            ("analogies_ar_json", "TEXT DEFAULT '[]'"),
+            ("scriptural_citations_json", "TEXT DEFAULT '[]'"),
+            ("dialogue_trajectory_turns_count", "INTEGER DEFAULT 0"),
         ]:
             _ensure_column(conn, "qa_units", col, cdef)
 
         # 7. FTS5 Full-Text Index on Q&A Dossiers (if supported by sqlite3 runtime)
         if _supports_fts5(conn):
+            try:
+                # Upgrade existing qa_fts table if missing new columns
+                cols_info = conn.execute("PRAGMA table_info(qa_fts)").fetchall()
+                col_names = [c[1] for c in cols_info]
+                if col_names and ("analogies" not in col_names or "scriptural_citations" not in col_names):
+                    conn.execute("DROP TABLE IF EXISTS qa_fts;")
+            except Exception:
+                pass
+
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS qa_fts USING fts5(
                     id UNINDEXED,
@@ -313,6 +330,8 @@ def init_db(db_path: Optional[Path] = None) -> None:
                     verbatim_quote,
                     verbatim_quote_ar,
                     tags,
+                    analogies,
+                    scriptural_citations,
                     tokenize = 'unicode61 remove_diacritics 2'
                 );
             """)
@@ -326,11 +345,13 @@ def init_db(db_path: Optional[Path] = None) -> None:
                     INSERT INTO qa_fts(
                         id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
                         logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags,
+                        analogies, scriptural_citations
                     ) VALUES (
                         new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
                         new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
-                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
+                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json,
+                        (new.analogies_json || ' ' || coalesce(new.analogies_ar_json, '')), new.scriptural_citations_json
                     );
                 END;
             """)
@@ -345,11 +366,13 @@ def init_db(db_path: Optional[Path] = None) -> None:
                     INSERT INTO qa_fts(
                         id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
                         logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags,
+                        analogies, scriptural_citations
                     ) VALUES (
                         new.id, new.question_en, new.question_ar, new.core_answer_summary_en, new.core_answer_summary_ar,
                         new.logical_premises_json, new.logical_premises_ar_json, new.analogy_or_metaphor, new.analogy_or_metaphor_ar,
-                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json
+                        new.socratic_question, new.socratic_question_ar, new.verbatim_quote, new.verbatim_quote_ar, new.tags_json,
+                        (new.analogies_json || ' ' || coalesce(new.analogies_ar_json, '')), new.scriptural_citations_json
                     );
                 END;
             """)
@@ -363,12 +386,14 @@ def init_db(db_path: Optional[Path] = None) -> None:
                     INSERT INTO qa_fts(
                         id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
                         logical_premises, logical_premises_ar, analogy_or_metaphor, analogy_or_metaphor_ar,
-                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags,
+                        analogies, scriptural_citations
                     )
                     SELECT
                         id, question_en, question_ar, core_answer_summary_en, core_answer_summary_ar,
                         logical_premises_json, logical_premises_ar_json, analogy_or_metaphor, analogy_or_metaphor_ar,
-                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags_json
+                        socratic_question, socratic_question_ar, verbatim_quote, verbatim_quote_ar, tags_json,
+                        (analogies_json || ' ' || coalesce(analogies_ar_json, '')), scriptural_citations_json
                     FROM qa_units;
                 """)
 
@@ -570,6 +595,87 @@ def ingest_scenario_payload(scenario: Dict[str, Any], db_path: Optional[Path] = 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]")
 
+_PHILOSOPHICAL_VOCABULARY = [
+    # Multi-word theological/philosophical phrases
+    ("two natures and two wills", "طبيعتين وإرادتين"),
+    ("two natures", "طبيعتين"),
+    ("two wills", "إرادتين"),
+    ("first cause", "سبب أول"),
+    ("moral ontology", "الأساس الوجودي للأخلاق"),
+    ("objective morality", "الأخلاق الموضوعية"),
+    ("hypostatic union", "الاتحاد الأقنومي"),
+    ("dead sea scrolls", "مخطوطات البحر الميت"),
+    ("old testament", "العهد القديم"),
+    ("new testament", "العهد الجديد"),
+    
+    # Singular and plural theological/philosophical vocabulary
+    ("natures", "طبائع"),
+    ("nature", "طبيعة"),
+    ("wills", "إرادات"),
+    ("will", "إرادة"),
+    ("two", "اثنين"),
+    ("dependence", "افتقار واحتياج"),
+    ("dependent", "مفتقر ومحتاج"),
+    ("independency", "استغناء"),
+    ("independent", "مستغنٍ"),
+    ("existed", "وُجد"),
+    ("exist", "يوجد"),
+    ("existence", "وجود"),
+    ("contingency", "إمكان الوجود"),
+    ("contingent", "ممكن الوجود"),
+    ("necessary", "واجب الوجود"),
+    ("causes", "أسباب أولى"),
+    ("cause", "سبب أول"),
+    ("causality", "السببية"),
+    ("essence", "جوهر"),
+    ("essences", "جواهر"),
+    ("substance", "جوهر"),
+    ("substances", "جواهر"),
+    ("person", "أقنوم"),
+    ("persons", "أقانيم"),
+    ("omniscience", "العلم الكلي الشامل"),
+    ("omniscient", "العليم بكل شيء"),
+    ("omnipotence", "القدرة المطلقة"),
+    ("omnipotent", "القدير على كل شيء"),
+    ("omnipresence", "الإحاطة بكل مكان"),
+    ("omnipresent", "محيط بكل مكان"),
+    ("transcendence", "التنزيه والتعالي"),
+    ("transcendent", "منزه ومتعالٍ"),
+    ("anthropomorphism", "التجسيم والتشبيه"),
+    ("monotheism", "التوحيد"),
+    ("polytheism", "الشرك وتعدد الآلهة"),
+    ("pantheism", "وحدة الوجود"),
+    ("divine", "إلهي"),
+    ("human", "بشري"),
+    ("instinctive", "فطري"),
+    ("instinct", "فطرة"),
+    ("incest", "زنا المحارم"),
+    ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
+    ("condemn", "يُدين"),
+    ("reduced", "مختزل"),
+    ("nihilists", "العدميون"),
+    ("nihilist", "عدمي"),
+    ("nihilism", "العدمية"),
+    ("theodicy", "العدل الإلهي ومعضلة الشر"),
+    ("hermeneutics", "علم التأويل"),
+    ("inerrancy", "عصمة النص"),
+    ("preservation", "حفظ النص"),
+    ("corruption", "التحريف"),
+    ("interpolation", "الإقحام والتحريف"),
+    ("syllogism", "قياس برهاني"),
+    ("premises", "مقدمات"),
+    ("premise", "مقدمة"),
+    ("axioms", "بديهيات عقلية"),
+    ("axiom", "بديهية عقلية"),
+    ("morality", "الأخلاق"),
+    ("moral", "أخلاقي"),
+    ("miracles", "المعجزات"),
+    ("machines", "الآلات"),
+    ("messenger", "رسول"),
+    ("scribes", "النساخ"),
+    ("bikinis", "لباس البحر الفاضح"),
+]
+
 _SCRIPT_REPLACEMENTS = [
     ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
     ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
@@ -580,11 +686,13 @@ _SCRIPT_REPLACEMENTS = [
     ("نihilist", "عدمي"), ("النihilists", "العدميون"), ("بprocesseات", "بعمليات"),
     ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
     ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
-    ("condemn", "يُدين"), ("Cause", "سبب أول"), ("causes", "أسباب أولى"),
+    ("condemn", "يُدين"),
     ("والincest", "وزنا المحارم"),
     ("الincest", "زنا المحارم"),
-    ("incest", "زنا المحارم"), ("two wills", "إرادتين"), ("wills", "إرادات"),
-    ("natures", "طبائع"), ("divine", "إلهي"), ("human", "بشري"),
+    ("incest", "زنا المحارم"),
+    ("two natures and two wills", "طبيعتين وإرادتين"),
+    ("two natures", "طبيعتين"),
+    ("two wills", "إرادتين"),
     ("bikinis", "لباس البحر الفاضح"),
     ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
     ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
@@ -598,6 +706,129 @@ _SCRIPT_REPLACEMENTS = [
     ("？", "؟"),
     ("！", "!"),
 ]
+
+
+def _is_refutation_context(text: str, match_start: int) -> bool:
+    """Checks whether a matched theological statement is quoted as a refutation target or is negated."""
+    window = text[max(0, match_start - 80):match_start].lower()
+    refutation_markers = [
+        "refut", "reject", "deni", "deny", "false", "fallacy", "misconception",
+        "claim", "dogma", "notion", "myth", "alleg", "argument that", "oppose",
+        "disprov", "counter", "refuting", "rejecting", "denying", "refutation",
+        "زعم", "دعوى", "شبهة", "باطل", "بطلان", "رد", "دحض", "إبطال", "نفي", "إنكار",
+        "ليس", "لا يمكن", "يستحيل", "كيف يكون", "كيف يعقل", "تناقض", "مغالطة"
+    ]
+    return any(marker in window for marker in refutation_markers)
+
+
+def clean_latin_tokens_in_arabic(text: str) -> str:
+    """Replaces leaked Latin/English words in Arabic fields using philosophical vocabulary and cleans artifacts."""
+    if not text:
+        return ""
+    val = text
+
+    # 1. Exact script replacements and overrides first
+    for old_s, new_s in _SCRIPT_REPLACEMENTS:
+        if old_s in val:
+            val = val.replace(old_s, new_s)
+
+    # 2. Arabic prefix mapping: (prefix_if_ar_term_has_al, prefix_if_ar_term_lacks_al)
+    prefix_map = {
+        "وال": ("و", "وال"),
+        "فال": ("ف", "فال"),
+        "بال": ("ب", "بال"),
+        "كال": ("ك", "كال"),
+        "ال": ("", "ال"),
+        "و": ("و", "و"),
+        "ف": ("ف", "ف"),
+        "ب": ("ب", "ب"),
+        "ك": ("ك", "ك"),
+        "ل": ("ل", "ل"),
+    }
+
+    for eng_term, ar_term in _PHILOSOPHICAL_VOCABULARY:
+        has_al = (
+            ar_term.startswith("ال")
+            or ar_term.startswith("الأ")
+            or ar_term.startswith("الإ")
+            or ar_term.startswith("الآ")
+        )
+
+        # Handle prefixed Latin terms (e.g., والInstinctive -> والفطري, والcausality -> والسببية)
+        for p_ar, (with_al, without_al) in prefix_map.items():
+            pattern_pre = r'(?<![\w\u0600-\u06ff])' + re.escape(p_ar) + re.escape(eng_term) + r'\b'
+            replacement = (with_al + ar_term) if has_al else (without_al + ar_term)
+            val = re.sub(pattern_pre, replacement, val, flags=re.IGNORECASE)
+
+        # Standalone term
+        pattern = r'\b' + re.escape(eng_term) + r'\b'
+        val = re.sub(pattern, ar_term, val, flags=re.IGNORECASE)
+
+    # 3. Purge any remaining stray Latin/English tokens from Arabic fields
+    val = re.sub(r'(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])', ' ', val)
+    val = re.sub(r'\b[A-Za-z]+\b', '', val)
+    val = re.sub(r'\(\s*\)', '', val)
+    val = re.sub(r'\[\s*\]', '', val)
+    val = re.sub(r'[ \t]+', ' ', val).strip()
+    val = re.sub(r'\s+([،.؟!:;])', r'\1', val)
+
+    return val
+
+
+def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Detects whether a unit expresses opponent theological bias / heresy."""
+    bias_patterns = [
+        # 1. Defending / justifying incest
+        (r'\b(defend(ing|s)?|justif(y|ying|ies)|permit(ting|s)?|allow(ing|s)?)\s+(incest)\b', 'Defending incest', False),
+        (r'\b(incest\s+(is|was)\s+(justified|permissible|allowed|moral|acceptable|necessary))\b', 'Justifying incest', False),
+        (r'(تبرير|إباحة|جواز|الدفاع عن)\s+زنا المحارم', 'تبرير زنا المحارم', False),
+        (r'زنا المحارم\s+(مباح|جائز|حلال|مبرر)', 'زنا المحارم مباح', False),
+
+        # 2. Spirit of Truth is Holy Spirit (denying it is Prophet Muhammad)
+        (r'\b(spirit of truth|comforter|paraclete)\s+(is|means)\s+(the\s+)?holy spirit\b', 'Claiming Spirit of Truth is Holy Spirit', True),
+        (r'\b(spirit of truth|comforter)\s+is\s+not\s+(prophet\s+)?muhammad\b', 'Denying Comforter is Muhammad', False),
+        (r'(روح الحق|المعزي|البارقليط)\s+(هو|يعني)\s+الروح القدس', 'روح الحق هو الروح القدس', True),
+        (r'(روح الحق|المعزي|البارقليط)\s+ليس\s+(هو\s+)?محمد', 'المعزي ليس محمدا', False),
+
+        # 3. Biblical laws are void / abolished
+        (r'\b(biblical|old testament|mosaic)\s+laws?\s+(are|is)\s+(void|abolished|nullified)\b', 'Biblical laws void', True),
+        (r'\b(the\s+law\s+is\s+(void|abolished|null and void))\b', 'Law is void', True),
+        (r'(الناموس|شريعة العهد القديم|الشريعة الموسوية)\s+(باطل|ملغى|منسوخ بالكلية لإسقاط الأخلاق)', 'الناموس باطل', True),
+
+        # 4. Asserting Christ is God or Trinity as the Da'ee's position
+        (r'\b(jesus|christ)\s+is\s+(the\s+)?(true\s+)?god\b', 'Christ is God asserted as truth', True),
+        (r'(المسيح|يسوع|عيسى)\s+هو\s+الله', 'المسيح هو الله', True),
+        (r'(الثالوث|التثليث)\s+حق', 'الثالوث حق', True),
+
+        # 5. Asserting vicarious crucifixion / atonement as the Da'ee's position
+        (r'\b(jesus|christ)\s+died\s+for\s+(our\s+)?sins\b', 'Crucifixion atonement asserted as truth', True),
+        (r'(المسيح|يسوع)\s+مات\s+(تكفيراً|فداءً)\s+عن\s+خطايانا', 'المسيح مات فداء عن خطايانا', True),
+    ]
+
+    texts_to_check = [
+        str(unit.get("core_answer_summary_en") or ""),
+        str(unit.get("core_answer_summary_ar") or ""),
+        str(unit.get("verbatim_quote") or ""),
+        str(unit.get("verbatim_quote_ar") or ""),
+    ]
+
+    for pk in ("logical_premises", "logical_premises_ar"):
+        val = unit.get(pk)
+        if isinstance(val, list):
+            texts_to_check.extend(str(x) for x in val)
+
+    if a_turn:
+        texts_to_check.append(str(a_turn.get("text_original") or ""))
+        texts_to_check.append(str(a_turn.get("text_ar") or ""))
+
+    combined = " ".join(texts_to_check)
+    for pattern, reason, check_refutation in bias_patterns:
+        m = re.search(pattern, combined, re.IGNORECASE)
+        if m:
+            if check_refutation and _is_refutation_context(combined, m.start()):
+                continue
+            return reason
+    return None
 
 
 BILINGUAL_TOPIC_DOMAINS = {
@@ -717,14 +948,27 @@ def canonicalize_topic_category(raw_category: str) -> str:
     return cat_clean
 
 
-def sanitize_text_field(text: Optional[str]) -> str:
-    """Purges foreign scripts, Cyrillic, and CJK artifacts from text fields."""
+def sanitize_text_field(text: Optional[str], is_arabic: Optional[bool] = None) -> str:
+    """Purges foreign scripts, Cyrillic, and CJK artifacts; purifies leaked Latin words in Arabic fields."""
     if not text or not isinstance(text, str):
         return ""
     val = text
-    for old_s, new_s in _SCRIPT_REPLACEMENTS:
-        if old_s in val:
-            val = val.replace(old_s, new_s)
+    has_arabic = bool(re.search(r"[\u0600-\u06ff]", val))
+    apply_arabic_cleaning = is_arabic if is_arabic is not None else has_arabic
+
+    if apply_arabic_cleaning:
+        val = clean_latin_tokens_in_arabic(val)
+    else:
+        for old_s, new_s in [
+            ("。，？，。", "؟"),
+            ("。", "."),
+            ("，", ","),
+            ("？", "?"),
+            ("！", "!"),
+        ]:
+            if old_s in val:
+                val = val.replace(old_s, new_s)
+
     val = _CYRILLIC_RE.sub("", val)
     val = _CJK_RE.sub("", val)
     return val.strip()
@@ -737,29 +981,53 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
     """
     u = dict(unit)
 
-    # 1. Sanitize text fields
+    # 1. Sanitize text fields (respecting English vs Arabic domain boundaries)
     for k in (
-        "question_en", "question_ar",
-        "core_answer_summary_en", "core_answer_summary_ar",
-        "fallacy_or_misconception_exposed", "fallacy_or_misconception_exposed_ar",
-        "analogy_or_metaphor", "analogy_or_metaphor_ar",
-        "socratic_question", "socratic_question_ar",
-        "interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar",
-        "verbatim_quote", "verbatim_quote_ar",
+        "question_en",
+        "core_answer_summary_en",
+        "fallacy_or_misconception_exposed",
+        "analogy_or_metaphor",
+        "socratic_question",
+        "interlocutor_verbatim_quote",
+        "verbatim_quote",
     ):
         if k in u:
-            u[k] = sanitize_text_field(u[k])
+            u[k] = sanitize_text_field(u[k], is_arabic=False)
+
+    for k in (
+        "question_ar",
+        "core_answer_summary_ar",
+        "fallacy_or_misconception_exposed_ar",
+        "analogy_or_metaphor_ar",
+        "socratic_question_ar",
+        "interlocutor_verbatim_quote_ar",
+        "verbatim_quote_ar",
+    ):
+        if k in u:
+            u[k] = sanitize_text_field(u[k], is_arabic=True)
 
     # 2. Sanitize premises
-    for pk in ("logical_premises", "logical_premises_ar"):
-        val = u.get(pk)
+    if "logical_premises" in u:
+        val = u.get("logical_premises")
         if isinstance(val, list):
-            u[pk] = [sanitize_text_field(p) for p in val if sanitize_text_field(p)]
+            u["logical_premises"] = [sanitize_text_field(p, is_arabic=False) for p in val if sanitize_text_field(p, is_arabic=False)]
         elif isinstance(val, str) and val.startswith("["):
             try:
                 parsed = json.loads(val)
                 if isinstance(parsed, list):
-                    u[pk] = [sanitize_text_field(p) for p in parsed if sanitize_text_field(p)]
+                    u["logical_premises"] = [sanitize_text_field(p, is_arabic=False) for p in parsed if sanitize_text_field(p, is_arabic=False)]
+            except Exception:
+                pass
+
+    if "logical_premises_ar" in u:
+        val = u.get("logical_premises_ar")
+        if isinstance(val, list):
+            u["logical_premises_ar"] = [sanitize_text_field(p, is_arabic=True) for p in val if sanitize_text_field(p, is_arabic=True)]
+        elif isinstance(val, str) and val.startswith("["):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    u["logical_premises_ar"] = [sanitize_text_field(p, is_arabic=True) for p in parsed if sanitize_text_field(p, is_arabic=True)]
             except Exception:
                 pass
 
@@ -769,29 +1037,34 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
     if not p_ar and p_en and any(re.search(r"[\u0600-\u06ff]", str(p)) for p in p_en):
         u["logical_premises_ar"] = list(p_en)
 
-    # 4. Enforce Da'ee attribution integrity (block generic placeholders)
+    # 4. Enforce Da'ee attribution integrity (block generic placeholders & guard against heresy)
     vid = u.get("video_id")
     daee_ar = u.get("daee_name_ar") or ""
     daee_prof = u.get("daee_profile_id") or ""
-    if vid and (daee_ar in ("المحاور", "المحاور 1", "المحاور 2", "") or not daee_prof):
-        spk = conn.execute(
-            "SELECT profile_id, display_name_ar, display_name_en, speaker_id FROM video_speakers WHERE video_id = ? AND role = 'MAIN_DAEE'",
-            (vid,)
-        ).fetchone()
-        if spk and spk["display_name_ar"]:
-            u["daee_profile_id"] = spk["profile_id"] or ""
-            u["daee_name_ar"] = spk["display_name_ar"]
-            u["daee_name_en"] = spk["display_name_en"] or "Main Da'ee"
-            u["daee_speaker_id"] = spk["speaker_id"] or u.get("daee_speaker_id", "")
-        else:
-            vhint = conn.execute("SELECT primary_daee_hint FROM videos WHERE video_id = ?", (vid,)).fetchone()
-            if vhint and vhint[0]:
-                prof_id = vhint[0]
-                prof = conn.execute("SELECT name_ar, name_en FROM speaker_profiles WHERE profile_id = ?", (prof_id,)).fetchone()
-                if prof:
-                    u["daee_profile_id"] = prof_id
-                    u["daee_name_ar"] = prof["name_ar"]
-                    u["daee_name_en"] = prof["name_en"]
+
+    # Strictly remove blind force-renaming of interlocutors to Da'ee
+    if daee_ar not in ("المحاور", "المحاور 1", "المحاور 2", "Interlocutor", "Interlocutor 1", "Interlocutor 2"):
+        if vid and not daee_prof:
+            spk = conn.execute(
+                "SELECT profile_id, display_name_ar, display_name_en, speaker_id FROM video_speakers WHERE video_id = ? AND role = 'MAIN_DAEE'",
+                (vid,)
+            ).fetchone()
+            if spk and spk["display_name_ar"]:
+                if not daee_ar or daee_ar == spk["display_name_ar"]:
+                    u["daee_profile_id"] = spk["profile_id"] or ""
+                    u["daee_name_ar"] = spk["display_name_ar"]
+                    u["daee_name_en"] = spk["display_name_en"] or "Main Da'ee"
+                    u["daee_speaker_id"] = spk["speaker_id"] or u.get("daee_speaker_id", "")
+            else:
+                vhint = conn.execute("SELECT primary_daee_hint FROM videos WHERE video_id = ?", (vid,)).fetchone()
+                if vhint and vhint[0]:
+                    prof_id = vhint[0]
+                    prof = conn.execute("SELECT name_ar, name_en FROM speaker_profiles WHERE profile_id = ?", (prof_id,)).fetchone()
+                    if prof:
+                        if not daee_ar or daee_ar == prof["name_ar"]:
+                            u["daee_profile_id"] = prof_id
+                            u["daee_name_ar"] = prof["name_ar"]
+                            u["daee_name_en"] = prof["name_en"]
 
     # 5. Enrich dialogue_exchange with timestamps and localized speaker names if missing
     exchanges = u.get("dialogue_exchange") or []
@@ -837,7 +1110,43 @@ def insert_qa_unit(unit: Dict[str, Any], db_path: Optional[Path] = None) -> None
 
 
 def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> None:
+    if check_theological_bias(unit):
+        return
     unit = _sanitize_and_validate_qa_unit(conn, unit)
+    if unit.get("daee_name_ar") in ("المحاور", "المحاور 1", "المحاور 2", "Interlocutor", "Interlocutor 1", "Interlocutor 2"):
+        return
+
+    # Prepare analogies_json
+    raw_an = unit.get("analogies")
+    if isinstance(raw_an, list) and raw_an:
+        analogies_list = [str(a).strip() for a in raw_an if str(a).strip()]
+    elif unit.get("analogy_or_metaphor"):
+        analogies_list = [str(unit["analogy_or_metaphor"]).strip()]
+    else:
+        analogies_list = []
+    analogies_json_val = json.dumps(analogies_list, ensure_ascii=False)
+
+    # Prepare analogies_ar_json
+    raw_an_ar = unit.get("analogies_ar")
+    if isinstance(raw_an_ar, list) and raw_an_ar:
+        analogies_ar_list = [str(a).strip() for a in raw_an_ar if str(a).strip()]
+    elif unit.get("analogy_or_metaphor_ar"):
+        analogies_ar_list = [str(unit["analogy_or_metaphor_ar"]).strip()]
+    else:
+        analogies_ar_list = []
+    analogies_ar_json_val = json.dumps(analogies_ar_list, ensure_ascii=False)
+
+    # Prepare scriptural_citations_json
+    raw_sc = unit.get("scriptural_citations")
+    citations_list = raw_sc if isinstance(raw_sc, list) else []
+    scriptural_citations_json_val = json.dumps(citations_list, ensure_ascii=False)
+
+    # Prepare dialogue_trajectory_turns_count
+    exchange_list = unit.get("dialogue_exchange") or unit.get("dialogue_trajectory") or []
+    if not isinstance(exchange_list, list):
+        exchange_list = []
+    turn_count = int(unit.get("dialogue_trajectory_turns_count") or len(exchange_list))
+
     conn.execute(
         """
         INSERT OR REPLACE INTO qa_units (
@@ -852,8 +1161,9 @@ def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Non
             socratic_question, socratic_question_ar,
             interlocutor_verbatim_quote, interlocutor_verbatim_quote_ar,
             verbatim_quote, verbatim_quote_ar,
-            dialogue_exchange_json, source_turn_ids_json, tags_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            dialogue_exchange_json, source_turn_ids_json, tags_json,
+            analogies_json, analogies_ar_json, scriptural_citations_json, dialogue_trajectory_turns_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             unit.get("id"),
@@ -894,6 +1204,10 @@ def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Non
             json.dumps(unit.get("dialogue_exchange", []), ensure_ascii=False),
             json.dumps(unit.get("source_turn_ids", []), ensure_ascii=False),
             json.dumps(unit.get("tags", []), ensure_ascii=False),
+            analogies_json_val,
+            analogies_ar_json_val,
+            scriptural_citations_json_val,
+            turn_count,
         ),
     )
 
@@ -937,11 +1251,14 @@ BILINGUAL_CONCEPT_SYNONYMS = {
 
 
 def _normalize_arabic_variants(token: str) -> List[str]:
+    alef_norm = re.sub(r"[أإآ]", "ا", token)
+    if alef_norm in ("الله", "لله", "والله", "بالله"):
+        return ["الله", "لله"]
+
     variants = {token}
     for prefix in ("وال", "فال", "بال", "كال", "لال", "ال"):
         if token.startswith(prefix) and len(token) - len(prefix) >= 2:
             variants.add(token[len(prefix):])
-    alef_norm = re.sub(r"[أإآ]", "ا", token)
     variants.add(alef_norm)
     for prefix in ("وال", "فال", "بال", "كال", "لال", "ال"):
         if alef_norm.startswith(prefix) and len(alef_norm) - len(prefix) >= 2:
@@ -964,11 +1281,13 @@ def _normalize_arabic_variants(token: str) -> List[str]:
     if stem_key_norm in BILINGUAL_CONCEPT_SYNONYMS:
         variants.update(BILINGUAL_CONCEPT_SYNONYMS[stem_key_norm])
 
+    variants.discard("له")
+    variants.discard("لة")
     return [v for v in variants if len(v) >= 2]
 
 
 _SEARCH_STOPWORDS = {
-    "من", "في", "على", "عن", "إلى", "الى", "ما", "لا", "أو", "او", "هو", "هي",
+    "من", "في", "على", "عن", "إلى", "الى", "ما", "لا", "أو", "او", "هو", "هي", "له",
     "ان", "أن", "إن", "كان", "هل", "مع", "كل", "هذا", "هذه", "ذلك", "التي", "الذي",
     "the", "and", "for", "with", "from", "that", "this", "what", "who", "how", "why",
     "in", "of", "to", "is", "or", "on", "at", "an", "by", "as", "be", "are", "was",
@@ -1026,6 +1345,7 @@ def _build_search_where(
             "logical_premises_json", "logical_premises_ar_json",
             "fallacy_or_misconception_exposed", "fallacy_or_misconception_exposed_ar",
             "analogy_or_metaphor", "analogy_or_metaphor_ar",
+            "analogies_json", "analogies_ar_json", "scriptural_citations_json",
             "socratic_question", "socratic_question_ar",
             "interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar",
             "verbatim_quote", "verbatim_quote_ar",
@@ -1091,11 +1411,25 @@ def _hydrate_qa_row(row: sqlite3.Row, serial_num: int) -> Dict[str, Any]:
         ("dialogue_exchange_json", "dialogue_exchange"),
         ("source_turn_ids_json", "source_turn_ids"),
         ("tags_json", "tags"),
+        ("analogies_json", "analogies"),
+        ("analogies_ar_json", "analogies_ar"),
+        ("scriptural_citations_json", "scriptural_citations"),
     ]:
         try:
             d[out_key] = json.loads(d.get(json_col) or "[]")
         except Exception:
             d[out_key] = []
+
+    # Fallback for analogies if empty but analogy_or_metaphor exists
+    if not d.get("analogies") and d.get("analogy_or_metaphor"):
+        d["analogies"] = [d["analogy_or_metaphor"]]
+    if not d.get("analogies_ar") and d.get("analogy_or_metaphor_ar"):
+        d["analogies_ar"] = [d["analogy_or_metaphor_ar"]]
+
+    # Ensure dialogue_trajectory_turns_count is hydrated as int
+    d["dialogue_trajectory_turns_count"] = int(
+        d.get("dialogue_trajectory_turns_count") or len(d.get("dialogue_exchange") or [])
+    )
 
     # Dynamic read-time sanitization: guarantees zero Russian/CJK artifacts even if DB is untouched clone
     for text_key in (

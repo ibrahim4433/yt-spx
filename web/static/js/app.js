@@ -101,7 +101,8 @@ const SVG_ICONS = {
   play: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"/></svg>`,
   copy: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
   bot: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
-  parallel: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>`
+  parallel: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>`,
+  scripture: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10M6 10h10"/></svg>`
 };
 
 const translations = {
@@ -163,6 +164,9 @@ const translations = {
     interVerbatimLabel: "Interlocutor Verbatim Objection",
     verbatimLabel: "Da'ee Verbatim Evidence",
     exchangeLabel: "Chronological Speaker Exchange",
+    scriptureLabel: "Scriptural Citations & Historical Proofs",
+    showMoreTurns: "Show remaining turns",
+    collapseTurns: "Collapse turns",
     watchBtn: "Watch at",
     scenarioJumpBtn: "Scenario Studio",
     askBotBtn: "Inspect in Assistant",
@@ -264,6 +268,9 @@ const translations = {
     interVerbatimLabel: "نص اعتراض المحاور الحرفي",
     verbatimLabel: "نص برهان الداعية الحرفي",
     exchangeLabel: "التسلسل الزمني للحوار الثنائي",
+    scriptureLabel: "الشواهد والنصوص الشرعية والتاريخية",
+    showMoreTurns: "عرض باقي المداخلات",
+    collapseTurns: "طي المداخلات",
     watchBtn: "شاهد عند",
     scenarioJumpBtn: "استوديو النص الكامل",
     askBotBtn: "تحليل في المساعد",
@@ -1290,38 +1297,105 @@ function renderCards(cards) {
       `;
     }
 
-    // Concrete Analogy
-    const analogyEn = card.analogy_or_metaphor;
-    const analogyAr = card.analogy_or_metaphor_ar;
-    const activeAnalogy = isAr ? analogyAr || analogyEn : analogyEn || analogyAr;
+    // Concrete Analogy (Supports Single or Multiple)
+    const rawAnalogies = Array.isArray(card.analogies) && card.analogies.length
+      ? card.analogies
+      : (card.analogy_or_metaphor ? [card.analogy_or_metaphor] : []);
+    const rawAnalogiesAr = Array.isArray(card.analogies_ar) && card.analogies_ar.length
+      ? card.analogies_ar
+      : (card.analogy_or_metaphor_ar ? [card.analogy_or_metaphor_ar] : []);
+
     let analogyHtml = "";
-    if (activeAnalogy && !isNoneText(activeAnalogy)) {
-      const analogyBody =
-        showParallel && analogyEn && analogyAr && analogyEn !== analogyAr
-          ? `<div>${escapeHtml(analogyEn)}</div><div class="ar-font" dir="rtl" style="margin-top:0.35rem; padding-top:0.35rem; border-top:1px dashed rgba(15,82,62,0.2);">${escapeHtml(analogyAr)}</div>`
-          : escapeHtml(activeAnalogy);
+    if (rawAnalogies.length > 1) {
+      const itemsHtml = rawAnalogies.map((anEn, aIdx) => {
+        const anAr = rawAnalogiesAr[aIdx] || "";
+        const activeItem = isAr ? (anAr || anEn) : (anEn || anAr);
+        const itemBody = showParallel && anEn && anAr && anEn !== anAr
+          ? `<div>${escapeHtml(anEn)}</div><div class="ar-font" dir="rtl" style="margin-top:0.25rem; padding-top:0.25rem; border-top:1px dashed rgba(15,82,62,0.15);">${escapeHtml(anAr)}</div>`
+          : escapeHtml(activeItem);
+        return `
+          <div class="analogy-multi-item" style="margin-bottom:0.45rem; padding-bottom:0.45rem; ${aIdx < rawAnalogies.length - 1 ? 'border-bottom: 1px dashed var(--border-hairline);' : ''}">
+            <span style="font-weight:700; color:var(--emerald-primary); margin-inline-end:0.4rem;">[${aIdx + 1}]</span>
+            <span>${itemBody}</span>
+          </div>
+        `;
+      }).join("");
       analogyHtml = `
         <div class="analogy-panel">
-          <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)}</span></div>
-          <div class="analogy-body">${analogyBody}</div>
+          <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)} (${rawAnalogies.length})</span></div>
+          <div class="analogy-body">${itemsHtml}</div>
+        </div>
+      `;
+    } else {
+      const analogyEn = card.analogy_or_metaphor || (rawAnalogies[0] || "");
+      const analogyAr = card.analogy_or_metaphor_ar || (rawAnalogiesAr[0] || "");
+      const activeAnalogy = isAr ? analogyAr || analogyEn : analogyEn || analogyAr;
+      if (activeAnalogy && !isNoneText(activeAnalogy)) {
+        const analogyBody =
+          showParallel && analogyEn && analogyAr && analogyEn !== analogyAr
+            ? `<div>${escapeHtml(analogyEn)}</div><div class="ar-font" dir="rtl" style="margin-top:0.35rem; padding-top:0.35rem; border-top:1px dashed rgba(15,82,62,0.2);">${escapeHtml(analogyAr)}</div>`
+            : escapeHtml(activeAnalogy);
+        analogyHtml = `
+          <div class="analogy-panel">
+            <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)}</span></div>
+            <div class="analogy-body">${analogyBody}</div>
+          </div>
+        `;
+      }
+    }
+
+    // Scriptural Citations
+    const rawCitations = Array.isArray(card.scriptural_citations) ? card.scriptural_citations : [];
+    let scriptureHtml = "";
+    if (rawCitations.length) {
+      const scriptureItems = rawCitations.map((sc) => {
+        if (typeof sc === "string") {
+          return `<div class="scripture-item"><span class="scripture-badge">${escapeHtml(sc)}</span></div>`;
+        }
+        const src = sc.source || "";
+        const ref = sc.reference || "";
+        const sig = isAr ? (sc.significance_ar || sc.significance || "") : (sc.significance || sc.significance_ar || "");
+        const sigParallel = showParallel && sc.significance && sc.significance_ar && sc.significance !== sc.significance_ar
+          ? `<div>${escapeHtml(sc.significance)}</div><div class="ar-font" dir="rtl" style="margin-top:0.25rem;">${escapeHtml(sc.significance_ar)}</div>`
+          : escapeHtml(sig);
+        return `
+          <div class="scripture-item">
+            <div class="scripture-header">
+              ${src ? `<span class="scripture-source-badge">${escapeHtml(src)}</span>` : ""}
+              ${ref ? `<strong class="scripture-ref">${escapeHtml(ref)}</strong>` : ""}
+            </div>
+            ${sig ? `<div class="scripture-sig">${sigParallel}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+
+      scriptureHtml = `
+        <div class="scriptural-panel">
+          <div class="scriptural-bar">${SVG_ICONS.scripture || SVG_ICONS.proof}<span>${escapeHtml(t.scriptureLabel || "Scriptural Citations")}</span></div>
+          <div class="scriptural-body">${scriptureItems}</div>
         </div>
       `;
     }
 
-    // Chronological Dual-Speaker Exchange Timeline (V2)
-    const exchanges = Array.isArray(card.dialogue_exchange) ? card.dialogue_exchange : [];
+    // Chronological Dual-Speaker Exchange Timeline (V2: Supports 6-12 turns with toggle)
+    const exchanges = Array.isArray(card.dialogue_exchange) && card.dialogue_exchange.length
+      ? card.dialogue_exchange
+      : (Array.isArray(card.dialogue_trajectory) ? card.dialogue_trajectory : []);
     let exchangeHtml = "";
     if (exchanges.length) {
+      const displayedExchanges = exchanges.slice(0, 12);
+      const hasExtra = displayedExchanges.length > 4;
+      const extraCount = displayedExchanges.length - 4;
       exchangeHtml = `
         <div class="exchange-timeline-panel">
           <div class="exchange-timeline-bar">
             <span>${SVG_ICONS.scenario} ${escapeHtml(t.exchangeLabel)}</span>
-            <span>${exchanges.length} TURNS</span>
+            <span>${displayedExchanges.length} TURNS</span>
           </div>
           <div class="exchange-steps-list">
-            ${exchanges
-              .slice(0, 6)
-              .map((ex) => {
+            ${displayedExchanges
+              .map((ex, exIdx) => {
+                const isExtra = exIdx >= 4;
                 const isDaeeRole = String(ex.role || "").includes("DAEE");
                 const roleCls = isDaeeRole ? "exchange-role-daee" : "exchange-role-inter";
                 let spkName = "";
@@ -1337,8 +1411,10 @@ function renderCards(cards) {
                 const exTxt = isAr ? ex.text_ar || ex.text_en || "" : ex.text_en || ex.text_ar || "";
                 const exTs = ex.timestamp_formatted || card.timestamp_formatted || "00:00";
                 const exSec = Number(ex.timestamp_seconds || card.timestamp_seconds || 0);
+                const extraClass = isExtra ? " exchange-step-extra" : "";
+                const extraStyle = isExtra ? ' style="display:none;"' : "";
                 return `
-                  <button type="button" class="exchange-step-item" onclick="openScenarioStudio('${escapeJsStr(card.video_id || "")}', '${escapeJsStr(ex.turn_id || "")}', ${exSec})">
+                  <button type="button" class="exchange-step-item${extraClass}"${extraStyle} onclick="openScenarioStudio('${escapeJsStr(card.video_id || "")}', '${escapeJsStr(ex.turn_id || "")}', ${exSec})">
                     <div class="exchange-step-meta">
                       <span class="${roleCls}">${escapeHtml(spkName)} · ${escapeHtml(ex.move_type || "")}</span>
                       <span>${escapeHtml(exTs)}</span>
@@ -1349,6 +1425,13 @@ function renderCards(cards) {
               })
               .join("")}
           </div>
+          ${hasExtra ? `
+            <div style="padding: 0 0.75rem 0.6rem 0.75rem;">
+              <button type="button" class="exchange-toggle-btn" data-expanded="false" onclick="toggleExchangeTurns(this)">
+                <span>+ ${escapeHtml(t.showMoreTurns || "Show remaining turns")} (${extraCount})</span>
+              </button>
+            </div>
+          ` : ""}
         </div>
       `;
     }
@@ -1413,6 +1496,7 @@ function renderCards(cards) {
         <div class="dossier-col-proof">
           ${premisesHtml}
           ${analogyHtml}
+          ${scriptureHtml}
           ${exchangeHtml}
           <div class="proof-footer-area">
             ${tagsHtml}
@@ -2292,3 +2376,24 @@ function escapeJsStr(str) {
     .replace(/"/g, "&quot;")
     .replace(/\n/g, " ");
 }
+
+function toggleExchangeTurns(btn) {
+  if (!btn) return;
+  const isExpanded = btn.getAttribute("data-expanded") === "true";
+  const parentPanel = btn.closest(".exchange-timeline-panel");
+  if (!parentPanel) return;
+  const extraItems = parentPanel.querySelectorAll(".exchange-step-extra");
+  const t = (typeof UI_TEXT !== "undefined" && UI_TEXT[currentLang]) ? UI_TEXT[currentLang] : (typeof translations !== "undefined" && translations[currentLang] ? translations[currentLang] : { showMoreTurns: "Show remaining turns", collapseTurns: "Collapse turns" });
+
+  if (isExpanded) {
+    extraItems.forEach((item) => { item.style.display = "none"; });
+    btn.setAttribute("data-expanded", "false");
+    const count = extraItems.length;
+    btn.innerHTML = `<span>+ ${escapeHtml(t.showMoreTurns || "Show remaining turns")} (${count})</span>`;
+  } else {
+    extraItems.forEach((item) => { item.style.display = ""; });
+    btn.setAttribute("data-expanded", "true");
+    btn.innerHTML = `<span>- ${escapeHtml(t.collapseTurns || "Collapse turns")}</span>`;
+  }
+}
+window.toggleExchangeTurns = toggleExchangeTurns;
