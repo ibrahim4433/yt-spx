@@ -939,7 +939,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="YT-SPX V2 Smart-Batch & Multi-Account Pipeline Orchestrator")
     p.add_argument(
         "--mode",
-        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies", "reset-stage2", "auth-youtube"],
+        choices=["auto", "stage1", "stage2", "stage1-worker", "stage2-worker", "sync-db", "status", "test-cookies", "reset-stage1", "reset-stage2", "auth-youtube"],
         default="auto",
         help="Execution mode: 'auto' runs Stage 1 -> Stage 2 in isolated GPU subprocesses.",
     )
@@ -958,6 +958,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")
     p.add_argument("--wait-for-scenarios", action="store_true", help="Stage 2 standby watcher: keeps running and polls Drive for new scenarios from Profile 1.")
     p.add_argument("--keep-raw-audio", action="store_true", help="Keep original raw download alongside 64kbps Opus.")
+    p.add_argument("--keep-diarization", action="store_true", help="When resetting stage1, keep M3/M4 diarization and only reset M5 Whisper scenarios.")
     p.add_argument("--offline-only", action="store_true", help="Do not touch YouTube; only process M1..M5 files on Drive.")
     p.add_argument("--worker-id", default="", help="Optional friendly worker label (e.g. colab-acct-1).")
     return p
@@ -977,6 +978,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.mode == "auth-youtube":
         return run_auth_youtube(args)
+
+    if args.mode == "reset-stage1":
+        from tools.reset_stage1 import reset_stage1_pipeline
+        ws = SharedWorkspace(worker_name=args.worker_id or None)
+        reset_stage1_pipeline(ws, keep_diarization=args.keep_diarization)
+        return 0
 
     if args.mode == "reset-stage2":
         from tools.reset_stage2 import reset_stage2_extractions

@@ -524,7 +524,7 @@ def main() -> int:
             patch_youtube_oauth2_plugin()
         except Exception:
             pass
-    elif is_colab and mode not in ("status", "sync-db", "reset-stage2", "auth-youtube"):
+    elif is_colab and mode not in ("status", "sync-db", "reset-stage1", "reset-stage2", "auth-youtube"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)
