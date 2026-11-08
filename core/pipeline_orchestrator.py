@@ -249,8 +249,20 @@ def select_stage2_candidates(
 
 
 def run_stage1_worker(args: argparse.Namespace) -> int:
-    """Runs inside an isolated Python process so Stage 1 audio models own the GPU cleanly."""
-    import torch
+    """
+    Runs inside an isolated Python process so Stage 1 audio models own the GPU cleanly.
+    Executes horizontal phase batching with immediate M5 priority:
+      1. Phase C (M5: Whisper large-v3 + CTC Aligner + Punctuation) for videos already at M4
+      2. Phase B (M3-M4: NeMo MSDD + TitaNet + MossFormer2) for videos at M2-M3 -> then Phase C
+      3. Phase A (M1-M2: yt-dlp + Demucs htdemucs) for new/M1 videos -> then Phase B -> then Phase C
+    Each heavy GPU model stack loads only ONCE per phase instead of reloading on every video,
+    and per-video locks are acquired/released strictly per phase step so multi-account workers never block.
+    """
+    import gc
+    try:
+        import torch
+    except ImportError:
+        torch = None
     from core.audio_diarizer import Stage1AudioPipeline
 
     workspace = SharedWorkspace(worker_name=args.worker_id)
@@ -265,7 +277,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         print("[Stage 1] No pending videos require Stage 1 processing.")
         return 0
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
     budget_label = f"{args.max_session_minutes} min" if args.max_session_minutes > 0 else "unlimited (until disconnect)"
     print("=" * 72)
     print(f"[Stage 1 Audio & Diarization Worker] Worker: {workspace.worker_id}")
@@ -292,7 +304,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     # Auto-clear any stale circuit breaker lock from previous runs so fresh batch starts unblocked
     workspace.clear_youtube_circuit_breaker()
 
-    # Auto-heal transient errors from previous environment bug iterations (e.g. metadata_errors, msdd_models, float4_e2m1fn, libcublas, cuDNN, fts5, rotated cookies, CUDA OOM)
+    # Auto-heal transient errors from previous environment bug iterations
     for cand in candidates:
         vid = cand["video_id"]
         st = workspace.get_video_state(vid)
@@ -302,89 +314,249 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             st["last_error"] = None
             workspace.atomic_write_json(workspace.state_path(vid), st)
 
-    for cand in candidates:
+    def _should_stop() -> bool:
+        if exit_code != 0:
+            return True
         if args.batch_videos > 0 and completed_count >= args.batch_videos:
-            print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
-            break
+            return True
         if deadline is not None and time.time() >= deadline:
-            print(f"\n[Stage 1] Session time budget ({args.max_session_minutes}m) reached. Saving & exiting cleanly.")
-            break
+            return True
+        return False
 
-        vid = cand["video_id"]
-        if not allow_downloads and cand.get("_step_rank", 0) < STEP_RANK["M1_DOWNLOADED"]:
-            continue
-
-        lock_name = f"{vid}.stage1"
-        if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
-            continue
-
-        try:
-            t0 = time.time()
-            print(
-                f"\n>>> [Stage 1] [{completed_count + 1}/{args.batch_videos}] {vid} "
-                f"(Resume rank={cand.get('_step_rank', 0)}) | {cand.get('title_ar', '')[:55]}",
-                flush=True,
-            )
-            scen = pipeline.process_single_video(cand, allow_youtube_download=allow_downloads)
-            if scen is not None:
-                completed_count += 1
-                consecutive_errors = 0
-                last_error_sig = ""
-                elapsed = round(time.time() - t0, 1)
-                m = scen.get("metrics", {})
-                print(
-                    f"    [OK] M5_SCENARIO_BUILT in {elapsed}s | Turns={m.get('turns_count') or m.get('total_turns') or len(scen.get('turns', []))} "
-                    f"| Overlaps={m.get('overlap_windows_count', 0)} | Pedestrians={m.get('pedestrian_turns_count', 0)}",
-                    flush=True,
-                )
-        except AntiBanCircuitBreakerError as cb_err:
-            print(f"\n[!] ANTI-BAN CIRCUIT BREAKER: {cb_err}", flush=True)
+    def _handle_video_error(vid: str, exc: Exception) -> None:
+        nonlocal consecutive_errors, last_error_sig, exit_code, allow_downloads
+        if isinstance(exc, AntiBanCircuitBreakerError):
+            print(f"\n[!] ANTI-BAN CIRCUIT BREAKER: {exc}", flush=True)
             print("    -> Switching Stage 1 to OFFLINE-ONLY mode (finishing M1..M4 files already on Drive)!", flush=True)
             allow_downloads = False
-        except PermanentVideoUnavailableError as perm_err:
-            print(f"    [SKIP PERMANENT] {vid}: {perm_err}", flush=True)
+            return
+        if isinstance(exc, PermanentVideoUnavailableError):
+            print(f"    [SKIP PERMANENT] {vid}: {exc}", flush=True)
             workspace.advance_micro_step(
                 vid,
                 "M0_QUEUED",
-                extra_updates={"permanent_unavailable": True, "last_error": str(perm_err)[:300]},
+                extra_updates={"permanent_unavailable": True, "last_error": str(exc)[:300]},
             )
-        except Exception as exc:
-            err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
-            print(f"    [ERROR] Stage 1 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
-            if consecutive_errors == 0:
-                print(traceback.format_exc(limit=5), flush=True)
+            return
 
-            # Evict models from GPU so a memory crash never poisons subsequent videos
+        err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
+        print(f"    [ERROR] Stage 1 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
+        if consecutive_errors == 0:
+            print(traceback.format_exc(limit=5), flush=True)
+
+        # Evict models from GPU so a memory crash never poisons subsequent videos
+        try:
+            pipeline.shutdown()
+        except Exception:
+            pass
+        gc.collect()
+
+        if err_sig == last_error_sig:
+            consecutive_errors += 1
+        else:
+            consecutive_errors = 1
+            last_error_sig = err_sig
+
+        if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
+            workspace.record_error(vid, err_sig)
+
+        if consecutive_errors >= 3:
+            print(
+                f"\n[!] ABORTING STAGE 1 BATCH: 3 consecutive identical errors ({err_sig}). "
+                "Stopping immediately so no further videos are touched until resolved.",
+                flush=True,
+            )
+            exit_code = 2
+
+    def _run_phase_c_batch(batch_items: List[Dict[str, Any]], label: str) -> None:
+        nonlocal completed_count, consecutive_errors, last_error_sig
+        if not batch_items or _should_stop():
+            return
+        # Ensure Demucs, NeMo, and MossFormer2 are unloaded so Whisper large-v3 + CTC get full VRAM
+        pipeline.demucs.unload()
+        pipeline.diarizer.unload()
+        pipeline.separator.unload()
+        try:
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        for cand in batch_items:
+            if _should_stop():
+                break
+            vid = cand["video_id"]
+            st = workspace.get_video_state(vid)
+            if st["step_rank"] >= STEP_RANK["M5_SCENARIO_BUILT"] or st["step_rank"] < STEP_RANK["M4_OVERLAPS_SEPARATED"]:
+                continue
+            lock_name = f"{vid}.stage1"
+            if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
+                continue
             try:
-                pipeline.asr.unload()
-                pipeline.diarizer.unload()
-                pipeline.separator.unload()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            gc.collect()
-
-            if err_sig == last_error_sig:
-                consecutive_errors += 1
-            else:
-                consecutive_errors = 1
-                last_error_sig = err_sig
-
-            # Do not penalize per-video error_count on repeated systemic environment/import errors
-            if not (consecutive_errors >= 2 and isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, TypeError))):
-                workspace.record_error(vid, err_sig)
-
-            if consecutive_errors >= 3:
+                t0 = time.time()
                 print(
-                    f"\n[!] ABORTING STAGE 1 BATCH: 3 consecutive identical errors ({err_sig}). "
-                    "Stopping immediately so no further videos are touched until resolved.",
+                    f"\n>>> [Stage 1 - {label} (M5 ASR)] [{completed_count + 1}/{args.batch_videos or '∞'}] {vid} "
+                    f"| {cand.get('title_ar', '')[:55]}",
                     flush=True,
                 )
-                exit_code = 2
+                scen = pipeline.run_phase_c_m5(cand, t_start_vid=t0)
+                if scen is not None:
+                    completed_count += 1
+                    consecutive_errors = 0
+                    last_error_sig = ""
+                    elapsed = round(time.time() - t0, 1)
+                    m = scen.get("metrics", {})
+                    print(
+                        f"    [OK] M5_SCENARIO_BUILT in {elapsed}s | Turns={m.get('turns_count') or m.get('total_turns') or len(scen.get('turns', []))} "
+                        f"| Overlaps={m.get('overlap_windows_count', 0)} | Pedestrians={m.get('pedestrian_turns_count', 0)}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                _handle_video_error(vid, exc)
+            finally:
+                workspace.release_lock(lock_name)
+
+        pipeline.asr.unload()
+
+    def _run_phase_b_batch(batch_items: List[Dict[str, Any]], label: str) -> List[Dict[str, Any]]:
+        nonlocal consecutive_errors, last_error_sig
+        ready_for_c: List[Dict[str, Any]] = []
+        if not batch_items or _should_stop():
+            return ready_for_c
+        pipeline.demucs.unload()
+        pipeline.asr.unload()
+        try:
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        for cand in batch_items:
+            if _should_stop():
                 break
-        finally:
-            workspace.release_lock(lock_name)
+            vid = cand["video_id"]
+            st = workspace.get_video_state(vid)
+            if st["step_rank"] >= STEP_RANK["M4_OVERLAPS_SEPARATED"]:
+                ready_for_c.append(cand)
+                continue
+            if st["step_rank"] < STEP_RANK["M2_VOCALS_CLEANED"]:
+                continue
+            lock_name = f"{vid}.stage1"
+            if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
+                continue
+            try:
+                print(
+                    f"\n>>> [Stage 1 - {label} (M3-M4 Diarization & Overlaps)] {vid} "
+                    f"(Resume rank={st['step_rank']}) | {cand.get('title_ar', '')[:55]}",
+                    flush=True,
+                )
+                if pipeline.run_phase_b_m3_m4(cand):
+                    consecutive_errors = 0
+                    last_error_sig = ""
+                    ready_for_c.append(cand)
+            except Exception as exc:
+                _handle_video_error(vid, exc)
+            finally:
+                workspace.release_lock(lock_name)
+
+        pipeline.diarizer.unload()
+        pipeline.separator.unload()
+        try:
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+        return ready_for_c
+
+    def _run_phase_a_batch(batch_items: List[Dict[str, Any]], target_slots: int) -> List[Dict[str, Any]]:
+        nonlocal consecutive_errors, last_error_sig
+        ready_for_b: List[Dict[str, Any]] = []
+        if not batch_items or _should_stop() or target_slots <= 0:
+            return ready_for_b
+        pipeline.diarizer.unload()
+        pipeline.separator.unload()
+        pipeline.asr.unload()
+
+        for cand in batch_items:
+            if _should_stop() or len(ready_for_b) >= target_slots:
+                break
+            vid = cand["video_id"]
+            st = workspace.get_video_state(vid)
+            if st["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"]:
+                ready_for_b.append(cand)
+                continue
+            if not allow_downloads and st["step_rank"] < STEP_RANK["M1_DOWNLOADED"]:
+                continue
+            lock_name = f"{vid}.stage1"
+            if not workspace.acquire_lock(lock_name, ttl_sec=2700, verify_delay_sec=0.3 if workspace.is_drive else 0.0):
+                continue
+            try:
+                print(
+                    f"\n>>> [Stage 1 - Phase A (M1-M2 Vocal Isolation)] [{len(ready_for_b) + 1}/{target_slots}] {vid} "
+                    f"(Resume rank={st['step_rank']}) | {cand.get('title_ar', '')[:55]}",
+                    flush=True,
+                )
+                if pipeline.run_phase_a_m1_m2(cand, allow_youtube_download=allow_downloads):
+                    consecutive_errors = 0
+                    last_error_sig = ""
+                    ready_for_b.append(cand)
+            except Exception as exc:
+                _handle_video_error(vid, exc)
+            finally:
+                workspace.release_lock(lock_name)
+
+        pipeline.demucs.unload()
+        try:
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+        return ready_for_b
+
+    # Partition candidates by current micro-step rank so M4 -> M5 finishes first!
+    tier_m4 = [c for c in candidates if c.get("_step_rank", 0) == STEP_RANK["M4_OVERLAPS_SEPARATED"]]
+    tier_m2_m3 = [c for c in candidates if c.get("_step_rank", 0) in (STEP_RANK["M2_VOCALS_CLEANED"], STEP_RANK["M3_DIARIZED"])]
+    tier_m0_m1 = [c for c in candidates if c.get("_step_rank", 0) in (STEP_RANK["M0_QUEUED"], STEP_RANK["M1_DOWNLOADED"])]
+
+    # Step 1: Immediate Phase C (M5) on any videos already at M4 -> pushes scenarios to Drive immediately!
+    if tier_m4 and not _should_stop():
+        _run_phase_c_batch(tier_m4, label="Priority Phase C")
+
+    # Step 2: Phase B (M3-M4) on any videos at M2-M3, followed immediately by Phase C (M5) on them!
+    if tier_m2_m3 and not _should_stop():
+        rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else len(tier_m2_m3)
+        b_slice = tier_m2_m3[: max(0, rem_slots)]
+        b_done = _run_phase_b_batch(b_slice, label="Resume Phase B")
+        if b_done and not _should_stop():
+            _run_phase_c_batch(b_done, label="Resume Phase C")
+
+    # Step 3: Horizontal Phase A -> Phase B -> Phase C on remaining M0/M1 candidates up to batch target!
+    if tier_m0_m1 and not _should_stop():
+        rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else min(len(tier_m0_m1), 8)
+        a_done = _run_phase_a_batch(tier_m0_m1, target_slots=rem_slots)
+        if a_done and not _should_stop():
+            b_done = _run_phase_b_batch(a_done, label="Batch Phase B")
+            if b_done and not _should_stop():
+                _run_phase_c_batch(b_done, label="Batch Phase C")
+
+    if args.batch_videos > 0 and completed_count >= args.batch_videos:
+        print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
+    elif deadline is not None and time.time() >= deadline:
+        print(f"\n[Stage 1] Session time budget ({args.max_session_minutes}m) reached. Saving & exiting cleanly.")
+
+    pipeline.shutdown()
+
+    # Persist Stage 1 model bundle (.tar) to Google Drive at the end of the Stage 1 batch if not cached yet
+    if completed_count > 0 and workspace.is_drive:
+        try:
+            from run_colab_all_in_one import persist_stage1_models_to_drive
+            persist_stage1_models_to_drive(workspace=workspace)
+        except Exception as cache_exc:
+            print(f"[Stage 1 Cache] Note: {cache_exc}", flush=True)
 
     # Sync newly built scenarios into SQLite immediately if compactor lock is free
     sync_stats = workspace.sync_completed_shards_to_sqlite()

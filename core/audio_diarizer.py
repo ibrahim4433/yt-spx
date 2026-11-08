@@ -781,35 +781,32 @@ class Stage1AudioPipeline:
         self.asr = WarmASRAlignmentEngine(whisper_model_name=whisper_model, device=device, batch_size=batch_size)
         self.registry = VoiceprintRegistry(workspace=workspace)
 
-    def process_single_video(self, video_record: Dict[str, Any], allow_youtube_download: bool = True) -> Optional[Dict[str, Any]]:
+    def run_phase_a_m1_m2(self, video_record: Dict[str, Any], allow_youtube_download: bool = True) -> bool:
         """
-        Runs all unfinished micro-steps from M1 up to M5_SCENARIO_BUILT for a single video.
-        Resumes seamlessly from whichever micro-step was last saved on Google Drive!
+        Phase A (Micro-Steps M1 & M2): Audio Ingestion + Demucs Vocal Isolation & 64kbps Opus Archival.
+        Keeps WarmDemucsCleaner resident in VRAM across all Phase A videos in the batch.
+        Returns True if the video is at >= M2_VOCALS_CLEANED.
         """
         vid = video_record["video_id"]
-        scen_path = self.workspace.scenarios_dir / f"{vid}.json"
-        srt_path = self.workspace.scenarios_dir / f"{vid}.diarized.srt"
-
         state = self.workspace.get_video_state(vid)
-        if state["step_rank"] >= STEP_RANK["M5_SCENARIO_BUILT"] and scen_path.exists():
-            return self.workspace.read_json(scen_path)
+        clean_opus = self.workspace.audio_clean_dir / f"{vid}.opus"
+        rms_json = self.workspace.audio_clean_dir / f"{vid}_rms.json"
 
-        # If download is disallowed (e.g. circuit breaker tripped), only process videos already at >= M1!
+        if state["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"] and clean_opus.exists() and clean_opus.stat().st_size > 1024 and rms_json.exists():
+            return True
+
         if not allow_youtube_download and state["step_rank"] < STEP_RANK["M1_DOWNLOADED"]:
-            return None
+            return False
 
-        local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_{vid}_"))
-        t_start_vid = time.time()
+        local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_pa_{vid}_"))
         try:
-            # --- MICRO-STEP M1: Temp Download -> Drive Staging ---
             print(f"   [1/5] Audio Ingestion (M1)....................... ", end="", flush=True)
-            raw_audio_path, info_meta = fetch_video_audio_m1(video_record, self.workspace)
+            raw_audio_path, _ = fetch_video_audio_m1(video_record, self.workspace)
             print("[DONE] (Source ready)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
-            # --- MICRO-STEP M2: Chunked Vocal Isolation + 64kbps Opus Archive ---
             print(f"   [2/5] Demucs Vocal Isolation (M2)................ ", end="", flush=True)
-            leveled_wav, rms_timeline = clean_vocals_m2(
+            clean_vocals_m2(
                 video_id=vid,
                 raw_audio_path=raw_audio_path,
                 workspace=self.workspace,
@@ -819,11 +816,25 @@ class Stage1AudioPipeline:
             )
             print("[DONE] (Clean vocal archive ready)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
+            return True
+        finally:
+            shutil.rmtree(local_tmp, ignore_errors=True)
 
-            # Free Demucs VRAM if tight before NeMo + MossFormer2 + Whisper
-            self.demucs.unload()
+    def run_phase_b_m3_m4(self, video_record: Dict[str, Any]) -> bool:
+        """
+        Phase B (Micro-Steps M3 & M4): NeMo MSDD Diarization + TitaNet Centroids + MossFormer2 Separation.
+        Keeps TitaNet and MossFormer2 resident in VRAM across all Phase B videos in the batch.
+        Returns True if the video is at >= M4_OVERLAPS_SEPARATED with all separated track clips ready.
+        """
+        vid = video_record["video_id"]
+        state = self.workspace.get_video_state(vid)
+        if state["step_rank"] < STEP_RANK["M2_VOCALS_CLEANED"]:
+            return False
 
-            # --- MICRO-STEP M3: Overlap-Aware NeMo MSDD Diarization + TitaNet Centroids ---
+        local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_pb_{vid}_"))
+        try:
+            leveled_wav, _ = ensure_local_leveled_16k_wav(vid, self.workspace, local_tmp)
+
             print(f"   [3/5] NeMo MSDD Diarization & TitaNet (M3)....... ", end="", flush=True)
             rttm_segs, centroids, overlaps = run_diarization_m3(
                 video_id=vid,
@@ -836,7 +847,6 @@ class Stage1AudioPipeline:
             print(f"[DONE] ({n_spk} speakers identified, {len(overlaps)} overlap window(s))")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
 
-            # --- MICRO-STEP M4: Surgical MossFormer2 Overlap Separation + Cosine Matching ---
             print(f"   [4/5] MossFormer2 Overlap Separation (M4)........ ", end="", flush=True)
             sep_manifest = run_overlap_separation_m4(
                 video_id=vid,
@@ -850,19 +860,77 @@ class Stage1AudioPipeline:
             )
             print(f"[DONE] ({len(sep_manifest)} cross-talk stream(s) unmixed)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
+            return True
+        finally:
+            shutil.rmtree(local_tmp, ignore_errors=True)
 
-            # Free NeMo Diarizer & MossFormer2 VRAM so Whisper large-v3 has ~13 GB free VRAM
-            self.diarizer.unload()
-            self.separator.unload()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            gc.collect()
+    def run_phase_c_m5(self, video_record: Dict[str, Any], t_start_vid: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """
+        Phase C (Micro-Step M5): Faster-Whisper large-v3 + CTC Forced Alignment + Punctuation + Scenario Assembly.
+        Keeps WarmASRAlignmentEngine resident in VRAM (~4.2 GB) across all Phase C videos in the batch.
+        """
+        vid = video_record["video_id"]
+        scen_path = self.workspace.scenarios_dir / f"{vid}.json"
+        srt_path = self.workspace.scenarios_dir / f"{vid}.diarized.srt"
 
-            # --- MICRO-STEP M5: Whisper + CTC Forced Alignment + Scenario Assembly ---
+        state = self.workspace.get_video_state(vid)
+        if state["step_rank"] >= STEP_RANK["M5_SCENARIO_BUILT"] and scen_path.exists():
+            return self.workspace.read_json(scen_path)
+
+        if state["step_rank"] < STEP_RANK["M4_OVERLAPS_SEPARATED"]:
+            return None
+
+        t0 = t_start_vid if t_start_vid is not None else time.time()
+        local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_pc_{vid}_"))
+        try:
+            leveled_wav, rms_timeline = ensure_local_leveled_16k_wav(vid, self.workspace, local_tmp)
+            rttm_segs, centroids, overlaps = run_diarization_m3(
+                video_id=vid,
+                leveled_16k_wav=leveled_wav,
+                workspace=self.workspace,
+                diarizer=self.diarizer,
+                is_short=bool(video_record.get("is_short")),
+            )
+
+            # Verify or self-heal M4 separated clips before unloading separator/diarizer
+            vid_diar_dir = self.workspace.diarization_dir / vid
+            sep_dir = vid_diar_dir / "sep_clips"
+            manifest_file = vid_diar_dir / "overlap_sep.json"
+            sep_manifest: List[Dict[str, Any]] = self.workspace.read_json(manifest_file, default=[]) or []
+
+            missing_tracks = False
+            if overlaps and not manifest_file.exists():
+                missing_tracks = True
+            else:
+                for rec in sep_manifest:
+                    for tr in rec.get("tracks", []):
+                        cp = Path(tr.get("clip_path", ""))
+                        if not cp.exists():
+                            alt_cp = sep_dir / cp.name
+                            if alt_cp.exists():
+                                tr["clip_path"] = str(alt_cp)
+                            else:
+                                missing_tracks = True
+                                break
+                    if missing_tracks:
+                        break
+
+            if missing_tracks:
+                # Unload ASR temporarily if loaded so MossFormer2 + TitaNet run cleanly
+                self.asr.unload()
+                sep_manifest = run_overlap_separation_m4(
+                    video_id=vid,
+                    leveled_16k_wav=leveled_wav,
+                    overlaps=overlaps,
+                    centroids=centroids,
+                    workspace=self.workspace,
+                    separator=self.separator,
+                    diarizer=self.diarizer,
+                    local_tmp_dir=local_tmp,
+                )
+                self.diarizer.unload()
+                self.separator.unload()
+
             print(f"   [5/5] Whisper ASR & Scenario Assembly (M5)....... ", end="", flush=True)
             word_ts, detected_lang = self.asr.transcribe_and_align_wav(
                 leveled_wav,
@@ -887,7 +955,11 @@ class Stage1AudioPipeline:
                 for track in ov_item.get("tracks", []):
                     clip_p = Path(track["clip_path"])
                     if not clip_p.exists():
-                        continue
+                        alt_p = sep_dir / clip_p.name
+                        if alt_p.exists():
+                            clip_p = alt_p
+                        else:
+                            continue
                     ov_words, _ = self.asr.transcribe_and_align_wav(
                         clip_p,
                         forced_language=detected_lang,
@@ -971,7 +1043,7 @@ class Stage1AudioPipeline:
             self.workspace.atomic_write_json(scen_path, scenario_payload)
             srt_path.write_text(format_diarized_srt(final_turns), encoding="utf-8-sig")
 
-            total_elapsed = round(time.time() - t_start_vid, 1)
+            total_elapsed = round(time.time() - t0, 1)
             print(f"[DONE] ({len(final_turns)} verified turns assembled)")
             print("   " + "-" * 70)
             print(f"   >>> [VERIFIED] Scenario M5_SCENARIO_BUILT in {total_elapsed}s:")
@@ -982,7 +1054,7 @@ class Stage1AudioPipeline:
 
             # Remove temporary per-window WAV clips now that scenario JSON is finalized
             shutil.rmtree(local_tmp / f"{vid}_sep_clips", ignore_errors=True)
-            shutil.rmtree(self.workspace.diarization_dir / vid / "sep_clips", ignore_errors=True)
+            shutil.rmtree(sep_dir, ignore_errors=True)
 
             self.workspace.advance_micro_step(
                 vid,
@@ -994,9 +1066,42 @@ class Stage1AudioPipeline:
                 metrics=scenario_payload["metrics"],
             )
             return scenario_payload
-
         finally:
             shutil.rmtree(local_tmp, ignore_errors=True)
+
+    def process_single_video(self, video_record: Dict[str, Any], allow_youtube_download: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Runs all unfinished micro-steps from M1 up to M5_SCENARIO_BUILT for a single video.
+        Resumes seamlessly from whichever micro-step was last saved on Google Drive!
+        """
+        vid = video_record["video_id"]
+        scen_path = self.workspace.scenarios_dir / f"{vid}.json"
+
+        state = self.workspace.get_video_state(vid)
+        if state["step_rank"] >= STEP_RANK["M5_SCENARIO_BUILT"] and scen_path.exists():
+            return self.workspace.read_json(scen_path)
+
+        if not allow_youtube_download and state["step_rank"] < STEP_RANK["M1_DOWNLOADED"]:
+            return None
+
+        t_start_vid = time.time()
+        if not self.run_phase_a_m1_m2(video_record, allow_youtube_download=allow_youtube_download):
+            return None
+        self.demucs.unload()
+
+        if not self.run_phase_b_m3_m4(video_record):
+            return None
+        self.diarizer.unload()
+        self.separator.unload()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        return self.run_phase_c_m5(video_record, t_start_vid=t_start_vid)
 
     def shutdown(self):
         self.demucs.unload()

@@ -704,15 +704,30 @@ def run_overlap_separation_m4(
     on Drive so any interruption resumes at the exact unfinished overlap window!
     """
     vid_diar_dir = workspace.diarization_dir / video_id
-    # Store temporary per-window audio clips in fast local SSD (/tmp) to prevent
-    # Google Drive FUSE orphaned WAV files when clips are later unlinked.
-    sep_dir = local_tmp_dir / f"{video_id}_sep_clips"
+    # Store per-window separated clips in diarization/{vid}/sep_clips/ so M4 -> M5
+    # resumes cleanly across Colab session disconnects; M5 deletes sep_clips once scenario is built.
+    sep_dir = vid_diar_dir / "sep_clips"
     sep_dir.mkdir(parents=True, exist_ok=True)
     manifest_file = vid_diar_dir / "overlap_sep.json"
 
     state = workspace.get_video_state(video_id)
     if state["step_rank"] >= STEP_RANK["M4_OVERLAPS_SEPARATED"] and manifest_file.exists():
-        return workspace.read_json(manifest_file, default=[]) or []
+        cached_records: List[Dict[str, Any]] = workspace.read_json(manifest_file, default=[]) or []
+        all_tracks_exist = True
+        for rec in cached_records:
+            for tr in rec.get("tracks", []):
+                cp = Path(tr.get("clip_path", ""))
+                if not cp.exists():
+                    alt_cp = sep_dir / cp.name
+                    if alt_cp.exists():
+                        tr["clip_path"] = str(alt_cp)
+                    else:
+                        all_tracks_exist = False
+                        break
+            if not all_tracks_exist:
+                break
+        if all_tracks_exist:
+            return cached_records
 
     if not overlaps:
         workspace.atomic_write_json(manifest_file, [])
@@ -720,7 +735,22 @@ def run_overlap_separation_m4(
         return []
 
     existing_records: List[Dict[str, Any]] = workspace.read_json(manifest_file, default=[]) or []
-    done_by_id = {r["window_id"]: r for r in existing_records if "window_id" in r}
+    done_by_id: Dict[str, Dict[str, Any]] = {}
+    for r in existing_records:
+        if "window_id" not in r:
+            continue
+        tracks_ok = True
+        for tr in r.get("tracks", []):
+            cp = Path(tr.get("clip_path", ""))
+            if not cp.exists():
+                alt_cp = sep_dir / cp.name
+                if alt_cp.exists():
+                    tr["clip_path"] = str(alt_cp)
+                else:
+                    tracks_ok = False
+                    break
+        if tracks_ok:
+            done_by_id[r["window_id"]] = r
 
     samples, sr = read_wav_float32(leveled_16k_wav)
     results: List[Dict[str, Any]] = []

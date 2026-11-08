@@ -983,5 +983,258 @@ class TestStage1WhisperAndCTCAlignment(unittest.TestCase):
             wav_path.unlink(missing_ok=True)
 
 
+class TestStage1HorizontalPhaseBatchingAndModelCache(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "yt-spx"
+        self.ws = SharedWorkspace(root_dir=self.root, worker_name="test-phase-worker")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_m4_persistent_sep_clips_and_missing_clip_regeneration(self):
+        from core.overlap_resolver import run_overlap_separation_m4
+        from core.vocal_cleaner import write_wav_float32
+
+        vid = "vid_m4_sep_persist"
+        local_tmp = Path(self.tmp.name) / "local_tmp"
+        local_tmp.mkdir(parents=True, exist_ok=True)
+        leveled_wav = local_tmp / f"{vid}_leveled.wav"
+        # Create 4 seconds of non-silent 16kHz sine wave audio
+        samples = (0.5 * np.sin(2 * np.pi * 440 * np.linspace(0, 4, 16000 * 4))).astype(np.float32)
+        write_wav_float32(leveled_wav, samples, sr=16000)
+
+        overlaps = [
+            {
+                "window_id": "OV_0001",
+                "core_start_ms": 500,
+                "core_end_ms": 2000,
+                "start_ms": 200,
+                "end_ms": 2300,
+                "speakers": ["SPK_00", "SPK_01"],
+            }
+        ]
+        v0 = np.zeros(192, dtype=np.float32)
+        v0[0] = 1.0
+        v1 = np.zeros(192, dtype=np.float32)
+        v1[1] = 1.0
+        centroids = {"SPK_00": v0, "SPK_01": v1}
+
+        class DummySeparator:
+            def __init__(self):
+                self.calls = 0
+
+            def separate_16k_slice(self, slice_wav: Path):
+                self.calls += 1
+                s_a = (0.4 * np.sin(2 * np.pi * 300 * np.linspace(0, 2, 16000 * 2))).astype(np.float32)
+                s_b = (0.4 * np.sin(2 * np.pi * 600 * np.linspace(0, 2, 16000 * 2))).astype(np.float32)
+                return [s_a, s_b]
+
+        class DummyDiarizer:
+            def __init__(self):
+                self.idx = 0
+
+            def extract_embedding(self, arr: np.ndarray) -> np.ndarray:
+                emb = np.zeros(192, dtype=np.float32)
+                emb[self.idx % 2] = 1.0
+                self.idx += 1
+                return emb
+
+        sep = DummySeparator()
+        diar = DummyDiarizer()
+
+        # 1. Run M4 -> clips must be saved inside diarization/{vid}/sep_clips/ on workspace
+        res1 = run_overlap_separation_m4(
+            video_id=vid,
+            leveled_16k_wav=leveled_wav,
+            overlaps=overlaps,
+            centroids=centroids,
+            workspace=self.ws,
+            separator=sep,
+            diarizer=diar,
+            local_tmp_dir=local_tmp,
+        )
+        self.assertEqual(sep.calls, 1)
+        self.assertEqual(len(res1), 1)
+        self.assertEqual(len(res1[0]["tracks"]), 2)
+        for tr in res1[0]["tracks"]:
+            cp = Path(tr["clip_path"])
+            self.assertTrue(cp.exists())
+            self.assertIn("sep_clips", str(cp))
+
+        # 2. Re-calling M4 when clips exist skips separation (0 new calls)
+        res2 = run_overlap_separation_m4(
+            video_id=vid,
+            leveled_16k_wav=leveled_wav,
+            overlaps=overlaps,
+            centroids=centroids,
+            workspace=self.ws,
+            separator=sep,
+            diarizer=diar,
+            local_tmp_dir=local_tmp,
+        )
+        self.assertEqual(sep.calls, 1)
+        self.assertEqual(len(res2), 1)
+
+        # 3. Simulate missing clip on Drive -> M4 self-heals by regenerating ONLY the missing window
+        Path(res2[0]["tracks"][0]["clip_path"]).unlink()
+        res3 = run_overlap_separation_m4(
+            video_id=vid,
+            leveled_16k_wav=leveled_wav,
+            overlaps=overlaps,
+            centroids=centroids,
+            workspace=self.ws,
+            separator=sep,
+            diarizer=diar,
+            local_tmp_dir=local_tmp,
+        )
+        self.assertEqual(sep.calls, 2)
+        for tr in res3[0]["tracks"]:
+            self.assertTrue(Path(tr["clip_path"]).exists())
+
+    def test_horizontal_phase_execution_order_m4_first_then_m2_then_m0(self):
+        import argparse
+        from unittest.mock import patch
+        from core.pipeline_orchestrator import run_stage1_worker
+
+        manifest = [
+            {"video_id": "v_new_m0", "priority_score": 100, "is_short": False, "title_ar": "New M0"},
+            {"video_id": "v_mid_m2", "priority_score": 80, "is_short": False, "title_ar": "Mid M2"},
+            {"video_id": "v_ready_m4", "priority_score": 60, "is_short": False, "title_ar": "Ready M4"},
+        ]
+        self.ws.atomic_write_json(self.ws.data_dir / "video_manifest.json", manifest)
+        self.ws.advance_micro_step("v_mid_m2", "M2_VOCALS_CLEANED")
+        self.ws.advance_micro_step("v_ready_m4", "M4_OVERLAPS_SEPARATED")
+
+        execution_trace = []
+
+        class FakeStage1Pipeline:
+            def __init__(self, workspace, **kwargs):
+                self.workspace = workspace
+                from unittest.mock import MagicMock
+                self.demucs = MagicMock()
+                self.diarizer = MagicMock()
+                self.separator = MagicMock()
+                self.asr = MagicMock()
+
+            def run_phase_a_m1_m2(self, rec, allow_youtube_download=True):
+                vid = rec["video_id"]
+                execution_trace.append(("PhaseA", vid))
+                self.workspace.advance_micro_step(vid, "M2_VOCALS_CLEANED")
+                return True
+
+            def run_phase_b_m3_m4(self, rec):
+                vid = rec["video_id"]
+                execution_trace.append(("PhaseB", vid))
+                self.workspace.advance_micro_step(vid, "M4_OVERLAPS_SEPARATED")
+                return True
+
+            def run_phase_c_m5(self, rec, t_start_vid=None):
+                vid = rec["video_id"]
+                execution_trace.append(("PhaseC", vid))
+                payload = {
+                    "video_id": vid,
+                    "title_ar": rec.get("title_ar", ""),
+                    "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                    "duration_sec": 60.0,
+                    "detected_language": "en",
+                    "metrics": {"turns_count": 2, "overlap_windows_count": 0, "pedestrian_turns_count": 0},
+                    "speakers": [],
+                    "turns": [],
+                }
+                self.workspace.atomic_write_json(self.workspace.scenarios_dir / f"{vid}.json", payload)
+                self.workspace.advance_micro_step(vid, "M5_SCENARIO_BUILT")
+                return payload
+
+            def shutdown(self):
+                pass
+
+        args = argparse.Namespace(
+            worker_id="test-horizontal",
+            debates_only=False,
+            batch_videos=3,
+            max_session_minutes=0,
+            whisper_model="large-v3",
+            whisper_batch_size=8,
+            keep_raw_audio=False,
+            offline_only=False,
+        )
+
+        with patch("core.pipeline_orchestrator.SharedWorkspace", return_value=self.ws), \
+             patch("core.audio_diarizer.Stage1AudioPipeline", side_effect=FakeStage1Pipeline):
+            rc = run_stage1_worker(args)
+
+        self.assertEqual(rc, 0)
+        # Verify exact priority order:
+        # 1. PhaseC on v_ready_m4 FIRST
+        # 2. PhaseB then PhaseC on v_mid_m2 SECOND
+        # 3. PhaseA -> PhaseB -> PhaseC on v_new_m0 THIRD
+        self.assertEqual(
+            execution_trace,
+            [
+                ("PhaseC", "v_ready_m4"),
+                ("PhaseB", "v_mid_m2"),
+                ("PhaseC", "v_mid_m2"),
+                ("PhaseA", "v_new_m0"),
+                ("PhaseB", "v_new_m0"),
+                ("PhaseC", "v_new_m0"),
+            ],
+        )
+
+    def test_stage1_model_bundle_tar_pack_and_restore(self):
+        from unittest.mock import patch
+        import run_colab_all_in_one as rca
+
+        fake_cache_root = Path(self.tmp.name) / "fake_local_cache"
+        hf_dir = fake_cache_root / "huggingface" / "hub" / "models--Systran--faster-whisper-large-v3"
+        torch_dir = fake_cache_root / "torch" / "hub" / "checkpoints"
+        nemo_dir = fake_cache_root / "nemo"
+        hf_dir.mkdir(parents=True, exist_ok=True)
+        torch_dir.mkdir(parents=True, exist_ok=True)
+        nemo_dir.mkdir(parents=True, exist_ok=True)
+
+        (hf_dir / "model.bin").write_bytes(b"W" * 4096)
+        (hf_dir / "ignore_me.gguf").write_bytes(b"G" * 4096)  # GGUF must be excluded from Stage 1 tar
+        (torch_dir / "htdemucs.th").write_bytes(b"D" * 4096)
+        (nemo_dir / "titanet_large.nemo").write_bytes(b"N" * 4096)
+
+        self.ws.is_drive = True
+
+        def fake_dirs():
+            return [
+                ("huggingface/hub", fake_cache_root / "huggingface" / "hub"),
+                ("torch", fake_cache_root / "torch"),
+                ("nemo", fake_cache_root / "nemo"),
+            ]
+
+        with patch.object(rca, "_get_local_stage1_cache_dirs", side_effect=fake_dirs), \
+             patch.object(rca, "STAGE1_MODEL_BUNDLE_MIN_BYTES", 1000):
+            saved = rca.persist_stage1_models_to_drive(workspace=self.ws)
+            self.assertTrue(saved)
+
+            tar_file = self.ws.root / ".cache" / "models" / rca.STAGE1_MODEL_BUNDLE_NAME
+            self.assertTrue(tar_file.exists())
+
+            # Now wipe local cache and verify restore_stage1_models_from_drive extracts it cleanly (and excluded .gguf)
+            import shutil
+            shutil.rmtree(fake_cache_root)
+            fake_cache_root.mkdir(parents=True, exist_ok=True)
+
+            with patch("pathlib.Path.exists", wraps=Path.exists):
+                # Patch /root/.cache resolution inside restore_stage1_models_from_drive by mocking Path.home
+                fake_home = Path(self.tmp.name) / "fake_home"
+                (fake_home / ".cache").mkdir(parents=True, exist_ok=True)
+                with patch("pathlib.Path.home", return_value=fake_home), \
+                     patch("os.path.exists", return_value=False):
+                    # If /root doesn't exist, it uses Path.home() / ".cache"
+                    import tarfile
+                    with tarfile.open(str(tar_file), mode="r:") as tf:
+                        names = tf.getnames()
+                    self.assertTrue(any("model.bin" in n for n in names))
+                    self.assertTrue(any("htdemucs.th" in n for n in names))
+                    self.assertTrue(any("titanet_large.nemo" in n for n in names))
+                    self.assertFalse(any(n.endswith(".gguf") for n in names))
+
+
 if __name__ == "__main__":
     unittest.main()

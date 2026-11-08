@@ -60,7 +60,7 @@ def setup_colab_drive() -> bool:
     local_torch_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("TORCH_HOME", str(local_torch_cache))
 
-    # Clean up any legacy experimental model tar archive on Drive to save space and prevent FUSE hang
+    # Clean up any legacy v1 experimental model tar archive on Drive
     if ws.is_drive:
         legacy_models_tar = ws.root / ".cache" / "models" / "stage1_models.tar"
         if legacy_models_tar.exists():
@@ -84,6 +84,141 @@ def setup_colab_drive() -> bool:
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True
+
+
+STAGE1_MODEL_BUNDLE_NAME = "stage1_models_v2.tar"
+STAGE1_MODEL_BUNDLE_MIN_BYTES = 1_500_000_000  # ~1.5 GB sanity threshold for full Stage 1 weights
+
+
+def _get_local_stage1_cache_dirs() -> List[Tuple[str, Path]]:
+    """Returns (arcname_prefix, local_dir_path) for Stage 1 model caches on fast local NVMe SSD."""
+    cache_root = Path("/root/.cache") if Path("/root").exists() else (Path.home() / ".cache")
+    return [
+        ("huggingface/hub", cache_root / "huggingface" / "hub"),
+        ("torch", cache_root / "torch"),
+        ("nemo", cache_root / "nemo"),
+    ]
+
+
+def restore_stage1_models_from_drive(workspace: Optional[Any] = None) -> bool:
+    """
+    Restores Stage 1 model weights (Faster-Whisper large-v3, CTC Aligner, Punctuation,
+    Demucs htdemucs, NeMo MSDD/TitaNet, MossFormer2) from the single-file uncompressed
+    archive on Google Drive (.cache/models/stage1_models_v2.tar) to local NVMe SSD in ~35s.
+    """
+    import tarfile
+    import time
+
+    try:
+        if workspace is None:
+            from core.drive_sync import SharedWorkspace
+            workspace = SharedWorkspace()
+        if not workspace.is_drive:
+            return False
+
+        tar_path = workspace.root / ".cache" / "models" / STAGE1_MODEL_BUNDLE_NAME
+        if not tar_path.exists() or tar_path.stat().st_size < STAGE1_MODEL_BUNDLE_MIN_BYTES:
+            return False
+
+        cache_root = Path("/root/.cache") if Path("/root").exists() else (Path.home() / ".cache")
+        marker = cache_root / ".yt_spx_stage1_models_restored"
+        if marker.exists():
+            return True
+
+        # Check if local cache already has Whisper large-v3 & torch hub populated
+        hf_hub = cache_root / "huggingface" / "hub"
+        if hf_hub.exists() and any(hf_hub.glob("*whisper*large-v3*")) and (cache_root / "torch").exists():
+            marker.write_text("ok", encoding="utf-8")
+            return True
+
+        t0 = time.time()
+        size_gb = round(tar_path.stat().st_size / (1024 ** 3), 2)
+        print(f"   -> Restoring Stage 1 model bundle ({size_gb} GB) from Google Drive to fast local NVMe SSD...", flush=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(str(tar_path), mode="r:") as tf:
+            tf.extractall(path=str(cache_root))
+        marker.write_text(str(time.time()), encoding="utf-8")
+        elapsed = round(time.time() - t0, 1)
+        print(f"   -> [OK] Stage 1 models restored to local SSD in {elapsed}s (0 HuggingFace/NGC downloads needed)!", flush=True)
+        return True
+    except Exception as exc:
+        print(f"   [-] Stage 1 model bundle restore note ({exc}); models will download from HuggingFace/NGC as needed.", flush=True)
+        return False
+
+
+def persist_stage1_models_to_drive(workspace: Optional[Any] = None) -> bool:
+    """
+    Packs Stage 1 local NVMe model caches (huggingface/hub, torch, nemo) into a single
+    uncompressed tar archive on Google Drive (.cache/models/stage1_models_v2.tar),
+    excluding any 14B GGUF files so Stage 1 bundle stays compact (~5-6 GB).
+    Called automatically at the end of a Stage 1 batch if the bundle does not yet exist on Drive.
+    """
+    import tarfile
+    import time
+
+    try:
+        if workspace is None:
+            from core.drive_sync import SharedWorkspace
+            workspace = SharedWorkspace()
+        if not workspace.is_drive:
+            return False
+
+        models_dir = workspace.root / ".cache" / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        tar_path = models_dir / STAGE1_MODEL_BUNDLE_NAME
+        if tar_path.exists() and tar_path.stat().st_size >= STAGE1_MODEL_BUNDLE_MIN_BYTES:
+            return True
+
+        dirs_to_pack = [(arc, p) for arc, p in _get_local_stage1_cache_dirs() if p.exists()]
+        if not dirs_to_pack:
+            return False
+
+        # Compute total eligible bytes first to ensure all Stage 1 models were actually downloaded
+        total_bytes = 0
+        for _, p in dirs_to_pack:
+            for f in p.rglob("*"):
+                if f.is_file() and not f.name.endswith(".gguf") and not f.name.endswith(".lock"):
+                    try:
+                        total_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+
+        if total_bytes < STAGE1_MODEL_BUNDLE_MIN_BYTES:
+            return False
+
+        if not workspace.acquire_lock("_stage1_models_tar", ttl_sec=900, verify_delay_sec=0.2):
+            return False
+
+        try:
+            if tar_path.exists() and tar_path.stat().st_size >= STAGE1_MODEL_BUNDLE_MIN_BYTES:
+                return True
+
+            t0 = time.time()
+            size_gb = round(total_bytes / (1024 ** 3), 2)
+            print(f"\n[Stage 1 Cache] Saving Stage 1 model bundle ({size_gb} GB) to Google Drive ({tar_path.name}) for ~35s future startups...", flush=True)
+            tmp_local_tar = Path("/tmp") / f".{STAGE1_MODEL_BUNDLE_NAME}.tmp"
+            tmp_local_tar.unlink(missing_ok=True)
+
+            def _exclude_gguf_and_locks(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+                if tarinfo.name.endswith(".gguf") or tarinfo.name.endswith(".lock"):
+                    return None
+                return tarinfo
+
+            with tarfile.open(str(tmp_local_tar), mode="w:") as tf:
+                for arc_prefix, local_dir in dirs_to_pack:
+                    tf.add(str(local_dir), arcname=arc_prefix, filter=_exclude_gguf_and_locks)
+
+            from core.colab_runner import _copy_large_file_chunked
+            _copy_large_file_chunked(tmp_local_tar, tar_path, label="Stage 1 Models -> Drive")
+            tmp_local_tar.unlink(missing_ok=True)
+            elapsed = round(time.time() - t0, 1)
+            print(f"[Stage 1 Cache] [OK] Cached {tar_path.name} ({size_gb} GB) on Drive in {elapsed}s! Future Colab sessions will restore it in ~35s.", flush=True)
+            return True
+        finally:
+            workspace.release_lock("_stage1_models_tar")
+    except Exception as exc:
+        print(f"[Stage 1 Cache] Note while caching Stage 1 model bundle: {exc}", flush=True)
+        return False
 
 
 def _ensure_deno_runtime() -> None:
@@ -328,6 +463,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     if _verify_stage1_runtime_health():
         print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
         _ensure_deno_runtime()
+        restore_stage1_models_from_drive()
         return
 
     _ensure_deno_runtime()
@@ -398,6 +534,8 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     )
     if abi_check.returncode != 0:
         _fast_install(["ml-dtypes>=0.5.4"], constraints_path, extra_args=["-U"])
+
+    restore_stage1_models_from_drive()
 
 
 def _verify_stage2_runtime_health() -> bool:
