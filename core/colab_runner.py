@@ -308,6 +308,110 @@ def ensure_cuda_runtime_loaded() -> None:
                     pass
 
 
+def _copy_large_file_chunked(src_path: Path, dst_path: Path, label: str = "Copying") -> None:
+    """Streams large GGUF model files (10GB+) in 64MB chunks with live progress and minimal RAM usage."""
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dst = dst_path.with_suffix(dst_path.suffix + ".tmp")
+    total_size = src_path.stat().st_size
+    copied = 0
+    t0 = time.time()
+    last_log = t0
+    chunk_size = 64 * 1024 * 1024  # 64 MB
+
+    with open(src_path, "rb") as fsrc, open(tmp_dst, "wb") as fdst:
+        while True:
+            buf = fsrc.read(chunk_size)
+            if not buf:
+                break
+            fdst.write(buf)
+            copied += len(buf)
+            now = time.time()
+            if now - last_log >= 15.0 or copied >= total_size:
+                last_log = now
+                pct = round((copied / max(1, total_size)) * 100, 1)
+                mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
+                print(
+                    f"   [{label}] {pct}% ({round(copied / (1024**3), 2)} GB / "
+                    f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
+                    flush=True,
+                )
+    tmp_dst.replace(dst_path)
+
+
+def _resolve_and_cache_gguf_model(target_repo: str, target_file: str, hf_download_fn: Any) -> str:
+    """
+    Resolves GGUF model path with 3-tier caching so Colab never has to wait 17 minutes on HuggingFace after Run #1:
+      Tier 1: Fast local NVMe SSD (/content/models/{target_file} or ~/.cache/huggingface/hub) -> 0s wait
+      Tier 2: Persistent Google Drive (/content/drive/MyDrive/yt-spx/.cache/models/{target_file}) -> ~90s copy to local SSD
+      Tier 3: First-time Hugging Face download -> automatically backs up to Google Drive for all future sessions!
+    """
+    from core.drive_sync import resolve_drive_root
+
+    min_valid_size = 4_000_000_000  # >4 GB sanity check for 14B Q5 GGUF
+    drive_root = resolve_drive_root()
+    drive_cache_dir = (drive_root / ".cache" / "models") if drive_root else None
+    drive_model_file = (drive_cache_dir / target_file) if drive_cache_dir else None
+
+    local_dir = Path("/content/models") if Path("/content").exists() else (Path.home() / ".cache" / "yt-spx" / "models")
+    local_model_file = local_dir / target_file
+
+    # Tier 1A: Local NVMe SSD direct path
+    if local_model_file.exists() and local_model_file.stat().st_size >= min_valid_size:
+        print(f"[+] Found GGUF model on fast local SSD: {local_model_file} (0s wait)")
+        if drive_model_file and (not drive_model_file.exists() or drive_model_file.stat().st_size < min_valid_size):
+            try:
+                print(f"[+] Backing up local model to Google Drive cache for future sessions...", flush=True)
+                _copy_large_file_chunked(local_model_file, drive_model_file, label="Drive Backup")
+            except Exception as e:
+                print(f"[-] Drive backup note: {e}")
+        return str(local_model_file)
+
+    # Tier 1B: Existing Hugging Face local cache in current VM
+    try:
+        hf_matches = [
+            p for p in (Path.home() / ".cache" / "huggingface" / "hub").glob(f"**/{target_file}")
+            if p.is_file() and p.stat().st_size >= min_valid_size
+        ]
+    except Exception:
+        hf_matches = []
+
+    if hf_matches:
+        hf_existing = hf_matches[0].resolve()
+        print(f"[+] Found GGUF model in local HuggingFace cache: {hf_existing} (0s wait)")
+        if drive_model_file and (not drive_model_file.exists() or drive_model_file.stat().st_size < min_valid_size):
+            try:
+                print(f"[+] Persisting model to Google Drive ({drive_model_file}) so future sessions skip HuggingFace...", flush=True)
+                _copy_large_file_chunked(hf_existing, drive_model_file, label="Persist to Drive")
+            except Exception as e:
+                print(f"[-] Drive backup note: {e}")
+        return str(hf_existing)
+
+    # Tier 2: Persistent Google Drive cache (~90s high-speed internal copy vs 17m internet download)
+    if drive_model_file and drive_model_file.exists() and drive_model_file.stat().st_size >= min_valid_size:
+        print(f"[+] Found persistent GGUF model on Google Drive: {drive_model_file}")
+        print(f"[+] Streaming from Drive to fast local NVMe SSD (~1-2 min, no HuggingFace download needed)...", flush=True)
+        try:
+            _copy_large_file_chunked(drive_model_file, local_model_file, label="Drive -> Local SSD")
+            return str(local_model_file)
+        except Exception as copy_err:
+            print(f"[-] Local SSD copy note ({copy_err}); loading directly from Drive path...")
+            return str(drive_model_file)
+
+    # Tier 3: First-time download from Hugging Face
+    print(f"[+] First-time download from Hugging Face: {target_repo}/{target_file} (~10.4 GB)...", flush=True)
+    downloaded_path = Path(hf_download_fn(repo_id=target_repo, filename=target_file)).resolve()
+
+    if drive_model_file and downloaded_path.exists() and downloaded_path.stat().st_size >= min_valid_size:
+        try:
+            print(f"[+] Saving model permanently to Google Drive ({drive_model_file}) for fast 90s future startups...", flush=True)
+            _copy_large_file_chunked(downloaded_path, drive_model_file, label="Save to Drive")
+            print(f"[OK] Model cached on Google Drive! Future Colab sessions will never need to download it from Hugging Face again.")
+        except Exception as persist_err:
+            print(f"[-] Drive cache warning ({persist_err}); continuing with local model.")
+
+    return str(downloaded_path)
+
+
 class LocalGPUClient:
     """
     Runs Qwen 3 14B / Qwen 2.5 14B Instruct directly on the Google Colab GPU (T4 15GB / L4 / A100).
@@ -375,14 +479,14 @@ class LocalGPUClient:
                     target_file = gguf_filename if is_custom_repo else (preferred_gguf_filename or gguf_filename)
                     model_path = None
                     try:
-                        print(f"[+] Attempting primary GGUF: {target_repo}/{target_file} (~10.4 GB)...")
-                        model_path = hf_hub_download(repo_id=target_repo, filename=target_file)
+                        print(f"[+] Resolving primary GGUF: {target_repo}/{target_file} (~10.4 GB)...")
+                        model_path = _resolve_and_cache_gguf_model(target_repo, target_file, hf_hub_download)
                     except Exception as primary_dl_err:
                         print(
                             f"[-] Primary GGUF ({target_repo}/{target_file}) unavailable: {primary_dl_err}. "
                             f"Falling back to {gguf_repo}/{gguf_filename}..."
                         )
-                        model_path = hf_hub_download(repo_id=gguf_repo, filename=gguf_filename)
+                        model_path = _resolve_and_cache_gguf_model(gguf_repo, gguf_filename, hf_hub_download)
 
                     # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~1.2 GB at 12,288 context)
                     try:
