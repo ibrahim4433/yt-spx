@@ -441,7 +441,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
             return False
 
     if not _test_llama_cpp():
-        print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Qwen 2.5 14B Q5_K_M GGUF)...")
+        print("   -> Installing pre-built CUDA wheel for llama-cpp-python (Qwen 3 / Qwen 2.5 14B Q5_K_M GGUF)...")
         w_dir = _get_drive_wheels_dir()
         py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
         if w_dir:
