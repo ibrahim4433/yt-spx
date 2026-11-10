@@ -629,34 +629,40 @@ class LocalGPUClient:
                         )
                         model_path = _resolve_and_cache_gguf_model(gguf_repo, gguf_filename, hf_hub_download)
 
-                    # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~1.9 GB at 20,480 context, total ~12.8-13.2 GB VRAM on T4)
+                    print(
+                        f"[+] Loading GGUF weights + 8-bit KV cache into GPU VRAM "
+                        f"(n_ctx={context_length}, n_batch=2048, n_ubatch=512)...",
+                        flush=True,
+                    )
                     try:
                         self.llm = Llama(
                             model_path=model_path,
                             n_gpu_layers=-1,
                             n_ctx=context_length,
                             n_batch=2048,
+                            n_ubatch=512,
                             type_k=8,
                             type_v=8,
                             flash_attn=True,
                             verbose=False,
                         )
                     except Exception as fa_err:
-                        print(f"[-] GGUF flash_attn/20k init note ({fa_err}); retrying with step-down attention/batch...")
-                        fallback_ctx = min(context_length, 16384)
+                        print(f"[-] GGUF flash_attn note ({fa_err}); retrying with standard attention...", flush=True)
+                        fallback_ctx = min(context_length, 14336)
                         self.context_length = fallback_ctx
                         self.llm = Llama(
                             model_path=model_path,
                             n_gpu_layers=-1,
                             n_ctx=fallback_ctx,
-                            n_batch=1024,
+                            n_batch=512,
+                            n_ubatch=512,
                             type_k=8,
                             type_v=8,
                             flash_attn=False,
                             verbose=False,
                         )
                     self.backend = "gguf"
-                    print(f"[+] GGUF Q5_K_M + 8-bit KV Cache ({self.context_length} ctx, n_batch=2048) loaded into VRAM!")
+                    print(f"[+] GGUF Q5_K_M + 8-bit KV Cache ({self.context_length} ctx) loaded into VRAM!", flush=True)
                     return
                 else:
                     print("[-] llama-cpp-python lacks CUDA offload; falling back to Transformers 4-bit NF4.")

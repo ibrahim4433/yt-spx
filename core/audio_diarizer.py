@@ -446,6 +446,8 @@ class WarmASRAlignmentEngine:
 
     def _ensure_aligner(self):
         if self._align_model is None:
+            import warnings
+            warnings.filterwarnings("ignore", message=".*torch_dtype.*deprecated.*")
             try:
                 import unidecode
             except ImportError:
@@ -455,15 +457,27 @@ class WarmASRAlignmentEngine:
             dtype = torch.float16 if self.device == "cuda" else torch.float32
             try:
                 from ctc_forced_aligner import load_alignment_model
-                self._align_model, self._align_tokenizer = load_alignment_model(self.device, dtype=dtype)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self._align_model, self._align_tokenizer = load_alignment_model(self.device, dtype=dtype)
             except (ImportError, AttributeError):
                 from transformers import AutoModelForCTC, AutoTokenizer
                 m_name = "MahmoudAshraf/mms-300m-1130-forced-aligner"
-                self._align_model = AutoModelForCTC.from_pretrained(m_name, torch_dtype=dtype).to(self.device)
+                try:
+                    self._align_model = AutoModelForCTC.from_pretrained(m_name, dtype=dtype).to(self.device)
+                except TypeError:
+                    self._align_model = AutoModelForCTC.from_pretrained(m_name, torch_dtype=dtype).to(self.device)
                 self._align_tokenizer = AutoTokenizer.from_pretrained(m_name)
 
     def _ensure_punct(self):
         if self._punct_model is None:
+            import warnings
+            warnings.filterwarnings("ignore", message=".*pipelines sequentially on GPU.*")
+            try:
+                from transformers.utils import logging as hf_logging
+                hf_logging.set_verbosity_error()
+            except Exception:
+                pass
             import torch
             from deepmultilingualpunctuation import PunctuationModel
             self._punct_model = PunctuationModel(model="kredor/punctuate-all")
@@ -766,6 +780,35 @@ class WarmASRAlignmentEngine:
                     romanize=True,
                     language=iso3,
                 )
+
+                # Ensure `<star>` column is appended to emissions when produced by direct AutoModelForCTC forward pass:
+                # mms-300m-1130-forced-aligner outputs 31 classes (0..30), and get_alignments maps `<star>` to index 31.
+                def _append_star_column(em_obj):
+                    try:
+                        if isinstance(em_obj, torch.Tensor) and em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
+                            star_col = torch.zeros((em_obj.size(0), 1), dtype=em_obj.dtype, device=em_obj.device)
+                            return torch.cat([em_obj, star_col], dim=-1)
+                        elif isinstance(em_obj, np.ndarray) and em_obj.ndim == 2:
+                            star_col = np.zeros((em_obj.shape[0], 1), dtype=em_obj.dtype)
+                            return np.concatenate([em_obj, star_col], axis=-1)
+                    except Exception:
+                        pass
+                    return em_obj
+
+                if "<star>" in tokens_starred:
+                    vocab_dict = None
+                    if isinstance(self._align_tokenizer, dict):
+                        vocab_dict = self._align_tokenizer
+                    elif hasattr(self._align_tokenizer, "get_vocab"):
+                        try:
+                            vocab_dict = self._align_tokenizer.get_vocab()
+                        except Exception:
+                            vocab_dict = None
+                    if isinstance(vocab_dict, dict) and "<star>" not in vocab_dict:
+                        em_cols = emissions.shape[-1] if hasattr(emissions, "shape") and len(emissions.shape) >= 2 else None
+                        if em_cols == len(vocab_dict):
+                            emissions = _append_star_column(emissions)
+
                 try:
                     segments, scores, blank_token = get_alignments(
                         emissions,
@@ -779,6 +822,16 @@ class WarmASRAlignmentEngine:
                             em_tensor = em_tensor.squeeze(0)
                         segments, scores, blank_token = get_alignments(
                             em_tensor,
+                            tokens_starred,
+                            self._align_tokenizer,
+                        )
+                    else:
+                        raise
+                except Exception as align_err:
+                    if "within [0," in str(align_err) or "targets" in str(align_err).lower():
+                        emissions = _append_star_column(emissions)
+                        segments, scores, blank_token = get_alignments(
+                            emissions,
                             tokens_starred,
                             self._align_tokenizer,
                         )
@@ -802,12 +855,15 @@ class WarmASRAlignmentEngine:
         if not mapped_words or language not in PUNCT_SUPPORTED_LANGS:
             return
         try:
+            import warnings
             self._ensure_punct()
             words_only = [w["word"] for w in mapped_words]
-            try:
-                labeled = self._punct_model.predict(words_only, chunk_size=230)
-            except TypeError:
-                labeled = self._punct_model.predict(words_only)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*pipelines sequentially on GPU.*")
+                try:
+                    labeled = self._punct_model.predict(words_only, chunk_size=230)
+                except TypeError:
+                    labeled = self._punct_model.predict(words_only)
             ending_puncts = ".?!"
             model_puncts = ".,;:!?"
             is_acronym = lambda s: bool(re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", s))

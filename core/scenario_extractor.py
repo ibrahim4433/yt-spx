@@ -1079,7 +1079,7 @@ def _build_round2_transcript_excerpt(
 
 class Stage2ScenarioExtractor:
     """
-    Runs Qwen 2.5 14B Instruct (Q5_K_M GGUF, 16,384 ctx, 8-bit KV cache) over
+    Runs Qwen 2.5 14B Instruct (Q5_K_M GGUF, 20,480 ctx, 8-bit KV cache) over
     Stage 1 Scenario JSON files, saving every episode window immediately to Drive.
     """
 

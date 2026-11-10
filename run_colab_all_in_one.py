@@ -136,7 +136,10 @@ def restore_stage1_models_from_drive(workspace: Optional[Any] = None) -> bool:
         print(f"   -> Restoring Stage 1 model bundle ({size_gb} GB) from Google Drive to fast local NVMe SSD...", flush=True)
         cache_root.mkdir(parents=True, exist_ok=True)
         with tarfile.open(str(tar_path), mode="r:") as tf:
-            tf.extractall(path=str(cache_root))
+            try:
+                tf.extractall(path=str(cache_root), filter="fully_trusted")
+            except TypeError:
+                tf.extractall(path=str(cache_root))
         marker.write_text(str(time.time()), encoding="utf-8")
         elapsed = round(time.time() - t0, 1)
         print(f"   -> [OK] Stage 1 models restored to local SSD in {elapsed}s (0 HuggingFace/NGC downloads needed)!", flush=True)
@@ -539,16 +542,20 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
 
 
 def _verify_stage2_runtime_health() -> bool:
-    try:
-        from core.colab_runner import ensure_cuda_runtime_loaded
-        ensure_cuda_runtime_loaded()
-        import llama_cpp
-        if not llama_cpp.llama_supports_gpu_offload():
-            return False
-        import transformers, accelerate, bitsandbytes
-        return True
-    except Exception:
-        return False
+    """Runs in a short-lived child process so the parent bootstrapper never holds a CUDA context on Device 0."""
+    check_code = (
+        "from core.colab_runner import ensure_cuda_runtime_loaded; "
+        "ensure_cuda_runtime_loaded(); "
+        "import llama_cpp, transformers, accelerate, bitsandbytes; "
+        "assert llama_cpp.llama_supports_gpu_offload()"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", check_code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return res.returncode == 0
 
 
 def ensure_stage2_dependencies(constraints_path: Path) -> None:

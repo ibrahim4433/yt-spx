@@ -613,7 +613,7 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     budget_label = f"{args.max_session_minutes} min" if args.max_session_minutes > 0 else "unlimited (until disconnect)"
     print("=" * 72)
     print(f"[Stage 2 Local LLM Extraction Worker] Worker: {workspace.worker_id}")
-    print(f"  Model: {args.llm_model} (12,288 ctx) | Max Batch: {args.stage2_batch_videos} videos | Watcher: {'ON' if should_wait else 'OFF'}")
+    print(f"  Model: {args.llm_model} ({args.llm_context_length:,} ctx) | Max Batch: {args.stage2_batch_videos} videos | Watcher: {'ON' if should_wait else 'OFF'}")
     print(f"  M5 Scenarios Ready: {len(candidates)} | Session Budget: {budget_label}")
     print("=" * 72, flush=True)
 
@@ -633,9 +633,13 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
     consecutive_errors = 0
     last_error_sig = ""
     exit_code = 0
+    first_pass = True
 
     while True:
-        candidates = select_stage2_candidates(workspace, manifest)
+        if first_pass:
+            first_pass = False
+        else:
+            candidates = select_stage2_candidates(workspace, manifest)
         if not candidates:
             if not should_wait:
                 print("\n[Stage 2] No further M5 scenarios waiting. Stopping cleanly.")
@@ -1168,7 +1172,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--whisper-model", default="large-v3", help="Faster-Whisper model size.")
     p.add_argument("--whisper-batch-size", type=int, default=16, help="BatchedInferencePipeline batch size (default 16 scales to ~12.2 GB T4 VRAM with automatic step-down).")
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
-    p.add_argument("--llm-context-length", type=int, default=20480, help="Stage 2 GGUF context window (default 20480 uses ~13.2 GB T4 VRAM).")
+    p.add_argument("--llm-context-length", type=int, default=20480, help="Stage 2 GGUF context window (20480 fits in 15 GB T4 VRAM with 8-bit KV cache).")
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")
     p.add_argument("--wait-for-scenarios", action="store_true", help="Stage 2 standby watcher: keeps running and polls Drive for new scenarios from Profile 1.")
     p.add_argument("--keep-raw-audio", action="store_true", help="Keep original raw download alongside 64kbps Opus.")
@@ -1277,48 +1281,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return exit_code
 
     if args.mode == "stage2":
-        total_budget_min = float(args.max_session_minutes)
-        t_start = time.time()
-        deadline = (t_start + (total_budget_min * 60.0)) if total_budget_min > 0 else None
-        exit_code = 0
-        ws = SharedWorkspace(worker_name=args.worker_id or None)
-
-        while True:
-            if deadline is not None and time.time() >= deadline:
-                print(f"\n[Stage 2 Dedicated Worker] Session time budget ({args.max_session_minutes}m) reached. Stopping cleanly.", flush=True)
-                break
-
-            rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
-            cmd = [
-                sys.executable, str(Path(__file__).resolve()),
-                "--mode", "stage2-worker",
-                "--stage2-batch-videos", str(args.stage2_batch_videos),
-                "--max-session-minutes", str(rem_min),
-                "--llm-model", args.llm_model,
-                "--llm-context-length", str(args.llm_context_length),
-                "--wait-for-scenarios",
-            ]
-            if args.worker_id:
-                cmd += ["--worker-id", args.worker_id]
-
-            res = subprocess.run(cmd, env=_get_subprocess_env(), check=False)
-            if res.returncode != 0:
-                exit_code = res.returncode
-                print(f"[Stage 2 Dedicated Worker] Process exited with code {res.returncode}.", flush=True)
-                if res.returncode == 2:  # Fatal abort
-                    break
-                time.sleep(15)
-
-            if total_budget_min > 0 and deadline is not None and time.time() >= deadline:
-                break
-
-            manifest = load_or_create_manifest(ws)
-            cands = select_stage2_candidates(ws, manifest)
-            if not cands and total_budget_min > 0:
-                break
-            time.sleep(5)
-
-        return exit_code
+        args.wait_for_scenarios = True
+        return run_stage2_worker(args)
 
     if args.mode == "stage1-worker":
         return run_stage1_worker(args)

@@ -16,6 +16,7 @@ Fixes the 4 core street-debate limitations of MahmoudAshraf97/whisper-diarizatio
 import os
 import json
 import math
+import shutil
 import logging
 import warnings
 import tempfile
@@ -363,6 +364,24 @@ def realign_words_preserving_interruptions(
 # 2. Warm GPU Models for Micro-Steps M3 & M4 (Colab T4)
 # ==============================================================================
 
+def _quiet_nemo_loggers() -> None:
+    """Suppresses verbose NeMo / Megatron / NVIDIA OneLogger training telemetry warnings during inference."""
+    import logging
+    for logger_name in (
+        "nemo_logger",
+        "nv_one_logger",
+        "nv_one_logger.api.config",
+        "nv_one_logger.training_telemetry.api.training_telemetry_provider",
+        "pytorch_lightning",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
+    try:
+        from nemo.utils import logging as nemo_logging
+        nemo_logging.setLevel(logging.ERROR)
+    except Exception:
+        pass
+
+
 class WarmNeMoDiarizer:
     """
     Keeps TitaNet-Large embedding extractor ready in VRAM and runs NeMo MSDD
@@ -375,12 +394,15 @@ class WarmNeMoDiarizer:
         self._titanet = None
         self._msdd_instance = None
         self._msdd_is_short: Optional[bool] = None
+        self._msdd_work_dir: Optional[Path] = None
 
     def _ensure_titanet(self):
         if self._titanet is None:
+            _quiet_nemo_loggers()
             import torch
             from nemo.collections.asr.models import EncDecSpeakerLabelModel
             self._titanet = EncDecSpeakerLabelModel.from_pretrained(model_name="titanet_large")
+            _quiet_nemo_loggers()
             self._titanet.eval()
             if self.device == "cuda" and torch.cuda.is_available():
                 self._titanet.to("cuda")
@@ -482,8 +504,15 @@ class WarmNeMoDiarizer:
                 f"(last error: {last_err}). Ensure 'nemo_toolkit[asr]>=2.6.0,<3.0.0' is installed."
             )
 
-        with tempfile.TemporaryDirectory(prefix="yt_spx_msdd_") as tmp_dir:
-            tmp_p = Path(tmp_dir)
+        _quiet_nemo_loggers()
+        if self._msdd_work_dir is None:
+            self._msdd_work_dir = Path(tempfile.gettempdir()) / f"yt_spx_msdd_work_{os.getpid()}"
+        tmp_p = self._msdd_work_dir
+        if tmp_p.exists():
+            shutil.rmtree(tmp_p, ignore_errors=True)
+        tmp_p.mkdir(parents=True, exist_ok=True)
+
+        try:
             manifest_path = tmp_p / "input_manifest.json"
             meta = {
                 "audio_filepath": str(wav_16k_path),
@@ -563,38 +592,47 @@ class WarmNeMoDiarizer:
                 },
             })
 
-            def _bind_or_create_msdd():
-                if self._msdd_instance is not None and self._msdd_is_short == bool(is_short):
+            def _bind_or_create_msdd(force_new: bool = False):
+                if not force_new and self._msdd_instance is not None and self._msdd_is_short == bool(is_short):
                     try:
                         msdd_obj = self._msdd_instance
-                        if hasattr(msdd_obj, "_cfg") and hasattr(msdd_obj._cfg, "diarizer"):
-                            msdd_obj._cfg.diarizer.manifest_filepath = str(manifest_path)
-                            msdd_obj._cfg.diarizer.out_dir = str(tmp_p)
-                        if hasattr(msdd_obj, "clus_diar_model") and hasattr(msdd_obj.clus_diar_model, "_cfg"):
-                            msdd_obj.clus_diar_model._cfg.diarizer.manifest_filepath = str(manifest_path)
-                            msdd_obj.clus_diar_model._cfg.diarizer.out_dir = str(tmp_p)
-                            if hasattr(msdd_obj.clus_diar_model, "_out_dir"):
-                                msdd_obj.clus_diar_model._out_dir = str(tmp_p)
-                        if hasattr(msdd_obj, "_out_dir"):
-                            msdd_obj._out_dir = str(tmp_p)
-                        if hasattr(msdd_obj, "_manifest_filepath"):
-                            msdd_obj._manifest_filepath = str(manifest_path)
+                        for target_obj in (msdd_obj, getattr(msdd_obj, "clus_diar_model", None)):
+                            if target_obj is None:
+                                continue
+                            if hasattr(target_obj, "_cfg") and hasattr(target_obj._cfg, "diarizer"):
+                                target_obj._cfg.diarizer.manifest_filepath = str(manifest_path)
+                                target_obj._cfg.diarizer.out_dir = str(tmp_p)
+                            if hasattr(target_obj, "_diarizer_params"):
+                                target_obj._diarizer_params.manifest_filepath = str(manifest_path)
+                                target_obj._diarizer_params.out_dir = str(tmp_p)
+                            if hasattr(target_obj, "_out_dir"):
+                                target_obj._out_dir = str(tmp_p)
+                            if hasattr(target_obj, "_manifest_filepath"):
+                                target_obj._manifest_filepath = str(manifest_path)
                         return msdd_obj
                     except Exception:
                         self._msdd_instance = None
                 self._msdd_instance = DiarizerClass(cfg=cfg).to(cfg.device)
+                _quiet_nemo_loggers()
                 self._msdd_is_short = bool(is_short)
                 return self._msdd_instance
 
             try:
                 msdd = _bind_or_create_msdd()
-                msdd.diarize()
+                try:
+                    msdd.diarize()
+                except FileNotFoundError:
+                    # If a cached NeMo instance referenced a cleaned sub-path, re-write manifest and re-instantiate
+                    tmp_p.mkdir(parents=True, exist_ok=True)
+                    manifest_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+                    msdd = _bind_or_create_msdd(force_new=True)
+                    msdd.diarize()
                 pred_check = tmp_p / "pred_rttms" / f"{wav_16k_path.stem}.rttm"
                 if not pred_check.exists():
-                    # If cached instance wrote to a stale internal path, re-instantiate cleanly
-                    self._msdd_instance = DiarizerClass(cfg=cfg).to(cfg.device)
-                    self._msdd_is_short = bool(is_short)
-                    self._msdd_instance.diarize()
+                    tmp_p.mkdir(parents=True, exist_ok=True)
+                    manifest_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+                    msdd = _bind_or_create_msdd(force_new=True)
+                    msdd.diarize()
             except RuntimeError as err:
                 err_s = str(err).lower()
                 if "cudnn" in err_s:
@@ -602,7 +640,10 @@ class WarmNeMoDiarizer:
                     orig_cudnn = torch.backends.cudnn.enabled
                     torch.backends.cudnn.enabled = False
                     try:
+                        tmp_p.mkdir(parents=True, exist_ok=True)
+                        manifest_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
                         self._msdd_instance = DiarizerClass(cfg=cfg).to(cfg.device)
+                        _quiet_nemo_loggers()
                         self._msdd_is_short = bool(is_short)
                         self._msdd_instance.diarize()
                     except ValueError as v_err:
@@ -629,6 +670,9 @@ class WarmNeMoDiarizer:
             out_rttm_path.parent.mkdir(parents=True, exist_ok=True)
             out_rttm_path.write_text(rttm_text, encoding="utf-8")
             return rttm_text
+        finally:
+            if tmp_p.exists():
+                shutil.rmtree(tmp_p, ignore_errors=True)
 
     def unload(self):
         import gc

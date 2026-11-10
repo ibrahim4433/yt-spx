@@ -542,7 +542,7 @@ class TestRootCauseGuards(unittest.TestCase):
         """Ensures Stage2ScenarioExtractor and LocalGPUClient default to 20,480 context length & expanded VRAM budget."""
         import inspect
         from core.scenario_extractor import Stage2ScenarioExtractor, _build_round2_transcript_excerpt
-        from core.colab_runner import LocalGPUClient
+        from core.colab_runner import LocalGPUClient, ExtractionClient
         from core.pipeline_orchestrator import build_arg_parser
 
         sig_ext = inspect.signature(Stage2ScenarioExtractor.__init__)
@@ -551,6 +551,9 @@ class TestRootCauseGuards(unittest.TestCase):
         sig_client = inspect.signature(LocalGPUClient.__init__)
         self.assertEqual(sig_client.parameters["context_length"].default, 20480)
         self.assertEqual(sig_client.parameters["max_new_tokens"].default, 6144)
+
+        sig_wrap = inspect.signature(ExtractionClient.__init__)
+        self.assertEqual(sig_wrap.parameters["context_length"].default, 20480)
 
         sig_r2 = inspect.signature(_build_round2_transcript_excerpt)
         self.assertEqual(sig_r2.parameters["max_words"].default, 1800)
@@ -764,6 +767,75 @@ class TestRootCauseGuards(unittest.TestCase):
             self.assertIsNotNone(found)
             self.assertEqual(found.name, "Qwen3-14B-Q5_K_M.gguf")
             self.assertFalse(tmp_gguf.exists())
+
+    def test_msdd_reuse_persistent_work_dir_Across_videos(self):
+        """Ensures reusing WarmNeMoDiarizer across consecutive videos never raises FileNotFoundError on input_manifest.json."""
+        import json
+        import sys
+        import tempfile
+        import types
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+        from core.overlap_resolver import WarmNeMoDiarizer
+
+        diarizer = WarmNeMoDiarizer(device="cpu")
+
+        class FakeNeuralDiarizer:
+            def __init__(self, cfg):
+                self._cfg = cfg
+                # Simulate NeMo caching the initial manifest_filepath at construction time
+                self.cached_manifest = Path(cfg.diarizer.manifest_filepath)
+                self.cached_out_dir = Path(cfg.diarizer.out_dir)
+
+            def to(self, device):
+                return self
+
+            def diarize(self):
+                # Must exist even on 2nd and 3rd video when reusing the same FakeNeuralDiarizer instance!
+                if not self.cached_manifest.exists():
+                    raise FileNotFoundError(f"[Errno 2] No such file or directory: '{self.cached_manifest}'")
+                data = json.loads(self.cached_manifest.read_text(encoding="utf-8").strip())
+                stem = Path(data["audio_filepath"]).stem
+                pred_dir = self.cached_out_dir / "pred_rttms"
+                pred_dir.mkdir(parents=True, exist_ok=True)
+                (pred_dir / f"{stem}.rttm").write_text(f"SPEAKER {stem} 1 0.000 1.500 <NA> <NA> speaker_0 <NA> <NA>\n", encoding="utf-8")
+
+        fake_msdd_mod = types.ModuleType("nemo.collections.asr.models.msdd_models")
+        fake_msdd_mod.NeuralDiarizer = FakeNeuralDiarizer
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=False))
+        fake_omegaconf = types.ModuleType("omegaconf")
+
+        class _AttrDict(dict):
+            def __getattr__(self, k):
+                v = self[k]
+                return _AttrDict(v) if isinstance(v, dict) else v
+
+            def __setattr__(self, k, v):
+                self[k] = v
+
+        fake_omegaconf.OmegaConf = MagicMock(create=lambda d: _AttrDict(d))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p1 = Path(tmp) / "video1.wav"
+            p2 = Path(tmp) / "video2.wav"
+            r1 = Path(tmp) / "video1.rttm"
+            r2 = Path(tmp) / "video2.rttm"
+            p1.write_bytes(b"RIFF")
+            p2.write_bytes(b"RIFF")
+
+            with patch.dict(
+                sys.modules,
+                {
+                    "nemo.collections.asr.models.msdd_models": fake_msdd_mod,
+                    "torch": fake_torch,
+                    "omegaconf": fake_omegaconf,
+                },
+            ):
+                out1 = diarizer.run_diarization(p1, r1, is_short=False)
+                out2 = diarizer.run_diarization(p2, r2, is_short=False)
+                self.assertIn("video1", out1)
+                self.assertIn("video2", out2)
 
 
 if __name__ == "__main__":
