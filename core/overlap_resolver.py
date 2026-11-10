@@ -854,9 +854,9 @@ def run_overlap_separation_m4(
     on Drive so any interruption resumes at the exact unfinished overlap window!
     """
     vid_diar_dir = workspace.diarization_dir / video_id
-    # Store per-window separated clips in diarization/{vid}/sep_clips/ so M4 -> M5
-    # resumes cleanly across Colab session disconnects; M5 deletes sep_clips once scenario is built.
-    sep_dir = vid_diar_dir / "sep_clips"
+    # Store per-window separated clips strictly in local NVMe SSD (/tmp)
+    # Never write small temporary WAV slices to Google Drive FUSE to prevent unparented orphan bloat!
+    sep_dir = local_tmp_dir / f"{video_id}_sep_clips"
     sep_dir.mkdir(parents=True, exist_ok=True)
     manifest_file = vid_diar_dir / "overlap_sep.json"
 

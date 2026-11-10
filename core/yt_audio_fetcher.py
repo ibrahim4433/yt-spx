@@ -349,12 +349,11 @@ def fetch_video_audio_m1(
                 f"({cand_sz // 1024} KB vs >={min_bytes // 1024} KB expected)."
             )
 
-        # Atomically move raw audio + compact metadata to shared 5 TB Drive (Micro-Step M1!)
+        # Save raw audio + compact metadata to shared 5 TB Drive (Micro-Step M1!)
+        # Copy directly to final destination (avoid os.replace on Drive FUSE)
         workspace.audio_raw_dir.mkdir(parents=True, exist_ok=True)
         dest_audio = workspace.audio_raw_dir / downloaded_audio.name
-        tmp_dest = workspace.audio_raw_dir / f".{downloaded_audio.name}.tmp"
-        shutil.copy2(downloaded_audio, tmp_dest)
-        os.replace(tmp_dest, dest_audio)
+        shutil.copy2(downloaded_audio, dest_audio)
 
         compact_info: Dict[str, Any] = {}
         if info_json_tmp and info_json_tmp.exists():

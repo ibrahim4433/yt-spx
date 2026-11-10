@@ -1049,8 +1049,9 @@ class Stage1AudioPipeline:
             )
 
             # Verify or self-heal M4 separated clips before unloading separator/diarizer
+            # Clips reside strictly in local NVMe SSD (/tmp), never on Google Drive
             vid_diar_dir = self.workspace.diarization_dir / vid
-            sep_dir = vid_diar_dir / "sep_clips"
+            sep_dir = local_tmp / f"{vid}_sep_clips"
             manifest_file = vid_diar_dir / "overlap_sep.json"
             sep_manifest: List[Dict[str, Any]] = self.workspace.read_json(manifest_file, default=[]) or []
 
@@ -1209,9 +1210,8 @@ class Stage1AudioPipeline:
             print(f"       * Integrity: 100% PASSED -> Saved to Drive scenarios/{vid}.json")
             print("   " + "=" * 70, flush=True)
 
-            # Remove temporary per-window WAV clips now that scenario JSON is finalized
+            # Remove temporary per-window WAV clips from local SSD now that scenario JSON is finalized
             shutil.rmtree(local_tmp / f"{vid}_sep_clips", ignore_errors=True)
-            shutil.rmtree(sep_dir, ignore_errors=True)
 
             self.workspace.advance_micro_step(
                 vid,

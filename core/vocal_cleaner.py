@@ -290,7 +290,9 @@ def clean_vocals_m2(
         )
 
     if enable_stemming and total_sec > 1.0:
-        vid_stage_dir = workspace.staging_dir / video_id
+        # Keep intermediate Demucs chunk WAVs strictly on local NVMe SSD (/tmp)
+        # to eliminate Google Drive FUSE I/O bottlenecks and prevent orphan file bloat in My Drive!
+        vid_stage_dir = local_tmp_dir / f"stage_{video_id}"
         vid_stage_dir.mkdir(parents=True, exist_ok=True)
 
         step_samples = int((CHUNK_SEC - CROSSFADE_SEC) * sr)
@@ -357,8 +359,9 @@ def clean_vocals_m2(
     vocal_unleveled_wav.unlink(missing_ok=True)
     raw_16k_wav.unlink(missing_ok=True)
 
-    # 3. Archive crisp 64 kbps 24kHz VoIP Opus permanently to the 5 TB Google Drive
-    tmp_opus = workspace.audio_clean_dir / f".{video_id}.tmp.opus"
+    # 3. Archive crisp 64 kbps 24kHz VoIP Opus permanently to the 5 TB Google Drive.
+    # Encode to local SSD first, then copy cleanly to Drive (never use os.replace on Drive FUSE).
+    tmp_opus = local_tmp_dir / f"{video_id}.clean.opus"
     subprocess.run(
         [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -370,10 +373,12 @@ def clean_vocals_m2(
         check=True,
         timeout=600,
     )
-    os.replace(tmp_opus, clean_opus)
+    shutil.copy2(tmp_opus, clean_opus)
+    tmp_opus.unlink(missing_ok=True)
 
-    # 4. Clean up Drive staging chunks (and raw download unless user wants both raw + clean)
-    shutil.rmtree(workspace.staging_dir / video_id, ignore_errors=True)
+    # 4. Clean up local staging chunks (and raw download unless user wants both raw + clean)
+    if enable_stemming:
+        shutil.rmtree(vid_stage_dir, ignore_errors=True)
     if not keep_raw_audio_on_drive and raw_audio_path and raw_audio_path.exists():
         try:
             raw_audio_path.unlink(missing_ok=True)

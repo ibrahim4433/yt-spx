@@ -920,6 +920,209 @@ class TestRootCauseGuards(unittest.TestCase):
         finally:
             wav_path.unlink(missing_ok=True)
 
+    def test_clean_drive_root_dry_run_and_live(self):
+        """Verifies surgical cleaner purges leaked artifacts while keeping protected folders 100% intact."""
+        import tempfile
+        from tools.clean_drive_root import clean_drive_root
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            drive_root = Path(tmp_dir)
+
+            # 1. Leaked files in root
+            (drive_root / "OV_0065_s0_SPK_00.wav").write_bytes(b"wavdata" * 100)
+            (drive_root / "OV_0065_s1_SPK_01.wav").write_bytes(b"wavdata" * 100)
+            (drive_root / "0RNO5mv18_.stage1.lock.json").write_text('{"lock": true}', encoding="utf-8")
+            (drive_root / "0RNO5mv18_.diarized.srt").write_text("1\n00:00:00 -> 00:00:01\nHi", encoding="utf-8")
+            (drive_root / "0RNO5mv18_.state.json").write_text('{"step": "M5"}', encoding="utf-8")
+            (drive_root / "demucs_chunk_001_of_004.wav").write_bytes(b"demucs" * 50)
+
+            # 2. Leaked directories in root
+            sep_clips_dir = drive_root / "sep_clips"
+            sep_clips_dir.mkdir(parents=True, exist_ok=True)
+            (sep_clips_dir / "OV_0001_s0_SPK_00.wav").write_bytes(b"sep")
+
+            vid_leak_dir = drive_root / "0RNO5mv18_"
+            vid_leak_dir.mkdir(parents=True, exist_ok=True)
+            (vid_leak_dir / "demucs_chunk_000_of_004.wav").write_bytes(b"chunk0")
+
+            # 3. Legitimate protected folders & personal files
+            yt_spx_dir = drive_root / "yt-spx"
+            yt_spx_dir.mkdir(parents=True, exist_ok=True)
+            (yt_spx_dir / "manifest.csv").write_text("video_id,title", encoding="utf-8")
+
+            yt_ch_dir = drive_root / "yt-ch"
+            yt_ch_dir.mkdir(parents=True, exist_ok=True)
+            (yt_ch_dir / "archive.json").write_text("{}", encoding="utf-8")
+
+            colab_dir = drive_root / "Colab Notebooks"
+            colab_dir.mkdir(parents=True, exist_ok=True)
+            (colab_dir / "my_work.ipynb").write_text("{}", encoding="utf-8")
+
+            personal_dir = drive_root / "PersonalFolder"
+            personal_dir.mkdir(parents=True, exist_ok=True)
+            (personal_dir / "family_photo.jpg").write_bytes(b"jpeg")
+
+            personal_file = drive_root / "Important_Document.pdf"
+            personal_file.write_bytes(b"pdfdata")
+
+            # Run DRY RUN first -> 0 files must be deleted
+            rc_dry = clean_drive_root(drive_root=str(drive_root), dry_run=True)
+            self.assertEqual(rc_dry, 0)
+            self.assertTrue((drive_root / "OV_0065_s0_SPK_00.wav").exists())
+            self.assertTrue((drive_root / "sep_clips").exists())
+            self.assertTrue((drive_root / "0RNO5mv18_").exists())
+
+            # Run LIVE CLEANUP -> leaked items purged, protected items preserved
+            rc_live = clean_drive_root(drive_root=str(drive_root), dry_run=False)
+            self.assertEqual(rc_live, 0)
+
+            # Assert leaked items are gone
+            self.assertFalse((drive_root / "OV_0065_s0_SPK_00.wav").exists())
+            self.assertFalse((drive_root / "OV_0065_s1_SPK_01.wav").exists())
+            self.assertFalse((drive_root / "0RNO5mv18_.stage1.lock.json").exists())
+            self.assertFalse((drive_root / "0RNO5mv18_.diarized.srt").exists())
+            self.assertFalse((drive_root / "0RNO5mv18_.state.json").exists())
+            self.assertFalse((drive_root / "demucs_chunk_001_of_004.wav").exists())
+            self.assertFalse(sep_clips_dir.exists())
+            self.assertFalse(vid_leak_dir.exists())
+
+            # Assert protected folders & files remain 100% INTACT
+            self.assertTrue(yt_spx_dir.exists())
+            self.assertTrue((yt_spx_dir / "manifest.csv").exists())
+            self.assertTrue(yt_ch_dir.exists())
+            self.assertTrue((yt_ch_dir / "archive.json").exists())
+            self.assertTrue(colab_dir.exists())
+            self.assertTrue((colab_dir / "my_work.ipynb").exists())
+            self.assertTrue(personal_dir.exists())
+            self.assertTrue((personal_dir / "family_photo.jpg").exists())
+            self.assertTrue(personal_file.exists())
+
+    def test_overlap_separation_never_creates_sep_clips_on_drive(self):
+        """Verifies run_overlap_separation_m4 stores sep_clips only in local_tmp, never on workspace Drive."""
+        import tempfile
+        import numpy as np
+        from core.drive_sync import SharedWorkspace
+        from core.overlap_resolver import run_overlap_separation_m4
+        from core.vocal_cleaner import write_wav_float32
+
+        vid = "v_test_sep_local"
+        with tempfile.TemporaryDirectory() as ws_tmp, tempfile.TemporaryDirectory() as local_tmp:
+            ws = SharedWorkspace(root_dir=Path(ws_tmp), worker_name="test-worker")
+            local_tmp_path = Path(local_tmp)
+            leveled_wav = local_tmp_path / f"{vid}_leveled.wav"
+            samples = (0.5 * np.sin(2 * np.pi * 440 * np.linspace(0, 4, 16000 * 4))).astype(np.float32)
+            write_wav_float32(leveled_wav, samples, sr=16000)
+
+            overlaps = [
+                {
+                    "window_id": "OV_0001",
+                    "core_start_ms": 500,
+                    "core_end_ms": 2000,
+                    "start_ms": 200,
+                    "end_ms": 2300,
+                    "speakers": ["SPK_00", "SPK_01"],
+                }
+            ]
+            v0 = np.zeros(192, dtype=np.float32)
+            v0[0] = 1.0
+            v1 = np.zeros(192, dtype=np.float32)
+            v1[1] = 1.0
+            centroids = {"SPK_00": v0, "SPK_01": v1}
+
+            class DummySeparator:
+                def separate_16k_slice(self, slice_wav: Path):
+                    s_a = (0.4 * np.sin(2 * np.pi * 300 * np.linspace(0, 2, 16000 * 2))).astype(np.float32)
+                    s_b = (0.4 * np.sin(2 * np.pi * 600 * np.linspace(0, 2, 16000 * 2))).astype(np.float32)
+                    return [s_a, s_b]
+
+            class DummyDiarizer:
+                def __init__(self):
+                    self.idx = 0
+                def extract_embedding(self, arr: np.ndarray) -> np.ndarray:
+                    emb = np.zeros(192, dtype=np.float32)
+                    emb[self.idx % 2] = 1.0
+                    self.idx += 1
+                    return emb
+
+            res = run_overlap_separation_m4(
+                video_id=vid,
+                leveled_16k_wav=leveled_wav,
+                overlaps=overlaps,
+                centroids=centroids,
+                workspace=ws,
+                separator=DummySeparator(),
+                diarizer=DummyDiarizer(),
+                local_tmp_dir=local_tmp_path,
+            )
+
+            # Clips MUST exist in local_tmp
+            self.assertEqual(len(res), 1)
+            for tr in res[0]["tracks"]:
+                cp = Path(tr["clip_path"])
+                self.assertTrue(cp.exists())
+                self.assertTrue(str(cp).startswith(str(local_tmp_path)))
+
+            # sep_clips must NOT exist on workspace diarization dir!
+            drive_sep_dir = ws.diarization_dir / vid / "sep_clips"
+            self.assertFalse(drive_sep_dir.exists(), "sep_clips must NEVER be written to Google Drive workspace!")
+
+    def test_release_lock_tombstone(self):
+        """Verifies release_lock writes an expired tombstone in-place to prevent Drive FUSE unparenting."""
+        import tempfile
+        from core.drive_sync import SharedWorkspace
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws1 = SharedWorkspace(root_dir=Path(tmp_dir), worker_name="colab-worker-1")
+            ws2 = SharedWorkspace(root_dir=Path(tmp_dir), worker_name="colab-worker-2")
+
+            lock_name = "test_atomic_lock"
+            # Worker 1 acquires lock
+            self.assertTrue(ws1.acquire_lock(lock_name, ttl_sec=60))
+
+            # Worker 2 cannot acquire while active
+            self.assertFalse(ws2.acquire_lock(lock_name, ttl_sec=60))
+
+            # Worker 1 releases lock
+            ws1.release_lock(lock_name)
+
+            # Lock file must still exist as tombstone (never unparented into Drive root!)
+            lp = ws1.lock_path(lock_name)
+            self.assertTrue(lp.exists(), "Lock file must remain on disk as tombstone!")
+            data = ws1.read_json(lp)
+            self.assertTrue(data.get("released"))
+            self.assertEqual(data.get("expires_at"), 0.0)
+
+            # Worker 2 can now acquire immediately!
+            self.assertTrue(ws2.acquire_lock(lock_name, ttl_sec=60))
+            ws2.release_lock(lock_name)
+
+    def test_resolve_drive_root_prioritizes_existing_shortcuts(self):
+        """Verifies resolve_drive_root checks .shortcut-targets-by-id before creating a new MyDrive folder."""
+        import tempfile
+        from unittest.mock import patch
+        from core.drive_sync import resolve_drive_root
+
+        with tempfile.TemporaryDirectory() as fake_root:
+            target_spx = Path(fake_root) / "shortcut_id" / "yt-spx"
+            target_spx.mkdir(parents=True, exist_ok=True)
+
+            with patch("core.drive_sync.Path.exists", autospec=True) as mock_exists, \
+                 patch("core.drive_sync.Path.iterdir", autospec=True) as mock_iterdir:
+                def fake_exists(self):
+                    p_str = str(self).replace("\\", "/")
+                    if ".shortcut-targets-by-id" in p_str:
+                        return True
+                    if "yt-spx" in p_str:
+                        return True
+                    return False
+
+                mock_exists.side_effect = fake_exists
+                mock_iterdir.side_effect = lambda self: [Path(fake_root) / "shortcut_id"]
+
+                res = resolve_drive_root()
+                self.assertIsNotNone(res)
+                self.assertIn("yt-spx", str(res))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,6 +172,21 @@ def persist_stage1_models_to_drive(workspace: Optional[Any] = None) -> bool:
         if tar_path.exists() and tar_path.stat().st_size >= STAGE1_MODEL_BUNDLE_MIN_BYTES:
             return True
 
+        # Ensure the Google Drive account has sufficient storage headroom (> 15 GB free)
+        # to prevent 15 GB collaborator accounts from filling their quota!
+        try:
+            usage = shutil.disk_usage(str(workspace.root))
+            if usage.free < (STAGE1_MODEL_BUNDLE_MIN_BYTES + 8 * 1024 * 1024 * 1024):
+                free_gb = round(usage.free / (1024 ** 3), 2)
+                print(
+                    f"   [i] Google Drive free space is {free_gb} GB (< 15 GB required). "
+                    "Skipping Stage 1 model bundle upload on this collaborator account.",
+                    flush=True,
+                )
+                return False
+        except Exception:
+            pass
+
         dirs_to_pack = [(arc, p) for arc, p in _get_local_stage1_cache_dirs() if p.exists()]
         if not dirs_to_pack:
             return False
@@ -670,7 +685,7 @@ def main() -> int:
             patch_youtube_oauth2_plugin()
         except Exception:
             pass
-    elif is_colab and mode not in ("status", "sync-db", "reset-stage1", "reset-stage2", "auth-youtube"):
+    elif is_colab and mode not in ("status", "sync-db", "reset-stage1", "reset-stage2", "auth-youtube", "clean-drive"):
         print(f"\n[2/3] Verifying GPU packages for mode='{mode}'...")
         if mode in ("auto", "stage1", "stage1-worker"):
             ensure_stage1_dependencies(constraints_path)
