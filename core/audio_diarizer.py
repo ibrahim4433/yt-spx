@@ -761,16 +761,19 @@ class WarmASRAlignmentEngine:
                         emissions = emissions.cpu()
                     if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.size(0) == 1:
                         emissions = emissions.squeeze(0)
+                    if hasattr(emissions, "float"):
+                        emissions = emissions.float()
                 elif isinstance(emissions, np.ndarray):
                     if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.shape[0] == 1:
                         emissions = np.squeeze(emissions, axis=0)
+                    emissions = emissions.astype(np.float32)
                     if hasattr(torch, "from_numpy"):
                         try:
                             emissions = torch.from_numpy(emissions)
                         except Exception:
                             pass
                 elif isinstance(emissions, (list, tuple)):
-                    emissions = [e.cpu() if hasattr(e, "cpu") else e for e in emissions]
+                    emissions = [e.cpu().float() if hasattr(e, "cpu") and hasattr(e, "float") else e for e in emissions]
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -785,12 +788,16 @@ class WarmASRAlignmentEngine:
                 # mms-300m-1130-forced-aligner outputs 31 classes (0..30), and get_alignments maps `<star>` to index 31.
                 def _append_star_column(em_obj):
                     try:
-                        if isinstance(em_obj, torch.Tensor) and em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
-                            star_col = torch.zeros((em_obj.size(0), 1), dtype=em_obj.dtype, device=em_obj.device)
-                            return torch.cat([em_obj, star_col], dim=-1)
-                        elif isinstance(em_obj, np.ndarray) and em_obj.ndim == 2:
-                            star_col = np.zeros((em_obj.shape[0], 1), dtype=em_obj.dtype)
-                            return np.concatenate([em_obj, star_col], axis=-1)
+                        if isinstance(em_obj, torch.Tensor):
+                            em_obj = em_obj.float()
+                            if em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
+                                star_col = torch.zeros((em_obj.size(0), 1), dtype=torch.float32, device=em_obj.device)
+                                return torch.cat([em_obj, star_col], dim=-1)
+                        elif isinstance(em_obj, np.ndarray):
+                            em_obj = em_obj.astype(np.float32)
+                            if em_obj.ndim == 2:
+                                star_col = np.zeros((em_obj.shape[0], 1), dtype=np.float32)
+                                return np.concatenate([em_obj, star_col], axis=-1)
                     except Exception:
                         pass
                     return em_obj
@@ -809,6 +816,11 @@ class WarmASRAlignmentEngine:
                         if em_cols == len(vocab_dict):
                             emissions = _append_star_column(emissions)
 
+                if isinstance(emissions, torch.Tensor):
+                    emissions = emissions.to(dtype=torch.float32)
+                elif isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
+                    emissions = torch.from_numpy(emissions.astype(np.float32))
+
                 try:
                     segments, scores, blank_token = get_alignments(
                         emissions,
@@ -817,19 +829,32 @@ class WarmASRAlignmentEngine:
                     )
                 except AttributeError as ae:
                     if "is_cpu" in str(ae) and isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
-                        em_tensor = torch.from_numpy(emissions)
+                        em_tensor = torch.from_numpy(emissions.astype(np.float32))
                         if hasattr(em_tensor, "ndim") and em_tensor.ndim == 3 and em_tensor.size(0) == 1:
                             em_tensor = em_tensor.squeeze(0)
                         segments, scores, blank_token = get_alignments(
-                            em_tensor,
+                            em_tensor.to(dtype=torch.float32),
                             tokens_starred,
                             self._align_tokenizer,
                         )
                     else:
                         raise
                 except Exception as align_err:
-                    if "within [0," in str(align_err) or "targets" in str(align_err).lower():
+                    err_msg = str(align_err).lower()
+                    if "within [0," in err_msg or "targets" in err_msg:
                         emissions = _append_star_column(emissions)
+                        if isinstance(emissions, torch.Tensor):
+                            emissions = emissions.to(dtype=torch.float32)
+                        segments, scores, blank_token = get_alignments(
+                            emissions,
+                            tokens_starred,
+                            self._align_tokenizer,
+                        )
+                    elif "float32" in err_msg or "log_probs" in err_msg:
+                        if isinstance(emissions, torch.Tensor):
+                            emissions = emissions.to(dtype=torch.float32)
+                        elif isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
+                            emissions = torch.from_numpy(emissions.astype(np.float32))
                         segments, scores, blank_token = get_alignments(
                             emissions,
                             tokens_starred,

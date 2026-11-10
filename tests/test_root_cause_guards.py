@@ -837,6 +837,89 @@ class TestRootCauseGuards(unittest.TestCase):
                 self.assertIn("video1", out1)
                 self.assertIn("video2", out2)
 
+    def test_ctc_alignment_float16_emissions_cast_to_float32(self):
+        """Ensures emissions from FP16 CTC model are cast to torch.float32 before torchaudio get_alignments."""
+        import sys
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+        import numpy as np
+        from core.audio_diarizer import WarmASRAlignmentEngine
+
+        engine = WarmASRAlignmentEngine(device="cuda", batch_size=16)
+
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock(text="In the name of God", no_speech_prob=0.0, compression_ratio=1.0, words=[])
+        mock_seg.start = 0.0
+        mock_seg.end = 2.0
+        mock_whisper.transcribe.return_value = ([mock_seg], MagicMock(language="en"))
+        engine._whisper = mock_whisper
+
+        # Simulate FP16 AutoModelForCTC output
+        mock_align_model = MagicMock()
+        mock_align_model.dtype = "float16"
+        mock_align_model.device = "cuda:0"
+        mock_logits = MagicMock()
+        mock_align_model.return_value = mock_logits
+
+        fake_aligner_mod = types.ModuleType("ctc_forced_aligner")
+        fake_aligner_mod.generate_emissions = MagicMock()
+        fake_aligner_mod.preprocess_text = MagicMock(return_value=(["in", "<star>", "the"], "in the"))
+
+        def fake_get_alignments(emissions, tokens, tokenizer):
+            # torchaudio.functional.forced_align strictly requires float32
+            if hasattr(emissions, "dtype") and str(emissions.dtype) != "torch.float32" and "float32" not in str(emissions.dtype):
+                raise ValueError("log_probs must be float32")
+            return [MagicMock()], [MagicMock()], 0
+
+        fake_aligner_mod.get_alignments = MagicMock(side_effect=fake_get_alignments)
+        fake_aligner_mod.get_spans = MagicMock(return_value=[MagicMock()])
+        fake_aligner_mod.postprocess_results = MagicMock(return_value=[{"word": "in", "start": 0.0, "end": 0.5}])
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=True))
+        fake_torch.float16 = "float16"
+        fake_torch.float32 = "float32"
+
+        # Mock tensor that behaves like FP16 tensor initially
+        class FakeTensor:
+            def __init__(self, dtype="float16"):
+                self.dtype = dtype
+                self.ndim = 2
+                self.shape = (100, 32)
+                self.device = "cuda:0"
+            def to(self, *args, **kwargs):
+                if "dtype" in kwargs and kwargs["dtype"] == "float32":
+                    return FakeTensor("torch.float32")
+                return self
+            def float(self):
+                return FakeTensor("torch.float32")
+            def cpu(self):
+                return self
+            def size(self, idx):
+                return self.shape[idx]
+
+        fake_torch.log_softmax = MagicMock(return_value=FakeTensor("float16"))
+        fake_torch.from_numpy = MagicMock(return_value=FakeTensor("float16"))
+        fake_torch.inference_mode = MagicMock()
+        fake_torch.Tensor = FakeTensor
+
+        fake_fw = types.ModuleType("faster_whisper")
+        dummy_audio = np.zeros(16000 * 2, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+
+        try:
+            with patch.dict(sys.modules, {"ctc_forced_aligner": fake_aligner_mod, "torch": fake_torch, "faster_whisper": fake_fw}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_audio):
+                engine._align_model = mock_align_model
+                engine._align_tokenizer = {"in": 0, "the": 1, "<star>": 31}
+                words, lang = engine.transcribe_and_align_wav(wav_path, forced_language="en", use_ctc_aligner=True)
+                self.assertEqual(len(words), 1)
+                self.assertEqual(words[0]["word"], "in")
+        finally:
+            wav_path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
