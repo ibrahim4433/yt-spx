@@ -35,6 +35,7 @@ try:
         EXTRACTION_SYSTEM_PROMPT,
         ROUND1_ENGLISH_EXTRACTION_PROMPT,
         ROUND2_ARABIC_VERIFICATION_PROMPT,
+        COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
     )
 except (ImportError, ValueError):
     from .drive_sync import resolve_drive_root
@@ -42,6 +43,7 @@ except (ImportError, ValueError):
         EXTRACTION_SYSTEM_PROMPT,
         ROUND1_ENGLISH_EXTRACTION_PROMPT,
         ROUND2_ARABIC_VERIFICATION_PROMPT,
+        COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
     )
 
 try:
@@ -112,12 +114,34 @@ def _normalize_extracted_item(x: Dict[str, Any]) -> Dict[str, Any]:
     return x
 
 
+def strip_llm_thinking_blocks(raw_text: str) -> str:
+    """Removes Qwen3 <think>...</think> reasoning blocks (closed or truncated) before JSON parsing."""
+    if not raw_text:
+        return ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE).strip()
+    if "<think>" in cleaned.lower():
+        # Unclosed <think> block: if a JSON array or object starts after <think>, slice from there; else drop <think>...
+        idx_think = cleaned.lower().find("<think>")
+        after_think = cleaned[idx_think + 7 :]
+        json_start = re.search(r"\[\s*\{|\{\s*\"", after_think)
+        if json_start:
+            cleaned = (cleaned[:idx_think] + after_think[json_start.start() :]).strip()
+        else:
+            cleaned = cleaned[:idx_think].strip()
+    return cleaned
+
+
 def clean_llm_json_response(raw_text: str) -> List[Dict[str, Any]]:
-    """Strips markdown code fences and parses JSON safely, including partial/truncated streams."""
+    """Strips <think> blocks and markdown code fences, parsing JSON safely including partial/truncated streams."""
     if not raw_text:
         return []
-    text = raw_text.strip()
-    if text.startswith("```"):
+    text = strip_llm_thinking_blocks(raw_text)
+    if not text:
+        return []
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+    elif text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     try:
@@ -309,41 +333,141 @@ def ensure_cuda_runtime_loaded() -> None:
 
 
 def _copy_large_file_chunked(src_path: Path, dst_path: Path, label: str = "Copying") -> None:
-    """Streams large GGUF model files (10GB+) in 64MB chunks with live progress and minimal RAM usage."""
+    """
+    Streams large GGUF model files (10GB+) in 64MB chunks with live progress and explicit os.fsync().
+    On Google Drive FUSE (/content/drive), writes directly to dst_path instead of renaming a 10GB .tmp
+    file (which causes DriveFS background sync to drop or orphan the upload).
+    """
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dst = dst_path.with_suffix(dst_path.suffix + ".tmp")
+    is_drive_target = "/content/drive" in str(dst_path).replace("\\", "/")
+    write_target = dst_path if is_drive_target else dst_path.with_suffix(dst_path.suffix + ".tmp")
     total_size = src_path.stat().st_size
     copied = 0
     t0 = time.time()
     last_log = t0
     chunk_size = 64 * 1024 * 1024  # 64 MB
 
-    with open(src_path, "rb") as fsrc, open(tmp_dst, "wb") as fdst:
-        while True:
-            buf = fsrc.read(chunk_size)
-            if not buf:
-                break
-            fdst.write(buf)
-            copied += len(buf)
-            now = time.time()
-            if now - last_log >= 15.0 or copied >= total_size:
-                last_log = now
-                pct = round((copied / max(1, total_size)) * 100, 1)
-                mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
-                print(
-                    f"   [{label}] {pct}% ({round(copied / (1024**3), 2)} GB / "
-                    f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
-                    flush=True,
-                )
-    tmp_dst.replace(dst_path)
+    try:
+        with open(src_path, "rb") as fsrc, open(write_target, "wb") as fdst:
+            while True:
+                buf = fsrc.read(chunk_size)
+                if not buf:
+                    break
+                fdst.write(buf)
+                copied += len(buf)
+                now = time.time()
+                if now - last_log >= 15.0 or copied >= total_size:
+                    last_log = now
+                    pct = round((copied / max(1, total_size)) * 100, 1)
+                    mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
+                    print(
+                        f"   [{label}] {pct}% ({round(copied / (1024**3), 2)} GB / "
+                        f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
+                        flush=True,
+                    )
+            fdst.flush()
+            try:
+                os.fsync(fdst.fileno())
+            except Exception:
+                pass
+        if write_target != dst_path:
+            write_target.replace(dst_path)
+    except Exception:
+        try:
+            if write_target.exists() and write_target.stat().st_size < total_size:
+                write_target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _find_valid_drive_gguf(drive_root: Optional[Path], target_file: str, min_valid_size: int) -> Optional[Path]:
+    """
+    Searches candidate Google Drive model directories (.cache/models and models),
+    auto-recovering any completed .tmp file left behind by DriveFS FUSE renames
+    and cleaning up truncated (< min_valid_size) partial files.
+    """
+    if not drive_root:
+        return None
+    candidate_dirs = [
+        drive_root / ".cache" / "models",
+        drive_root / "models",
+    ]
+    for cdir in candidate_dirs:
+        if not cdir.exists():
+            continue
+        exact_path = cdir / target_file
+        tmp_path = cdir / f"{target_file}.tmp"
+        # Recover completed .tmp file if present
+        if tmp_path.exists():
+            try:
+                if tmp_path.stat().st_size >= min_valid_size:
+                    if not exact_path.exists() or exact_path.stat().st_size < min_valid_size:
+                        tmp_path.replace(exact_path)
+                else:
+                    tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        if exact_path.exists():
+            try:
+                sz = exact_path.stat().st_size
+                if sz >= min_valid_size:
+                    return exact_path
+                else:
+                    # Remove broken partial file so it doesn't waste Drive quota
+                    exact_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return None
+
+
+def _can_persist_gguf_to_drive(drive_root: Optional[Path], file_size_bytes: int) -> bool:
+    """
+    Checks if the current Google Drive mount has enough free quota to persist a ~10 GB GGUF file.
+    Note: On Google Drive, when a secondary 15 GB collaborator account (Profile 2) creates a new file
+    inside a shared folder owned by the 5 TB account, Google Drive charges the file against the
+    collaborator's 15 GB quota and silently drops background uploads if free quota is insufficient.
+    """
+    if not drive_root:
+        return False
+    try:
+        import shutil
+        usage = shutil.disk_usage(str(drive_root))
+        required_free = file_size_bytes + 1_500_000_000  # 1.5 GB safety headroom
+        if usage.free < required_free:
+            free_gb = round(usage.free / (1024**3), 2)
+            req_gb = round(file_size_bytes / (1024**3), 2)
+            print(
+                f"[i] Google Drive account has {free_gb} GB free (needs {req_gb} GB + headroom). "
+                "Skipping Drive upload on this collaborator account (run Stage 2 once on the 5 TB owner account to cache on Drive).",
+                flush=True,
+            )
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _link_or_copy_to_local_ssd(src_path: Path, local_model_file: Path) -> None:
+    """Creates a zero-cost hardlink or symlink at /content/models/{target_file} so same-VM reruns take 0s."""
+    try:
+        local_model_file.parent.mkdir(parents=True, exist_ok=True)
+        if local_model_file.exists():
+            return
+        try:
+            os.link(str(src_path), str(local_model_file))
+        except Exception:
+            os.symlink(str(src_path), str(local_model_file))
+    except Exception:
+        pass
 
 
 def _resolve_and_cache_gguf_model(target_repo: str, target_file: str, hf_download_fn: Any) -> str:
     """
-    Resolves GGUF model path with 3-tier caching so Colab never has to wait 17 minutes on HuggingFace after Run #1:
+    Resolves GGUF model path with 3-tier caching so Colab never has to re-download from HuggingFace:
       Tier 1: Fast local NVMe SSD (/content/models/{target_file} or ~/.cache/huggingface/hub) -> 0s wait
       Tier 2: Persistent Google Drive (/content/drive/MyDrive/yt-spx/.cache/models/{target_file}) -> ~90s copy to local SSD
-      Tier 3: First-time Hugging Face download -> automatically backs up to Google Drive for all future sessions!
+      Tier 3: First-time Hugging Face download -> links to /content/models & backs up to Google Drive!
     """
     from core.drive_sync import resolve_drive_root
 
@@ -351,6 +475,7 @@ def _resolve_and_cache_gguf_model(target_repo: str, target_file: str, hf_downloa
     drive_root = resolve_drive_root()
     drive_cache_dir = (drive_root / ".cache" / "models") if drive_root else None
     drive_model_file = (drive_cache_dir / target_file) if drive_cache_dir else None
+    existing_drive_file = _find_valid_drive_gguf(drive_root, target_file, min_valid_size)
 
     local_dir = Path("/content/models") if Path("/content").exists() else (Path.home() / ".cache" / "yt-spx" / "models")
     local_model_file = local_dir / target_file
@@ -358,27 +483,38 @@ def _resolve_and_cache_gguf_model(target_repo: str, target_file: str, hf_downloa
     # Tier 1A: Local NVMe SSD direct path
     if local_model_file.exists() and local_model_file.stat().st_size >= min_valid_size:
         print(f"[+] Found GGUF model on fast local SSD: {local_model_file} (0s wait)")
-        if drive_model_file and (not drive_model_file.exists() or drive_model_file.stat().st_size < min_valid_size):
+        if drive_model_file and existing_drive_file is None and _can_persist_gguf_to_drive(drive_root, local_model_file.stat().st_size):
             try:
-                print(f"[+] Backing up local model to Google Drive cache for future sessions...", flush=True)
+                print(f"[+] Backing up local model to Google Drive cache ({drive_model_file})...", flush=True)
                 _copy_large_file_chunked(local_model_file, drive_model_file, label="Drive Backup")
             except Exception as e:
                 print(f"[-] Drive backup note: {e}")
         return str(local_model_file)
 
-    # Tier 1B: Existing Hugging Face local cache in current VM
+    # Tier 1B: Existing Hugging Face local cache in current VM (via local_files_only or hub scan)
+    hf_existing: Optional[Path] = None
     try:
-        hf_matches = [
-            p for p in (Path.home() / ".cache" / "huggingface" / "hub").glob(f"**/{target_file}")
-            if p.is_file() and p.stat().st_size >= min_valid_size
-        ]
+        cached_local = hf_download_fn(repo_id=target_repo, filename=target_file, local_files_only=True)
+        if cached_local and Path(cached_local).exists() and Path(cached_local).stat().st_size >= min_valid_size:
+            hf_existing = Path(cached_local).resolve()
     except Exception:
-        hf_matches = []
+        pass
 
-    if hf_matches:
-        hf_existing = hf_matches[0].resolve()
+    if hf_existing is None:
+        try:
+            hf_matches = [
+                p for p in (Path.home() / ".cache" / "huggingface" / "hub").glob(f"**/{target_file}")
+                if p.exists() and p.stat().st_size >= min_valid_size
+            ]
+            if hf_matches:
+                hf_existing = hf_matches[0].resolve()
+        except Exception:
+            pass
+
+    if hf_existing is not None:
         print(f"[+] Found GGUF model in local HuggingFace cache: {hf_existing} (0s wait)")
-        if drive_model_file and (not drive_model_file.exists() or drive_model_file.stat().st_size < min_valid_size):
+        _link_or_copy_to_local_ssd(hf_existing, local_model_file)
+        if drive_model_file and existing_drive_file is None and _can_persist_gguf_to_drive(drive_root, hf_existing.stat().st_size):
             try:
                 print(f"[+] Persisting model to Google Drive ({drive_model_file}) so future sessions skip HuggingFace...", flush=True)
                 _copy_large_file_chunked(hf_existing, drive_model_file, label="Persist to Drive")
@@ -386,28 +522,33 @@ def _resolve_and_cache_gguf_model(target_repo: str, target_file: str, hf_downloa
                 print(f"[-] Drive backup note: {e}")
         return str(hf_existing)
 
-    # Tier 2: Persistent Google Drive cache (~90s high-speed internal copy vs 17m internet download)
-    if drive_model_file and drive_model_file.exists() and drive_model_file.stat().st_size >= min_valid_size:
-        print(f"[+] Found persistent GGUF model on Google Drive: {drive_model_file}")
+    # Tier 2: Persistent Google Drive cache (~90s high-speed internal copy vs internet download)
+    if existing_drive_file is not None:
+        print(f"[+] Found persistent GGUF model on Google Drive: {existing_drive_file}")
         print(f"[+] Streaming from Drive to fast local NVMe SSD (~1-2 min, no HuggingFace download needed)...", flush=True)
         try:
-            _copy_large_file_chunked(drive_model_file, local_model_file, label="Drive -> Local SSD")
+            _copy_large_file_chunked(existing_drive_file, local_model_file, label="Drive -> Local SSD")
             return str(local_model_file)
         except Exception as copy_err:
             print(f"[-] Local SSD copy note ({copy_err}); loading directly from Drive path...")
-            return str(drive_model_file)
+            return str(existing_drive_file)
 
     # Tier 3: First-time download from Hugging Face
     print(f"[+] First-time download from Hugging Face: {target_repo}/{target_file} (~10.4 GB)...", flush=True)
     downloaded_path = Path(hf_download_fn(repo_id=target_repo, filename=target_file)).resolve()
+    _link_or_copy_to_local_ssd(downloaded_path, local_model_file)
 
     if drive_model_file and downloaded_path.exists() and downloaded_path.stat().st_size >= min_valid_size:
-        try:
-            print(f"[+] Saving model permanently to Google Drive ({drive_model_file}) for fast 90s future startups...", flush=True)
-            _copy_large_file_chunked(downloaded_path, drive_model_file, label="Save to Drive")
-            print(f"[OK] Model cached on Google Drive! Future Colab sessions will never need to download it from Hugging Face again.")
-        except Exception as persist_err:
-            print(f"[-] Drive cache warning ({persist_err}); continuing with local model.")
+        if _can_persist_gguf_to_drive(drive_root, downloaded_path.stat().st_size):
+            try:
+                print(f"[+] Saving model permanently to Google Drive ({drive_model_file}) for fast 90s future startups...", flush=True)
+                _copy_large_file_chunked(downloaded_path, drive_model_file, label="Save to Drive")
+                print(
+                    "[OK] Model written to Google Drive mount! "
+                    "(Note: DriveFS finishes cloud upload in the background while Stage 2 runs; avoid disconnecting immediately.)"
+                )
+            except Exception as persist_err:
+                print(f"[-] Drive cache warning ({persist_err}); continuing with local model.")
 
     return str(downloaded_path)
 
@@ -427,7 +568,7 @@ class LocalGPUClient:
         gguf_repo: str = "bartowski/Qwen2.5-14B-Instruct-GGUF",
         gguf_filename: str = "Qwen2.5-14B-Instruct-Q5_K_M.gguf",
         context_length: int = 16384,
-        max_new_tokens: int = 2400,
+        max_new_tokens: int = 4096,
         preferred_gguf_repo: str = "Qwen/Qwen3-14B-GGUF",
         preferred_gguf_filename: str = "Qwen3-14B-Q5_K_M.gguf",
     ):
@@ -561,9 +702,28 @@ class LocalGPUClient:
         print(f"[+] {model_name} loaded into GPU VRAM successfully!")
 
     def extract(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        active_sys = system_prompt or EXTRACTION_SYSTEM_PROMPT
+        is_round2_arabic = (
+            "ROUND 2" in active_sys
+            or "CLASSICAL ARABIC LOCALIZATION" in active_sys
+            or "ROUND 1 EXTRACTED ENGLISH DOSSIERS" in (prompt or "")
+        )
+        user_content = prompt or ""
+        if "/no_think" not in user_content:
+            user_content = f"{user_content.rstrip()}\n/no_think"
+
+        fallback_system = (
+            COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
+            if is_round2_arabic
+            else (
+                "You are an expert Islamic dialectical argument extractor. "
+                "Analyze the transcript and extract high-yield Q&A dialectical units as a valid JSON array matching the schema. /no_think"
+            )
+        )
+
         messages = [
-            {"role": "system", "content": system_prompt or EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": active_sys},
+            {"role": "user", "content": user_content},
         ]
 
         if self.backend == "gguf":
@@ -582,21 +742,17 @@ class LocalGPUClient:
             safety_margin = 64
             avail = self.context_length - prompt_tokens - safety_margin
 
-            # If available generation headroom is too tight (< 800 tokens), switch to compact system prompt to free ~5000 tokens
+            # If available generation headroom is too tight (< 1200 tokens), switch to compact system prompt
             active_messages = messages
-            if avail < 800:
-                fallback_system = (
-                    "You are an expert Islamic dialectical argument extractor. "
-                    "Analyze the transcript and extract high-yield Q&A dialectical units as a valid JSON array matching the schema."
-                )
+            if avail < 1200:
                 active_messages = [
                     {"role": "system", "content": fallback_system},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": user_content},
                 ]
-                avail = max(512, self.context_length - int(len(prompt.split()) * 2.2) - safety_margin)
+                avail = max(1024, self.context_length - int(len(user_content.split()) * 2.2) - safety_margin)
 
             # Ensure effective_max_tokens respects the remaining context without trimming critical metadata
-            effective_max_tokens = max(256, min(self.max_new_tokens, avail))
+            effective_max_tokens = max(512, min(self.max_new_tokens, avail))
 
             try:
                 res = self.llm.create_chat_completion(
@@ -609,18 +765,14 @@ class LocalGPUClient:
             except ValueError as ve:
                 if "exceed context window" in str(ve).lower():
                     # Emergency context recovery: compact system prompt and generate
-                    fallback_system = (
-                        "You are an expert Islamic dialectical argument extractor. "
-                        "Analyze the transcript and extract high-yield Q&A dialectical units as a valid JSON array matching the schema."
-                    )
                     compact_messages = [
                         {"role": "system", "content": fallback_system},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": user_content},
                     ]
                     try:
                         res = self.llm.create_chat_completion(
                             messages=compact_messages,
-                            max_tokens=min(self.max_new_tokens, 1800),
+                            max_tokens=min(self.max_new_tokens, 2400),
                             temperature=0.12,
                             top_p=0.9,
                         )
@@ -635,12 +787,20 @@ class LocalGPUClient:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        text_input = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        max_gen_tokens = min(self.max_new_tokens, 2400)
+        try:
+            text_input = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            text_input = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        max_gen_tokens = min(self.max_new_tokens, 3200)
         max_prompt_len = min(16384, max(1024, self.context_length - max_gen_tokens - 64))
         inputs = self.tokenizer(
             [text_input],
@@ -678,14 +838,9 @@ class LocalGPUClient:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # Compact prompt with minimal system instruction so the full user dialogue transcript is preserved
-            fallback_system = (
-                "You are an expert Islamic dialectical argument extractor. "
-                "Analyze the transcript and extract high-yield Q&A dialectical units as a valid JSON array matching the schema."
-            )
             fallback_messages = [
                 {"role": "system", "content": fallback_system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ]
             fallback_text = self.tokenizer.apply_chat_template(
                 fallback_messages,
@@ -701,7 +856,7 @@ class LocalGPUClient:
             with torch.inference_mode():
                 gen_ids = self.model.generate(
                     **compact_inputs,
-                    max_new_tokens=800,
+                    max_new_tokens=1600,
                     temperature=0.12,
                     top_p=0.9,
                     do_sample=True,

@@ -546,6 +546,163 @@ class TestRootCauseGuards(unittest.TestCase):
         sig = inspect.signature(Stage2ScenarioExtractor.__init__)
         self.assertEqual(sig.parameters["context_length"].default, 16384)
 
+    def test_strip_qwen3_think_blocks_in_json_parsers(self):
+        """Ensures closed and unclosed Qwen3 <think> blocks with braces do not corrupt JSON parsing."""
+        from core.scenario_extractor import clean_llm_json_array
+        from core.colab_runner import clean_llm_json_response
+
+        raw_with_closed_think = (
+            "<think>\nLet me check the schema {question_ar, core_answer_summary_ar} and array [0].\n</think>\n"
+            '[{"question_turn_id": "T1", "answer_turn_id": "T2", "question_en": "Who created God?", "question_ar": "من خلق الله؟"}]'
+        )
+        parsed_a = clean_llm_json_array(raw_with_closed_think)
+        parsed_b = clean_llm_json_response(raw_with_closed_think)
+        self.assertEqual(len(parsed_a), 1)
+        self.assertEqual(parsed_a[0]["question_ar"], "من خلق الله؟")
+        self.assertEqual(len(parsed_b), 1)
+        self.assertEqual(parsed_b[0]["question_ar"], "من خلق الله؟")
+
+        raw_with_unclosed_think = (
+            "<think>Translating into Classical Arabic...\n"
+            '[{"question_turn_id": "T1", "answer_turn_id": "T2", "question_en": "Is Jesus God?", "question_ar": "هل عيسى هو الله؟"}]'
+        )
+        parsed_unclosed = clean_llm_json_array(raw_with_unclosed_think)
+        self.assertEqual(len(parsed_unclosed), 1)
+        self.assertEqual(parsed_unclosed[0]["question_ar"], "هل عيسى هو الله؟")
+
+    def test_substantive_answer_turn_recovery_from_filler_turn(self):
+        """Ensures tiny filler turns ('Can' or 'What do you think about that? That deep? Well,') re-anchor to substantive Da'ee turns."""
+        from core.scenario_extractor import anchor_and_enrich_extracted_unit
+
+        scenario = {
+            "video_id": "rEuKJ26ODgw",
+            "youtube_url": "https://www.youtube.com/watch?v=rEuKJ26ODgw",
+            "title_ar": "حوار الشيخ عثمان",
+            "speakers": [
+                {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_uthman", "display_name_en": "Sheikh Uthman Ibn Farooq", "display_name_ar": "الشيخ عثمان بن فاروق"},
+                {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Interlocutor", "display_name_ar": "المحاور"},
+            ],
+            "turns": [
+                {"turn_id": "T0547", "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 2428000, "end_ms": 2429000, "start_fmt": "40:28", "text_original": "Can"},
+                {"turn_id": "T0548", "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 2446000, "end_ms": 2452000, "start_fmt": "40:46", "text_original": "You pray. Can you ask and you shall receive."},
+                {"turn_id": "T0549", "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 2453000, "end_ms": 2468000, "start_fmt": "40:53", "text_original": "In Islam when we pray to Allah He answers according to His infinite wisdom and our true benefit."},
+            ],
+        }
+        raw_unit = {
+            "question_turn_id": "T0548",
+            "answer_turn_id": "T0547",
+            "question_en": "Why isn't every prayer answered immediately?",
+            "question_ar": "لماذا لا يستجاب كل دعاء فوراً؟",
+            "core_answer_summary_en": "Prayer in Islam is answered according to divine wisdom.",
+            "core_answer_summary_ar": "الدعاء في الإسلام يستجاب وفق الحكمة الإلهية البالغة.",
+            "verbatim_quote": "Can",
+            "dialogue_exchange": [
+                {"turn_id": "T0548", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "You pray. Can you ask and you shall receive."},
+                {"turn_id": "T0547", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "Can"},
+            ],
+        }
+        enriched = anchor_and_enrich_extracted_unit(raw_unit, scenario, 1, 2400000, 1)
+        self.assertIsNotNone(enriched)
+        self.assertEqual(enriched["answer_turn_id"], "T0549")
+        self.assertEqual(enriched["answer_timestamp_seconds"], 2453)
+        self.assertEqual(
+            enriched["verbatim_quote"],
+            "In Islam when we pray to Allah He answers according to His infinite wisdom and our true benefit.",
+        )
+
+    def test_round2_per_unit_arabic_retry_when_batch_r2_truncates(self):
+        """Ensures extract_video_m6 retries per-unit Arabic localization if initial Round 2 returns empty []."""
+        import tempfile
+        import json
+        from pathlib import Path
+        from core.drive_sync import SharedWorkspace
+        from core.scenario_extractor import Stage2ScenarioExtractor
+
+        class TruncatingBatchR2MockClient:
+            def __init__(self):
+                self.r2_calls = 0
+
+            def extract_round1_english(self, prompt: str) -> str:
+                return json.dumps([
+                    {
+                        "question_turn_id": "V1_T01",
+                        "answer_turn_id": "V1_T02",
+                        "question_en": "Why do Muslims worship Allah alone instead of created beings?",
+                        "topic_category": "Theology & God's Existence",
+                        "core_answer_summary_en": "Only the uncreated Necessary Being who originated the universe deserves worship.",
+                        "logical_premises": ["P1", "P2", "C"],
+                        "dialogue_exchange": [
+                            {"turn_id": "V1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "Why worship the Creator alone?"},
+                            {"turn_id": "V1_T02", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "Because only the uncreated Creator who gave you life deserves worship."},
+                        ],
+                    }
+                ])
+
+            def extract_round2_arabic(self, english_units_json: str, prompt: str) -> str:
+                self.r2_calls += 1
+                # Simulate initial batch Round 2 truncation / <think> exhaustion returning no valid JSON
+                return "<think>Thinking too long without closing JSON..."
+
+            def extract(self, prompt: str, system_prompt: str = None) -> str:
+                # Per-unit retry uses COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT via .extract()
+                return json.dumps([
+                    {
+                        "question_turn_id": "V1_T01",
+                        "answer_turn_id": "V1_T02",
+                        "question_ar": "لماذا يعبد المسلمون الله وحده دون الكائنات المخلوقة؟",
+                        "core_answer_summary_ar": "لأن الخالق الأزلي واجب الوجود الذي أوجد الكون من العدم هو وحده المستحق للعبادة بحق.",
+                        "logical_premises_ar": ["المقدمة الأولى", "المقدمة الثانية", "النتيجة"],
+                        "dialogue_exchange": [
+                            {"turn_id": "V1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_ar": "لماذا نعبد الخالق وحده؟"},
+                            {"turn_id": "V1_T02", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_ar": "لأن الخالق غير المخلوق الذي وهبك الحياة هو وحده المستحق للعبادة."},
+                        ],
+                    }
+                ], ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(root_dir=Path(tmp), worker_name="test_r2_retry")
+            scen = {
+                "video_id": "V1",
+                "title_ar": "مناظرة التوحيد",
+                "youtube_url": "https://www.youtube.com/watch?v=V1",
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_uthman", "display_name_en": "Sheikh Uthman", "display_name_ar": "الشيخ عثمان"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Interlocutor", "display_name_ar": "المحاور"},
+                ],
+                "turns": [
+                    {"turn_id": "V1_T01", "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 6000, "start_fmt": "00:01", "end_fmt": "00:06", "text_original": "Why do Muslims worship the Creator alone instead of worshipping any powerful creature in the world?"},
+                    {"turn_id": "V1_T02", "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 7000, "end_ms": 18000, "start_fmt": "00:07", "end_fmt": "00:18", "text_original": "Because only the uncreated Creator who gave you life and sustains the entire universe deserves worship."},
+                ],
+            }
+            ws.atomic_write_json(ws.scenarios_dir / "V1.json", scen)
+            ws.advance_micro_step("V1", "M5_SCENARIO_BUILT")
+
+            mock_client = TruncatingBatchR2MockClient()
+            extractor = Stage2ScenarioExtractor(workspace=ws, llm_client=mock_client)
+            units = extractor.extract_video_m6("V1", verbose=False)
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0]["question_ar"], "لماذا يعبد المسلمون الله وحده دون الكائنات المخلوقة؟")
+            self.assertIn("الخالق الأزلي", units[0]["core_answer_summary_ar"])
+            self.assertEqual(units[0]["dialogue_exchange"][1]["text_ar"], "لأن الخالق غير المخلوق الذي وهبك الحياة هو وحده المستحق للعبادة.")
+
+    def test_find_valid_drive_gguf_promotes_completed_tmp_file(self):
+        """Ensures _find_valid_drive_gguf recovers a completed .tmp GGUF left by DriveFS FUSE."""
+        import tempfile
+        from pathlib import Path
+        from core.colab_runner import _find_valid_drive_gguf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = Path(tmp)
+            models_dir = drive_root / ".cache" / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            tmp_gguf = models_dir / "Qwen3-14B-Q5_K_M.gguf.tmp"
+            tmp_gguf.write_bytes(b"x" * 1024)
+
+            found = _find_valid_drive_gguf(drive_root, "Qwen3-14B-Q5_K_M.gguf", min_valid_size=512)
+            self.assertIsNotNone(found)
+            self.assertEqual(found.name, "Qwen3-14B-Q5_K_M.gguf")
+            self.assertFalse(tmp_gguf.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

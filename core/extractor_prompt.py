@@ -531,9 +531,10 @@ CORE TASKS:
    - Purge stray Latin words and Latin-Arabic splices (e.g. "المiracles" -> "المعجزات", "فالمachines" -> "فالآلات", "First Cause" -> "سبب أول / علة أولى", "two natures" -> "طبيعتين", "two wills" -> "إرادتين").
    - Use standard Arabic punctuation: comma (،), question mark (؟), full stop (.).
 
-4. PRESERVE ALL ROUND 1 ENGLISH METADATA:
-   - Retain all original English fields: question_turn_id, answer_turn_id, question_en, topic_category, topic_subcategory, interlocutor_type, core_answer_summary_en, logical_premises, fallacy_or_misconception_exposed, analogy_or_metaphor, analogies, socratic_question, interlocutor_verbatim_quote, verbatim_quote, timestamp_seconds, timestamp_formatted, tags.
-   - For each item in "dialogue_exchange", preserve turn_id, role, move_type, text_en, and add text_ar.
+4. PRESERVE ALL ROUND 1 IDENTIFIERS & OUTPUT ALL CLASSICAL ARABIC FIELDS:
+   - Retain `question_turn_id`, `answer_turn_id`, and `question_en` for exact unit alignment.
+   - To maximize token budget and prevent output truncation, focus your output on the Classical Arabic fields (`question_ar`, `topic_category_ar`, `core_answer_summary_ar`, `logical_premises_ar`, `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar`, `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`), `scriptural_citations` (preserving `source`, `reference`, `significance` and adding `significance_ar`), and `dialogue_exchange` (preserving `turn_id`, `role`, `move_type` and adding `text_ar` for every turn).
+   - Do NOT emit `<think>...</think>` blocks or chain-of-thought commentary; output ONLY the valid JSON array `[ { ... } ]`. /no_think
 
 EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
 [
@@ -542,60 +543,54 @@ EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
     "answer_turn_id": "...",
     "question_en": "...",
     "question_ar": "صياغة الشبهة أو السؤال من وجهة نظر السائل بالفصحى",
-    "topic_category": "...",
     "topic_category_ar": "الاسم الفصيح للباب الموضوعي",
-    "topic_subcategory": "...",
-    "interlocutor_type": "...",
-    "core_answer_summary_en": "...",
     "core_answer_summary_ar": "بيان برهاني حاسم ومحرر بالعربية الفصحى (دون صياغات سردية ميتا)",
-    "logical_premises": [ "Premise 1...", "Premise 2...", "Conclusion..." ],
     "logical_premises_ar": [
       "المقدمة الأولى: القاعدة العقلية أو العقدية الكلية",
       "المقدمة الثانية: الواقعة المشاهدة أو اعتراف الخصم",
       "النتيجة: الإلزام العقلي الحاسم الذي يدحض الشبهة"
     ],
-    "fallacy_or_misconception_exposed": "...",
     "fallacy_or_misconception_exposed_ar": "اسم المغالطة المنطقية وتفكيكها بالعربية الفصحى",
-    "analogy_or_metaphor": "...",
     "analogy_or_metaphor_ar": "المثال الواقعي أو القياس الحسي التوضيحي بالعربية الفصحى",
-    "analogies": [ "..." ],
     "analogies_ar": [ "..." ],
-    "socratic_question": "...",
     "socratic_question_ar": "السؤال السقراطي المعاكس (إلزام الخصم) بالعربية الفصحى",
     "scriptural_citations": [
       {
         "source": "Bible / Quran / Hadith / Torah",
         "reference": "...",
-        "significance": "...",
         "significance_ar": "البيان العقدي لدلالة هذا النص"
       }
     ],
-    "interlocutor_verbatim_quote": "...",
     "interlocutor_verbatim_quote_ar": "الترجمة العربية الفصحى لاقتباس المحاور الحرفي",
-    "verbatim_quote": "...",
     "verbatim_quote_ar": "الترجمة العربية الفصحى لاقتباس الداعية البرهاني",
     "dialogue_exchange": [
       {
         "turn_id": "...",
         "role": "INTERLOCUTOR",
         "move_type": "Objection",
-        "text_en": "...",
         "text_ar": "الترجمة العربية الفصحى الدقيقة للمداخلة"
       },
       {
         "turn_id": "...",
         "role": "MAIN_DAEE",
         "move_type": "Socratic Turn",
-        "text_en": "...",
         "text_ar": "الترجمة العربية الفصحى الدقيقة للمداخلة"
       }
-    ],
-    "timestamp_seconds": 120,
-    "timestamp_formatted": "02:00",
-    "tags": ["..."]
+    ]
   }
 ]
 """
+
+COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT = """You are a master Islamic kalam theologian and Classical Arabic translator (عالم ومحقق ومترجم شرعي).
+Translate and localize the provided Round 1 English Dialectical Dossiers into pure, eloquent Classical Arabic (فصحى رصينة خالية من الحروف الأعجمية).
+For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating:
+- `question_ar`, `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
+- `logical_premises_ar` (array of 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
+- `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar`
+- `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`
+- `scriptural_citations`: array with `reference` and `significance_ar`
+- `dialogue_exchange`: array preserving each `turn_id`, `role`, `move_type` and adding `text_ar`
+Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"""
 
 USER_ROUND2_PROMPT_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
 Video Title: {title_ar}
@@ -603,13 +598,13 @@ YouTube URL: {youtube_url}
 Episode: #{episode_index} ({start_fmt} -> {end_fmt})
 Target Da'ee: {target_daee_name} ({target_daee_id})
 
-ORIGINAL DIARIZED TRANSCRIPT:
+ORIGINAL DIARIZED TRANSCRIPT EXCERPT:
 {transcript_text}
 
 ROUND 1 EXTRACTED ENGLISH DOSSIERS:
 {english_units_json}
 
-Perform Theological Verification and Classical Arabic Localization on the English dossiers. Translate all fields into pure Classical Arabic (فصحى رصينة), enrich every dialogue exchange turn with text_ar, purge all foreign tokens, and output strictly the completed bilingual JSON array: [ {{ ... }} ]
+Perform Theological Verification and Classical Arabic Localization on the English dossiers. Translate all fields into pure Classical Arabic (فصحى رصينة), enrich every dialogue exchange turn with text_ar, purge all foreign tokens, and output strictly the completed JSON array without <think> blocks: [ {{ ... }} ] /no_think
 """
 
 

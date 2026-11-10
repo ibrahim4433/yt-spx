@@ -31,6 +31,7 @@ from core.extractor_prompt import (
     ROUND1_ENGLISH_EXTRACTION_PROMPT,
     USER_ROUND1_PROMPT_TEMPLATE,
     ROUND2_ARABIC_VERIFICATION_PROMPT,
+    COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
     USER_ROUND2_PROMPT_TEMPLATE,
 )
 from core.audio_diarizer import ms_to_fmt
@@ -67,9 +68,27 @@ def _normalize_extracted_item(x: Dict[str, Any]) -> Dict[str, Any]:
     return x
 
 
+def _strip_thinking_blocks(raw_text: str) -> str:
+    """Removes Qwen3 <think>...</think> blocks (closed or truncated) before JSON array parsing."""
+    if not raw_text:
+        return ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE).strip()
+    if "<think>" in cleaned.lower():
+        idx_think = cleaned.lower().find("<think>")
+        after_think = cleaned[idx_think + 7 :]
+        json_start = re.search(r"\[\s*\{|\{\s*\"", after_think)
+        if json_start:
+            cleaned = (cleaned[:idx_think] + after_think[json_start.start() :]).strip()
+        else:
+            cleaned = cleaned[:idx_think].strip()
+    return cleaned
+
+
 def clean_llm_json_array(raw_text: str) -> List[Dict[str, Any]]:
-    """Parses JSON arrays robustly, recovering completed objects even if generation truncated."""
-    text = (raw_text or "").strip()
+    """Parses JSON arrays robustly, stripping <think> blocks and recovering completed objects even if truncated."""
+    text = _strip_thinking_blocks(raw_text or "")
+    if not text:
+        return []
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if fence_match:
         text = fence_match.group(1).strip()
@@ -445,7 +464,8 @@ DANGLING_PREPOSITIONS_EN = {
     "into", "through", "after", "over", "between", "out", "against",
     "during", "without", "before", "under", "around", "among",
     "and", "or", "but", "because", "as", "if", "when", "than", "that",
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being"
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "well",
 }
 
 
@@ -588,6 +608,39 @@ def anchor_and_enrich_extracted_unit(
         # Strictly reject / drop unit if candidate answer turn is missing or belongs to interlocutor
         return None
 
+    # Substantive Answer Turn Recovery:
+    # If the LLM selected a tiny filler turn (< 8 cleaned words, e.g. "Can" or "What do you think about that? That deep? Well,")
+    # or a turn before the question turn, re-anchor a_turn to the first substantive MAIN_DAEE/CO_DAEE turn (>= 8 words).
+    a_cleaned_text = clean_dangling_quote((a_turn.get("text_original") or "").strip())
+    a_orig_words = [w for w in re.split(r"\s+", a_cleaned_text) if w]
+    q_start_ms = int(q_turn["start_ms"]) if q_turn is not None else int(window_start_ms)
+    if len(a_orig_words) < 8 or (q_turn is not None and int(a_turn.get("start_ms", 0)) < q_start_ms):
+        raw_ex_candidates = item.get("dialogue_exchange") or item.get("dialogue_trajectory") or []
+        replacement_turn = None
+        if isinstance(raw_ex_candidates, list):
+            for ex in raw_ex_candidates:
+                if not isinstance(ex, dict):
+                    continue
+                cand_tid = str(ex.get("turn_id") or "").strip()
+                cand_turn = cohesive_turns_by_id.get(cand_tid) or raw_turns_by_id.get(cand_tid)
+                if cand_turn and cand_turn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+                    cand_words = [w for w in re.split(r"\s+", clean_dangling_quote((cand_turn.get("text_original") or "").strip())) if w]
+                    if len(cand_words) >= 8 and int(cand_turn.get("start_ms", 0)) >= q_start_ms:
+                        replacement_turn = cand_turn
+                        break
+        if replacement_turn is None:
+            for ct in cohesive_turns:
+                if ct.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+                    ct_start = int(ct.get("start_ms", 0))
+                    ct_words = [w for w in re.split(r"\s+", clean_dangling_quote((ct.get("text_original") or "").strip())) if w]
+                    if ct_start >= q_start_ms and (ct_start - q_start_ms) <= 180_000 and len(ct_words) >= 8:
+                        replacement_turn = ct
+                        break
+        if replacement_turn is not None:
+            a_turn = replacement_turn
+            a_tid = str(a_turn.get("turn_id") or a_tid)
+            item["answer_turn_id"] = a_tid
+
     ans_sec = int(a_turn["start_ms"] // 1000)
     daee_spk_id = a_turn.get("speaker_id", main_daee["speaker_id"] if main_daee else "")
 
@@ -711,8 +764,19 @@ def anchor_and_enrich_extracted_unit(
             item["verbatim_quote"] = clean_dangling_quote(a_orig)
             if a_turn.get("text_ar"):
                 item["verbatim_quote_ar"] = a_turn["text_ar"].strip()
-        elif raw_vq:
-            item["verbatim_quote"] = clean_dangling_quote(raw_vq)
+        else:
+            # Fallback to the longest substantive Da'ee turn in enriched_exchange
+            daee_ex_turns = [
+                ex for ex in enriched_exchange
+                if ex.get("role") in ("MAIN_DAEE", "CO_DAEE") and len((ex.get("text_en") or "").split()) >= 8
+            ]
+            if daee_ex_turns:
+                best_ex = max(daee_ex_turns, key=lambda x: len((x.get("text_en") or "").split()))
+                item["verbatim_quote"] = clean_dangling_quote(best_ex["text_en"].strip())
+                if best_ex.get("text_ar") and not item.get("verbatim_quote_ar"):
+                    item["verbatim_quote_ar"] = best_ex["text_ar"].strip()
+            elif raw_vq:
+                item["verbatim_quote"] = clean_dangling_quote(raw_vq)
     elif raw_vq:
         item["verbatim_quote"] = clean_dangling_quote(raw_vq)
 
@@ -956,6 +1020,63 @@ def merge_round1_and_round2_units(
     return final_merged
 
 
+def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
+    """Verifies that a Q&A dossier contains genuine Classical Arabic in question_ar and core_answer_summary_ar."""
+    if not isinstance(unit, dict):
+        return False
+    q_ar = str(unit.get("question_ar") or "").strip()
+    ans_ar = str(unit.get("core_answer_summary_ar") or "").strip()
+    if not q_ar or not ans_ar:
+        return False
+    return bool(re.search(r"[\u0600-\u06ff]", q_ar) and re.search(r"[\u0600-\u06ff]", ans_ar))
+
+
+def _build_round2_transcript_excerpt(
+    formatted_transcript: str,
+    r1_units: List[Dict[str, Any]],
+    max_words: int = 900,
+) -> str:
+    """
+    Selects a focused transcript excerpt for Round 2 centered on the turn IDs referenced
+    by Round 1 units so the prompt never overflows the LLM context window.
+    """
+    text = (formatted_transcript or "").strip()
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+
+    referenced_tids = set()
+    for u in r1_units:
+        if not isinstance(u, dict):
+            continue
+        for k in ("question_turn_id", "answer_turn_id"):
+            val = str(u.get(k) or "").strip()
+            if val:
+                referenced_tids.add(val)
+        for ex in (u.get("dialogue_exchange") or u.get("dialogue_trajectory") or []):
+            if isinstance(ex, dict) and ex.get("turn_id"):
+                referenced_tids.add(str(ex["turn_id"]).strip())
+
+    lines = text.splitlines()
+    selected_lines = []
+    word_acc = 0
+    for idx, ln in enumerate(lines):
+        if any(tid in ln for tid in referenced_tids):
+            # Include immediate neighbors for natural flow
+            start_i = max(0, idx - 1)
+            end_i = min(len(lines), idx + 2)
+            for sub_ln in lines[start_i:end_i]:
+                if sub_ln not in selected_lines:
+                    w_cnt = len(sub_ln.split())
+                    if word_acc + w_cnt <= max_words:
+                        selected_lines.append(sub_ln)
+                        word_acc += w_cnt
+
+    if selected_lines:
+        return "\n".join(selected_lines)
+    return " ".join(words[:max_words])
+
+
 class Stage2ScenarioExtractor:
     """
     Runs Qwen 2.5 14B Instruct (Q5_K_M GGUF, 16,384 ctx, 8-bit KV cache) over
@@ -988,7 +1109,11 @@ class Stage2ScenarioExtractor:
 
         if state["step_rank"] >= STEP_RANK["M6_LLM_EXTRACTED"] and qa_shard_path.exists():
             saved = self.workspace.read_json(qa_shard_path, default={}) or {}
-            return saved.get("units", []) if isinstance(saved, dict) else saved
+            saved_units = saved.get("units", []) if isinstance(saved, dict) else saved
+            if isinstance(saved_units, list) and (
+                not saved_units or all(has_valid_arabic_localization(u) for u in saved_units)
+            ):
+                return saved_units
 
         if not scen_path.exists():
             return None
@@ -1034,15 +1159,22 @@ class Stage2ScenarioExtractor:
             partial_en_file = self.workspace.partial_extractions_dir / f"{video_id}_win{w_idx:03d}.en.json"
 
             # 1. Micro-Step Resume: load already-completed episode window from Drive!
+            stale_partial_en_units = None
             if partial_file.exists():
                 cached_win_units = self.workspace.read_json(partial_file, default=None)
                 if isinstance(cached_win_units, list):
-                    for cu in cached_win_units:
-                        if not _is_duplicate_qa(cu, all_units):
-                            cu["id"] = f"{video_id}_{len(all_units) + 1:03d}"
-                            all_units.append(cu)
-                    completed_win_ids.append(w_idx)
-                    continue
+                    if not cached_win_units or all(has_valid_arabic_localization(cu) for cu in cached_win_units):
+                        for cu in cached_win_units:
+                            if not _is_duplicate_qa(cu, all_units):
+                                cu["id"] = f"{video_id}_{len(all_units) + 1:03d}"
+                                all_units.append(cu)
+                        completed_win_ids.append(w_idx)
+                        continue
+                    else:
+                        # Self-heal stale English-only partial window by treating it as Round 1 units for Round 2 Arabic localization!
+                        stale_partial_en_units = cached_win_units
+                        if verbose:
+                            print(f"      [Window {w_idx}] Self-healing missing Arabic in cached partial window ({len(cached_win_units)} units)...", flush=True)
 
             if w["word_count"] < 20:
                 self.workspace.atomic_write_json(partial_file, [])
@@ -1098,12 +1230,12 @@ class Stage2ScenarioExtractor:
                 completed_win_ids.append(w_idx)
                 continue
 
-            # 2. Check for intermediate Round 1 checkpoint (.en.json)
+            # 2. Check for intermediate Round 1 checkpoint (.en.json) or stale English-only partial
             elapsed_r1 = 0.0
             elapsed_r2 = 0.0
             elapsed = 0.0
-            r1_units = None
-            if partial_en_file.exists():
+            r1_units = stale_partial_en_units
+            if r1_units is None and partial_en_file.exists():
                 cached_en = self.workspace.read_json(partial_en_file, default=None)
                 if isinstance(cached_en, list):
                     r1_units = cached_en
@@ -1142,6 +1274,7 @@ class Stage2ScenarioExtractor:
                 continue
 
             # 3. Round 2: Bilingual Theological Verification & Classical Arabic Translation
+            r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_units, max_words=900)
             r1_json_str = json.dumps(r1_units, ensure_ascii=False, indent=2)
             prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
                 title_ar=scenario.get("title_ar", ""),
@@ -1151,7 +1284,7 @@ class Stage2ScenarioExtractor:
                 end_fmt=w["end_fmt"],
                 target_daee_name=target_name,
                 target_daee_id=target_id,
-                transcript_text=w["formatted_transcript"],
+                transcript_text=r2_excerpt,
                 english_units_json=r1_json_str,
             )
             t0_r2 = time.time()
@@ -1160,10 +1293,49 @@ class Stage2ScenarioExtractor:
             else:
                 raw_out_r2 = self.client.extract(prompt_r2, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
             elapsed_r2 = round(time.time() - t0_r2, 1)
-            elapsed = round(elapsed_r1 + elapsed_r2, 1)
 
             parsed_r2 = clean_llm_json_array(raw_out_r2)
             final_raw_units = merge_round1_and_round2_units(r1_units, parsed_r2)
+
+            # 3B. Per-Unit Targeted Arabic Retry if batch Round 2 truncated or missed any unit's Arabic fields
+            repaired_units: List[Dict[str, Any]] = []
+            for idx_u, merged_u in enumerate(final_raw_units):
+                if has_valid_arabic_localization(merged_u):
+                    repaired_units.append(merged_u)
+                    continue
+
+                single_r1 = [r1_units[idx_u]] if idx_u < len(r1_units) else [merged_u]
+                single_json_str = json.dumps(single_r1, ensure_ascii=False, indent=2)
+                single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], single_r1, max_words=450)
+                single_prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
+                    title_ar=scenario.get("title_ar", ""),
+                    youtube_url=scenario.get("youtube_url", ""),
+                    episode_index=w["episode_index"],
+                    start_fmt=w["start_fmt"],
+                    end_fmt=w["end_fmt"],
+                    target_daee_name=target_name,
+                    target_daee_id=target_id,
+                    transcript_text=single_excerpt,
+                    english_units_json=single_json_str,
+                )
+                t0_retry = time.time()
+                try:
+                    raw_retry = self.client.extract(single_prompt_r2, system_prompt=COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
+                except TypeError:
+                    if hasattr(self.client, "extract_round2_arabic"):
+                        raw_retry = self.client.extract_round2_arabic(single_json_str, single_prompt_r2)
+                    else:
+                        raw_retry = self.client.extract(single_prompt_r2)
+                elapsed_r2 = round(elapsed_r2 + (time.time() - t0_retry), 1)
+                parsed_retry = clean_llm_json_array(raw_retry)
+                if parsed_retry:
+                    merged_single = merge_round1_and_round2_units([merged_u], parsed_retry)[0]
+                    repaired_units.append(merged_single)
+                else:
+                    repaired_units.append(merged_u)
+
+            final_raw_units = repaired_units
+            elapsed = round(elapsed_r1 + elapsed_r2, 1)
 
             win_enriched: List[Dict[str, Any]] = []
             for raw_item in final_raw_units:
@@ -1239,6 +1411,7 @@ class Stage2ScenarioExtractor:
             "M6_LLM_EXTRACTED",
             artifacts={"qa_json": str(qa_shard_path)},
             metrics={"qa_count": len(all_units)},
+            extra_updates={"db_qa_synced": False},
         )
 
         if verbose:

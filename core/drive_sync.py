@@ -394,18 +394,37 @@ class SharedWorkspace:
             return stats
 
         try:
-            from db.database import init_db, ingest_scenario_payload, ingest_extraction_payload
-            init_db(db_path=self.data_dir / "dawah_knowledge.db")
+            from db.database import init_db, ingest_scenario_payload, ingest_extraction_payload, get_db_connection
+            db_file = self.data_dir / "dawah_knowledge.db"
+            init_db(db_path=db_file)
+
+            # Query current SQLite state so stale .state.json flags self-heal automatically
+            db_stage1_ok = set()
+            db_stage2_ok = set()
+            db_missing_arabic_vids = set()
+            try:
+                conn = get_db_connection(db_path=db_file)
+                try:
+                    for r in conn.execute("SELECT video_id FROM videos WHERE stage1_status = 'completed' AND turns_count > 0"):
+                        db_stage1_ok.add(r[0])
+                    for r in conn.execute("SELECT video_id FROM videos WHERE stage2_status = 'completed'"):
+                        db_stage2_ok.add(r[0])
+                    for r in conn.execute("SELECT DISTINCT video_id FROM qa_units WHERE question_ar IS NULL OR TRIM(question_ar) = ''"):
+                        db_missing_arabic_vids.add(r[0])
+                finally:
+                    conn.close()
+            except Exception:
+                pass
 
             # 1. Sync Scenario Transcripts (M5+)
             for scen_path in sorted(self.scenarios_dir.glob("*.json")):
                 vid = scen_path.stem
                 st = self.get_video_state(vid)
-                if st.get("db_scenario_synced") and not force_reingest:
+                if st.get("db_scenario_synced") and (vid in db_stage1_ok) and not force_reingest:
                     continue
                 payload = self.read_json(scen_path)
                 if isinstance(payload, dict) and payload.get("video_id"):
-                    ingest_scenario_payload(payload, db_path=self.data_dir / "dawah_knowledge.db")
+                    ingest_scenario_payload(payload, db_path=db_file)
                     st["db_scenario_synced"] = True
                     self.atomic_write_json(self.state_path(vid), st)
                     stats["scenarios_synced"] += 1
@@ -414,11 +433,11 @@ class SharedWorkspace:
             for qa_path in sorted(self.extractions_dir.glob("*.qa.json")):
                 vid = qa_path.name.replace(".qa.json", "")
                 st = self.get_video_state(vid)
-                if st.get("db_qa_synced") and not force_reingest:
+                if st.get("db_qa_synced") and (vid in db_stage2_ok) and (vid not in db_missing_arabic_vids) and not force_reingest:
                     continue
                 payload = self.read_json(qa_path)
                 units = payload.get("units", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
-                ingest_extraction_payload(vid, units, db_path=self.data_dir / "dawah_knowledge.db")
+                ingest_extraction_payload(vid, units, db_path=db_file)
                 st["db_qa_synced"] = True
                 self.atomic_write_json(self.state_path(vid), st)
                 stats["qa_videos_synced"] += 1

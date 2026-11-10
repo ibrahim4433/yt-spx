@@ -226,15 +226,20 @@ def select_stage2_candidates(
         for p in workspace.partial_extractions_dir.glob("*_win*.json")
     }
 
+    from core.scenario_extractor import has_valid_arabic_localization
+
     candidates = []
     for scen_path in workspace.scenarios_dir.glob("*.json"):
         vid = scen_path.stem
         qa_path = workspace.extractions_dir / f"{vid}.qa.json"
         if qa_path.exists():
-            continue
+            saved = workspace.read_json(qa_path, default={}) or {}
+            saved_units = saved.get("units", []) if isinstance(saved, dict) else saved
+            if isinstance(saved_units, list) and (
+                not saved_units or all(has_valid_arabic_localization(u) for u in saved_units)
+            ):
+                continue
         st = workspace.get_video_state(vid)
-        if st["step_rank"] >= STEP_RANK["M6_LLM_EXTRACTED"] and qa_path.exists():
-            continue
         if int(st.get("error_count", 0)) >= 5:
             continue
         meta = manifest_by_id.get(vid, {"video_id": vid, "priority_score": 50})
