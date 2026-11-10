@@ -143,32 +143,42 @@ class WarmDemucsCleaner:
                 n_frames = wf.getnframes()
                 raw = wf.readframes(n_frames)
             stereo = np.frombuffer(raw, dtype=np.int16).astype(np.float32).reshape(-1, 2).T / 32768.0
+            del raw
             wav_tensor = torch.from_numpy(stereo).unsqueeze(0)  # (1, 2, T)
 
             ref = wav_tensor.mean(0)
-            mean = ref.mean()
-            std = ref.std() + 1e-8
+            mean = float(ref.mean().item()) if hasattr(ref.mean(), "item") else float(ref.mean())
+            std = (float(ref.std().item()) if hasattr(ref.std(), "item") else float(ref.std())) + 1e-8
+            del ref
             wav_norm = (wav_tensor - mean) / std
+            del wav_tensor, stereo
 
             target_dev = "cuda" if (self.device == "cuda" and torch.cuda.is_available()) else "cpu"
             with torch.inference_mode():
+                wav_dev = wav_norm.to(target_dev)
+                if target_dev == "cuda":
+                    del wav_norm
                 sources = apply_model(
                     self._model,
-                    wav_norm.to(target_dev),
+                    wav_dev,
                     segment=7.0,
                     overlap=0.25,
                     shifts=0,
                     split=True,
                     device=target_dev,
                 )
-            # Locate 'vocals' stem index in htdemucs.sources
-            vocal_idx = list(self._model.sources).index("vocals")
-            vocals = (sources[0, vocal_idx].cpu() * std + mean).mean(dim=0).numpy()
-            del sources, wav_tensor, wav_norm
+                del wav_dev
+                # Locate 'vocals' stem index in htdemucs.sources and slice BEFORE .cpu() transfer
+                vocal_idx = list(self._model.sources).index("vocals")
+                vocal_stem = sources[0, vocal_idx].detach().cpu()
+                del sources
+            vocals = (vocal_stem * std + mean).mean(dim=0).numpy()
+            del vocal_stem
             if target_dev == "cuda":
                 torch.cuda.empty_cache()
 
             write_wav_float32(tmp_voc_44k, vocals, sr=self._sr)
+            del vocals
             decode_audio_to_16k_wav(tmp_voc_44k, chunk_out_16k_wav)
         finally:
             tmp_44k.unlink(missing_ok=True)
@@ -311,9 +321,14 @@ def clean_vocals_m2(
                 )
             chunk_paths.append(staged_chunk)
 
+        # Free full-video raw_samples array from System RAM before stitching vocal chunks
+        import gc
+        del raw_samples
+        gc.collect()
         vocal_raw_samples = stitch_crossfaded_chunks(chunk_paths, crossfade_sec=CROSSFADE_SEC)
     else:
         vocal_raw_samples = raw_samples
+        del raw_samples
 
     # 1. Measure raw pre-normalization mic proximity energy BEFORE dynaudnorm!
     rms_timeline = compute_frame_rms_db(vocal_raw_samples, sr=SAMPLE_RATE_16K, hop_sec=0.25)
@@ -324,7 +339,7 @@ def clean_vocals_m2(
 
     vocal_unleveled_wav = local_tmp_dir / f"{video_id}_vocals_unleveled.wav"
     write_wav_float32(vocal_unleveled_wav, vocal_raw_samples, sr=SAMPLE_RATE_16K)
-    del raw_samples, vocal_raw_samples
+    del vocal_raw_samples
 
     # 2. Apply High-Pass 80Hz wind/rumble cut + Conversational Dynamic Loudness Leveling
     leveled_wav = local_tmp_dir / f"{video_id}_leveled_16k.wav"

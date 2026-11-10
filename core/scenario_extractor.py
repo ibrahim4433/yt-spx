@@ -382,7 +382,7 @@ def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int
 
 def build_episode_windows(
     turns: List[Dict[str, Any]],
-    max_words_per_window: int = 2400,
+    max_words_per_window: int = 3400,
     context_carry_turns: int = 4,
 ) -> List[Dict[str, Any]]:
     """
@@ -1034,7 +1034,7 @@ def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
 def _build_round2_transcript_excerpt(
     formatted_transcript: str,
     r1_units: List[Dict[str, Any]],
-    max_words: int = 900,
+    max_words: int = 1800,
 ) -> str:
     """
     Selects a focused transcript excerpt for Round 2 centered on the turn IDs referenced
@@ -1087,7 +1087,7 @@ class Stage2ScenarioExtractor:
         self,
         workspace: SharedWorkspace,
         model_name: str = "Qwen/Qwen2.5-14B-Instruct",
-        context_length: int = 16384,
+        context_length: int = 20480,
         llm_client: Optional[Any] = None,
     ):
         self.workspace = workspace
@@ -1136,7 +1136,7 @@ class Stage2ScenarioExtractor:
             return []
 
         cohesive_turns = merge_consecutive_speaker_turns(turns)
-        windows = build_episode_windows(turns, max_words_per_window=2400, context_carry_turns=4)
+        windows = build_episode_windows(turns, max_words_per_window=3400, context_carry_turns=4)
         speakers_summary = ", ".join(
             f"{s['speaker_id']}={s['role']}({s['display_name_en']})"
             for s in scenario.get("speakers", [])
@@ -1274,7 +1274,7 @@ class Stage2ScenarioExtractor:
                 continue
 
             # 3. Round 2: Bilingual Theological Verification & Classical Arabic Translation
-            r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_units, max_words=900)
+            r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_units, max_words=1800)
             r1_json_str = json.dumps(r1_units, ensure_ascii=False, indent=2)
             prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
                 title_ar=scenario.get("title_ar", ""),
@@ -1306,7 +1306,7 @@ class Stage2ScenarioExtractor:
 
                 single_r1 = [r1_units[idx_u]] if idx_u < len(r1_units) else [merged_u]
                 single_json_str = json.dumps(single_r1, ensure_ascii=False, indent=2)
-                single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], single_r1, max_words=450)
+                single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], single_r1, max_words=900)
                 single_prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
                     title_ar=scenario.get("title_ar", ""),
                     youtube_url=scenario.get("youtube_url", ""),

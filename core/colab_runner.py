@@ -567,8 +567,8 @@ class LocalGPUClient:
         use_gguf_q5: bool = True,
         gguf_repo: str = "bartowski/Qwen2.5-14B-Instruct-GGUF",
         gguf_filename: str = "Qwen2.5-14B-Instruct-Q5_K_M.gguf",
-        context_length: int = 16384,
-        max_new_tokens: int = 4096,
+        context_length: int = 20480,
+        max_new_tokens: int = 6144,
         preferred_gguf_repo: str = "Qwen/Qwen3-14B-GGUF",
         preferred_gguf_filename: str = "Qwen3-14B-Q5_K_M.gguf",
     ):
@@ -629,24 +629,26 @@ class LocalGPUClient:
                         )
                         model_path = _resolve_and_cache_gguf_model(gguf_repo, gguf_filename, hf_hub_download)
 
-                    # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~1.2 GB at 12,288 context)
+                    # GGML_TYPE_Q8_0 = 8 for 8-bit KV Cache (~1.9 GB at 20,480 context, total ~12.8-13.2 GB VRAM on T4)
                     try:
                         self.llm = Llama(
                             model_path=model_path,
                             n_gpu_layers=-1,
                             n_ctx=context_length,
-                            n_batch=1024,
+                            n_batch=2048,
                             type_k=8,
                             type_v=8,
                             flash_attn=True,
                             verbose=False,
                         )
                     except Exception as fa_err:
-                        print(f"[-] GGUF flash_attn note ({fa_err}); retrying with standard attention...")
+                        print(f"[-] GGUF flash_attn/20k init note ({fa_err}); retrying with step-down attention/batch...")
+                        fallback_ctx = min(context_length, 16384)
+                        self.context_length = fallback_ctx
                         self.llm = Llama(
                             model_path=model_path,
                             n_gpu_layers=-1,
-                            n_ctx=context_length,
+                            n_ctx=fallback_ctx,
                             n_batch=1024,
                             type_k=8,
                             type_v=8,
@@ -654,7 +656,7 @@ class LocalGPUClient:
                             verbose=False,
                         )
                     self.backend = "gguf"
-                    print(f"[+] GGUF Q5_K_M + 8-bit KV Cache ({context_length} ctx) loaded into VRAM!")
+                    print(f"[+] GGUF Q5_K_M + 8-bit KV Cache ({self.context_length} ctx, n_batch=2048) loaded into VRAM!")
                     return
                 else:
                     print("[-] llama-cpp-python lacks CUDA offload; falling back to Transformers 4-bit NF4.")
@@ -901,7 +903,7 @@ class ExtractionClient:
         self,
         provider: str = "local_gpu",
         model_name: str = "Qwen/Qwen3-14B",
-        context_length: int = 16384,
+        context_length: int = 20480,
         client: Any = None,
     ):
         self.provider = provider.lower()

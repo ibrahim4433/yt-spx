@@ -460,12 +460,12 @@ class TestRootCauseGuards(unittest.TestCase):
         self.assertIn("مناظرة تجريبية", formatted_prompt)
         self.assertIn("Sheikh Uthman", formatted_prompt)
 
-        # 2. Generous window sizing defaults (2400 words, 4 carry turns)
+        # 2. Generous window sizing defaults (3400 words, 4 carry turns)
         sig = inspect.signature(build_episode_windows)
-        self.assertEqual(sig.parameters["max_words_per_window"].default, 2400)
+        self.assertEqual(sig.parameters["max_words_per_window"].default, 3400)
         self.assertEqual(sig.parameters["context_carry_turns"].default, 4)
 
-        # An episode with 1500 words must stay whole (1 window)
+        # An episode with 3000 words must stay whole (1 window) under the 3400-word window
         dummy_turns = [
             {
                 "turn_id": f"turn_{i}",
@@ -478,12 +478,12 @@ class TestRootCauseGuards(unittest.TestCase):
                 "end_fmt": "00:10",
                 "text_original": " ".join(f"word_{i}_{j}" for j in range(150)),  # 150 distinct words per turn
             }
-            for i in range(10)  # 1500 words total
+            for i in range(20)  # 3000 words total
         ]
-        windows_1500 = build_episode_windows(dummy_turns)
-        self.assertEqual(len(windows_1500), 1, "1500 words should not be split under generous 2400-word window")
+        windows_3000 = build_episode_windows(dummy_turns)
+        self.assertEqual(len(windows_3000), 1, "3000 words should not be split under generous 3400-word window")
 
-        # An episode with 3000 words must split cleanly and carry forward 4 context turns
+        # An episode with 4500 words must split cleanly and carry forward 4 context turns
         dummy_long = [
             {
                 "turn_id": f"turn_{i}",
@@ -496,12 +496,12 @@ class TestRootCauseGuards(unittest.TestCase):
                 "end_fmt": "00:10",
                 "text_original": " ".join(f"speech_{i}_{j}" for j in range(150)),
             }
-            for i in range(20)  # 3000 words total
+            for i in range(30)  # 4500 words total
         ]
-        windows_3000 = build_episode_windows(dummy_long)
-        self.assertEqual(len(windows_3000), 2, "3000 words should split into 2 windows")
-        self.assertEqual(windows_3000[0]["episode_index"], 1)
-        self.assertEqual(windows_3000[1]["episode_index"], 1)
+        windows_4500 = build_episode_windows(dummy_long)
+        self.assertEqual(len(windows_4500), 2, "4500 words should split into 2 windows")
+        self.assertEqual(windows_4500[0]["episode_index"], 1)
+        self.assertEqual(windows_4500[1]["episode_index"], 1)
 
     def test_is_valid_dialectical_question_theological_coverage(self):
         """Ensures concise foundational theological questions are accepted and trivia is rejected."""
@@ -539,12 +539,74 @@ class TestRootCauseGuards(unittest.TestCase):
         self.assertNotIn("[]", res_unmapped_bracket)
 
     def test_stage2_extractor_default_context_length(self):
-        """Ensures Stage2ScenarioExtractor defaults to 16,384 context length matching LocalGPUClient."""
+        """Ensures Stage2ScenarioExtractor and LocalGPUClient default to 20,480 context length & expanded VRAM budget."""
         import inspect
-        from core.scenario_extractor import Stage2ScenarioExtractor
+        from core.scenario_extractor import Stage2ScenarioExtractor, _build_round2_transcript_excerpt
+        from core.colab_runner import LocalGPUClient
+        from core.pipeline_orchestrator import build_arg_parser
 
-        sig = inspect.signature(Stage2ScenarioExtractor.__init__)
-        self.assertEqual(sig.parameters["context_length"].default, 16384)
+        sig_ext = inspect.signature(Stage2ScenarioExtractor.__init__)
+        self.assertEqual(sig_ext.parameters["context_length"].default, 20480)
+
+        sig_client = inspect.signature(LocalGPUClient.__init__)
+        self.assertEqual(sig_client.parameters["context_length"].default, 20480)
+        self.assertEqual(sig_client.parameters["max_new_tokens"].default, 6144)
+
+        sig_r2 = inspect.signature(_build_round2_transcript_excerpt)
+        self.assertEqual(sig_r2.parameters["max_words"].default, 1800)
+
+        parsed_args = build_arg_parser().parse_args([])
+        self.assertEqual(parsed_args.whisper_batch_size, 16)
+        self.assertEqual(parsed_args.llm_context_length, 20480)
+
+    def test_stage1_fast_overlap_mode_and_batched_titanet(self):
+        """Ensures M5 overlap clips use fast single-temperature beam_size=2 and M3 batches TitaNet embeddings."""
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+        import numpy as np
+        from core.audio_diarizer import WarmASRAlignmentEngine
+        from core.overlap_resolver import WarmNeMoDiarizer
+
+        engine = WarmASRAlignmentEngine(batch_size=16)
+        mock_whisper = MagicMock()
+        mock_seg = MagicMock(text="Simultaneous speech", no_speech_prob=0.0, compression_ratio=1.0, words=[])
+        mock_seg.start = 0.0
+        mock_seg.end = 1.5
+        mock_whisper.transcribe.return_value = ([mock_seg], MagicMock(language="en"))
+        engine._whisper = mock_whisper
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = MagicMock(is_available=MagicMock(return_value=False))
+        fake_fw = types.ModuleType("faster_whisper")
+
+        dummy_clip = np.zeros(16000 * 3, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            clip_path = Path(f.name)
+        try:
+            with patch.dict("sys.modules", {"torch": fake_torch, "faster_whisper": fake_fw}), \
+                 patch("core.audio_diarizer.load_audio_waveform_16k", return_value=dummy_clip):
+                words, lang = engine.transcribe_and_align_wav(
+                    clip_path,
+                    forced_language="en",
+                    use_ctc_aligner=False,
+                    fast_overlap_mode=True,
+                )
+            self.assertEqual(lang, "en")
+            self.assertEqual(len(words), 2)
+            _, kwargs = mock_whisper.transcribe.call_args
+            self.assertEqual(kwargs["beam_size"], 2)
+            self.assertEqual(kwargs["best_of"], 2)
+            self.assertEqual(kwargs["temperature"], 0.0)
+        finally:
+            clip_path.unlink(missing_ok=True)
+
+        # Verify WarmNeMoDiarizer.extract_embeddings_batch fallback and normalization
+        diar = WarmNeMoDiarizer(device="cpu")
+        diar.extract_embedding = MagicMock(side_effect=lambda arr: np.ones(192, dtype=np.float32))
+        embs = diar.extract_embeddings_batch([np.zeros(8000, dtype=np.float32), np.zeros(12000, dtype=np.float32)])
+        self.assertEqual(len(embs), 2)
+        self.assertEqual(embs[0].shape, (192,))
 
     def test_strip_qwen3_think_blocks_in_json_parsers(self):
         """Ensures closed and unclosed Qwen3 <think> blocks with braces do not corrupt JSON parsing."""

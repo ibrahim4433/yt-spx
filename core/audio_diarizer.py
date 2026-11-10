@@ -407,7 +407,7 @@ class WarmASRAlignmentEngine:
         self,
         whisper_model_name: str = "large-v3",
         device: str = "cuda",
-        batch_size: int = 8,
+        batch_size: int = 16,
     ):
         self.whisper_model_name = whisper_model_name
         self.device = device
@@ -464,18 +464,32 @@ class WarmASRAlignmentEngine:
 
     def _ensure_punct(self):
         if self._punct_model is None:
+            import torch
             from deepmultilingualpunctuation import PunctuationModel
             self._punct_model = PunctuationModel(model="kredor/punctuate-all")
+            # Ensure underlying HuggingFace token-classification pipeline is on GPU when CUDA is active
+            if self.device == "cuda" and torch.cuda.is_available():
+                try:
+                    pipe = getattr(self._punct_model, "pipe", None)
+                    if pipe is not None and hasattr(pipe, "model") and hasattr(pipe.model, "to"):
+                        pipe.model.to("cuda")
+                        if hasattr(pipe, "device"):
+                            pipe.device = torch.device("cuda:0")
+                except Exception:
+                    pass
 
     def transcribe_and_align_wav(
         self,
         wav_path: Path,
         forced_language: Optional[str] = None,
         use_ctc_aligner: bool = True,
+        fast_overlap_mode: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """
         Transcribes a 16kHz WAV file with Faster-Whisper + Hallucination Shield,
         then refines word-level [start, end] timestamps via CTC Forced Aligner.
+        When fast_overlap_mode=True (short separated overlap clips), uses fast single-temperature
+        beam_size=2 decoding instead of multi-temperature retries.
         """
         import torch
         import faster_whisper
@@ -500,9 +514,9 @@ class WarmASRAlignmentEngine:
         init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN if lang == "en" else None
 
         def _consume_segments(waveform: np.ndarray, target_lang: Optional[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
-            # Batched inference uses higher activation memory; clamp to at most 8 on Colab T4
+            # Scale batched inference up to 16 on Colab T4 (safe ~12.2 GB VRAM ceiling with step-down fallback)
             use_batched = bool(self.batch_size > 0 and len(waveform) > 16000 * 25 and self._whisper_batched)
-            effective_batch = min(self.batch_size, 8) if use_batched else 0
+            effective_batch = min(self.batch_size, 16) if use_batched else 0
 
             for attempt in range(3):
                 try:
@@ -512,6 +526,19 @@ class WarmASRAlignmentEngine:
                             language=target_lang,
                             initial_prompt=init_prompt,
                             batch_size=effective_batch,
+                            word_timestamps=True,
+                        )
+                    elif fast_overlap_mode:
+                        seg_gen, _ = self._whisper.transcribe(
+                            waveform,
+                            language=target_lang,
+                            initial_prompt=init_prompt,
+                            beam_size=2,
+                            best_of=2,
+                            temperature=0.0,
+                            condition_on_previous_text=False,
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=350),
                             word_timestamps=True,
                         )
                     else:
@@ -564,7 +591,13 @@ class WarmASRAlignmentEngine:
                     is_oom = "out of memory" in err_str or "cuda failed" in err_str
                     is_dev_err = "invalid device" in err_str or "parallel_for" in err_str or "cublas" in err_str or "cudnn" in err_str
 
-                    if effective_batch > 0:
+                    if effective_batch > 8:
+                        print(f"   [!] Batched Whisper (batch={effective_batch}) memory pressure -> stepping down to batch=8 on CUDA...", flush=True)
+                        effective_batch = 8
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        continue
+                    elif effective_batch > 0:
                         print("   [!] Batched inference memory pressure -> falling back to sequential VAD Whisper on CUDA...", flush=True)
                         effective_batch = 0
                         self.unload()
@@ -609,7 +642,7 @@ class WarmASRAlignmentEngine:
                         emissions, stride = generate_emissions(
                             self._align_model,
                             wav_tensor,
-                            batch_size=max(4, self.batch_size // 2),
+                            batch_size=max(8, min(16, self.batch_size)),
                         )
                         del wav_tensor
                     except Exception:
@@ -617,14 +650,14 @@ class WarmASRAlignmentEngine:
                             emissions, stride = generate_emissions(
                                 self._align_model,
                                 audio_waveform,
-                                batch_size=max(4, self.batch_size // 2),
+                                batch_size=max(8, min(16, self.batch_size)),
                             )
                         except Exception:
                             emissions = None
 
                 if emissions is None:
-                    # HuggingFace AutoModelForCTC (Wav2Vec2ForCTC) chunked PyTorch forward pass
-                    # Chunk into 30s segments (480,000 samples) so VRAM never exceeds ~100MB even on 3-hour audio
+                    # HuggingFace AutoModelForCTC (Wav2Vec2ForCTC) chunked/batched PyTorch forward pass
+                    # Chunk into 30s segments (480,000 samples) and batch up to 8 full chunks per GPU forward pass
                     chunk_size = 16000 * 30
                     total_len = len(audio_waveform)
                     if total_len <= chunk_size:
@@ -641,8 +674,47 @@ class WarmASRAlignmentEngine:
                         del wav_tensor
                     else:
                         emissions_list = []
-                        for offset in range(0, total_len, chunk_size):
-                            chunk = audio_waveform[offset : min(offset + chunk_size, total_len)]
+                        ctc_chunk_batch = min(8, max(1, self.batch_size // 2)) if (self.batch_size > 1 and self.device == "cuda") else 1
+                        offsets = list(range(0, total_len, chunk_size))
+                        idx_off = 0
+                        while idx_off < len(offsets):
+                            # Batch multiple full-length 30s chunks together when ctc_chunk_batch > 1
+                            full_batch_chunks = []
+                            while (
+                                ctc_chunk_batch > 1
+                                and len(full_batch_chunks) < ctc_chunk_batch
+                                and idx_off < len(offsets)
+                                and (offsets[idx_off] + chunk_size) <= total_len
+                            ):
+                                off = offsets[idx_off]
+                                full_batch_chunks.append(audio_waveform[off : off + chunk_size])
+                                idx_off += 1
+
+                            if len(full_batch_chunks) > 1:
+                                stacked_np = np.stack(full_batch_chunks, axis=0)
+                                b_tensor = torch.from_numpy(stacked_np)
+                                if hasattr(self._align_model, "dtype"):
+                                    b_tensor = b_tensor.to(self._align_model.dtype)
+                                if hasattr(self._align_model, "device"):
+                                    b_tensor = b_tensor.to(self._align_model.device)
+                                with torch.inference_mode():
+                                    b_logits = self._align_model(b_tensor).logits
+                                    b_em = torch.log_softmax(b_logits, dim=-1)
+                                    if hasattr(b_em, "reshape") and hasattr(b_em, "shape") and len(b_em.shape) == 3:
+                                        b_em = b_em.reshape(1, b_em.shape[0] * b_em.shape[1], b_em.shape[2])
+                                    if hasattr(b_em, "cpu"):
+                                        b_em = b_em.cpu()
+                                emissions_list.append(b_em)
+                                del b_tensor, b_logits, stacked_np, full_batch_chunks
+                                continue
+
+                            # Single chunk path (either ctc_chunk_batch == 1, or 1 full chunk, or trailing partial chunk)
+                            if full_batch_chunks:
+                                chunk = full_batch_chunks[0]
+                            else:
+                                offset = offsets[idx_off]
+                                idx_off += 1
+                                chunk = audio_waveform[offset : min(offset + chunk_size, total_len)]
                             rem = len(chunk) % 320
                             if rem != 0:
                                 chunk = np.pad(chunk, (0, 320 - rem))
@@ -666,6 +738,9 @@ class WarmASRAlignmentEngine:
                                 emissions = emissions[:, : (total_len // 320), :]
                         elif emissions_list:
                             emissions = emissions_list[0]
+                        del emissions_list
+
+                del audio_waveform
 
                 if isinstance(emissions, torch.Tensor) or hasattr(emissions, "is_cpu"):
                     if hasattr(emissions, "cpu"):
@@ -768,7 +843,7 @@ class Stage1AudioPipeline:
         workspace: SharedWorkspace,
         whisper_model: str = "large-v3",
         device: str = "cuda",
-        batch_size: int = 8,
+        batch_size: int = 16,
         keep_raw_audio: bool = False,
     ):
         self.workspace = workspace
@@ -964,6 +1039,7 @@ class Stage1AudioPipeline:
                         clip_p,
                         forced_language=detected_lang,
                         use_ctc_aligner=False,
+                        fast_overlap_mode=True,
                     )
                     if not ov_words:
                         continue

@@ -134,7 +134,12 @@ def collect_workspace_telemetry(workspace: SharedWorkspace, manifest: List[Dict[
     cb_active = cb_until > now
 
     vp_reg = workspace.read_json(workspace.profiles_dir / "voiceprint_registry.json", default={}) or {}
-    profiles_count = len(vp_reg.get("profiles", []))
+    spk_profs = workspace.read_json(workspace.profiles_dir / "speaker_profiles.json", default={}) or {}
+    enrolled_from_profs = sum(
+        1 for v in (spk_profs.values() if isinstance(spk_profs, dict) else [])
+        if isinstance(v, dict) and int(v.get("enrolled_samples", 0)) > 0
+    )
+    profiles_count = max(len(vp_reg.get("profiles", [])), enrolled_from_profs)
 
     return {
         "workspace_root": str(workspace.root),
@@ -531,22 +536,43 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     if tier_m4 and not _should_stop():
         _run_phase_c_batch(tier_m4, label="Priority Phase C")
 
-    # Step 2: Phase B (M3-M4) on any videos at M2-M3, followed immediately by Phase C (M5) on them!
+    # Step 2: Phase B (M3-M4) on any videos at M2-M3, followed immediately by Phase C (M5) on them in agile waves!
+    wave_limit = 4
     if tier_m2_m3 and not _should_stop():
         rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else len(tier_m2_m3)
-        b_slice = tier_m2_m3[: max(0, rem_slots)]
-        b_done = _run_phase_b_batch(b_slice, label="Resume Phase B")
-        if b_done and not _should_stop():
-            _run_phase_c_batch(b_done, label="Resume Phase C")
-
-    # Step 3: Horizontal Phase A -> Phase B -> Phase C on remaining M0/M1 candidates up to batch target!
-    if tier_m0_m1 and not _should_stop():
-        rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else min(len(tier_m0_m1), 8)
-        a_done = _run_phase_a_batch(tier_m0_m1, target_slots=rem_slots)
-        if a_done and not _should_stop():
-            b_done = _run_phase_b_batch(a_done, label="Batch Phase B")
+        b_candidates = tier_m2_m3[: max(0, rem_slots)]
+        for w_start in range(0, len(b_candidates), wave_limit):
+            if _should_stop():
+                break
+            b_slice = b_candidates[w_start : w_start + wave_limit]
+            b_done = _run_phase_b_batch(b_slice, label="Resume Phase B")
             if b_done and not _should_stop():
-                _run_phase_c_batch(b_done, label="Batch Phase C")
+                _run_phase_c_batch(b_done, label="Resume Phase C")
+                workspace.sync_completed_shards_to_sqlite()
+
+    # Step 3: Horizontal Phase A -> Phase B -> Phase C on remaining M0/M1 candidates in agile 4-video waves!
+    models_persisted = False
+    if tier_m0_m1 and not _should_stop():
+        m0_cursor = 0
+        while m0_cursor < len(tier_m0_m1) and not _should_stop():
+            rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else wave_limit
+            wave_target = min(wave_limit, max(0, rem_slots))
+            if wave_target <= 0:
+                break
+            a_done = _run_phase_a_batch(tier_m0_m1[m0_cursor:], target_slots=wave_target)
+            # Advance cursor past examined items so we never re-scan skipped/locked items in the same pass
+            m0_cursor += max(len(a_done), wave_target)
+            if a_done and not _should_stop():
+                b_done = _run_phase_b_batch(a_done, label="Batch Phase B")
+                if b_done and not _should_stop():
+                    _run_phase_c_batch(b_done, label="Batch Phase C")
+                    workspace.sync_completed_shards_to_sqlite()
+                    if completed_count > 0 and workspace.is_drive and not models_persisted:
+                        try:
+                            from run_colab_all_in_one import persist_stage1_models_to_drive
+                            models_persisted = persist_stage1_models_to_drive(workspace=workspace)
+                        except Exception:
+                            pass
 
     if args.batch_videos > 0 and completed_count >= args.batch_videos:
         print(f"\n[Stage 1] Reached target smart-batch size ({args.batch_videos} videos). Stopping cleanly.")
@@ -556,7 +582,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     pipeline.shutdown()
 
     # Persist Stage 1 model bundle (.tar) to Google Drive at the end of the Stage 1 batch if not cached yet
-    if completed_count > 0 and workspace.is_drive:
+    if completed_count > 0 and workspace.is_drive and not models_persisted:
         try:
             from run_colab_all_in_one import persist_stage1_models_to_drive
             persist_stage1_models_to_drive(workspace=workspace)
@@ -1140,9 +1166,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Graceful stop timer in minutes (default 0 = continuous until disconnect; or e.g. 165 for 2h45m).",
     )
     p.add_argument("--whisper-model", default="large-v3", help="Faster-Whisper model size.")
-    p.add_argument("--whisper-batch-size", type=int, default=8, help="BatchedInferencePipeline batch size (default 8 fits T4 GPU safely).")
+    p.add_argument("--whisper-batch-size", type=int, default=16, help="BatchedInferencePipeline batch size (default 16 scales to ~12.2 GB T4 VRAM with automatic step-down).")
     p.add_argument("--llm-model", default="Qwen/Qwen2.5-14B-Instruct", help="Stage 2 LLM model repo.")
-    p.add_argument("--llm-context-length", type=int, default=14336, help="Stage 2 GGUF context window.")
+    p.add_argument("--llm-context-length", type=int, default=20480, help="Stage 2 GGUF context window (default 20480 uses ~13.2 GB T4 VRAM).")
     p.add_argument("--debates-only", action="store_true", help="Process full-length debates first, skipping #shorts.")
     p.add_argument("--wait-for-scenarios", action="store_true", help="Stage 2 standby watcher: keeps running and polls Drive for new scenarios from Profile 1.")
     p.add_argument("--keep-raw-audio", action="store_true", help="Keep original raw download alongside 64kbps Opus.")
@@ -1191,7 +1217,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         t_start = time.time()
         deadline = (t_start + (total_budget_min * 60.0)) if total_budget_min > 0 else None
         round_num = 0
-        batch_size = args.batch_videos if args.batch_videos > 0 else 8
+        wave_size = args.batch_videos if (0 < args.batch_videos <= 4) else 4
         exit_code = 0
         ws = SharedWorkspace(worker_name=args.worker_id or None)
 
@@ -1209,34 +1235,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             budget_txt = f"{round((deadline - time.time()) / 60.0, 1)}m remaining" if deadline is not None else "continuous until disconnect"
             print(
-                f"\n[Stage 1 Dedicated Worker] === Continuous Batch Round #{round_num} "
-                f"({len(cands)} candidates ready | batch size={batch_size} | {budget_txt}) ===",
+                f"\n[Stage 1 Dedicated Worker] === In-Process Agile Wave #{round_num} "
+                f"({len(cands)} candidates ready | wave size={wave_size} | {budget_txt}) ===",
                 flush=True,
             )
 
             rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
-            cmd = [
-                sys.executable, str(Path(__file__).resolve()),
-                "--mode", "stage1-worker",
-                "--batch-videos", str(batch_size),
-                "--max-session-minutes", str(rem_min),
-                "--whisper-model", args.whisper_model,
-                "--whisper-batch-size", str(args.whisper_batch_size),
-            ]
-            if args.debates_only:
-                cmd.append("--debates-only")
-            if args.keep_raw_audio:
-                cmd.append("--keep-raw-audio")
-            if args.offline_only:
-                cmd.append("--offline-only")
-            if args.worker_id:
-                cmd += ["--worker-id", args.worker_id]
-
-            res = subprocess.run(cmd, env=_get_subprocess_env(), check=False)
-            if res.returncode != 0:
-                exit_code = res.returncode
-                print(f"[Stage 1 Dedicated Worker] Round #{round_num} exited with code {res.returncode}.", flush=True)
-                if res.returncode == 2:  # Fatal abort (e.g. 3 consecutive identical crashes)
+            wave_args = argparse.Namespace(
+                **{
+                    **vars(args),
+                    "batch_videos": wave_size,
+                    "max_session_minutes": rem_min,
+                }
+            )
+            rc = run_stage1_worker(wave_args)
+            if rc != 0:
+                exit_code = rc
+                print(f"[Stage 1 Dedicated Worker] Wave #{round_num} exited with code {rc}.", flush=True)
+                if rc == 2:  # Fatal abort (e.g. 3 consecutive identical crashes)
                     break
                 time.sleep(10)
 
@@ -1253,7 +1269,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"[Stage 1 Standby] Remaining candidates currently locked by other workers. Waiting 30s...", flush=True)
                     time.sleep(30)
                 else:
-                    print(f"[Stage 1 Standby] No candidates progressed in Round #{round_num}. Waiting 20s before retry...", flush=True)
+                    print(f"[Stage 1 Standby] No candidates progressed in Wave #{round_num}. Waiting 20s before retry...", flush=True)
                     time.sleep(20)
 
         synced = ws.sync_completed_shards_to_sqlite()
