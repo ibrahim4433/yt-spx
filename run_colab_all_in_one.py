@@ -694,8 +694,16 @@ def main() -> int:
     print(f"\n[3/3] Handing off to YT-SPX V2 Smart-Batch Orchestrator (args={argv or ['--mode', 'auto']})...\n")
     from core.pipeline_orchestrator import main as orchestrator_main
 
-    return orchestrator_main(argv)
+    try:
+        return orchestrator_main(argv)
+    except KeyboardInterrupt:
+        print("\n[YT-SPX] ⏹️ Colab cell stopped by user — exited cleanly.", flush=True)
+        return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n[YT-SPX] ⏹️ Colab cell stopped by user — exited cleanly.", flush=True)
+        raise SystemExit(0)

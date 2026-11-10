@@ -371,10 +371,15 @@ def _quiet_nemo_loggers() -> None:
         "nemo_logger",
         "nv_one_logger",
         "nv_one_logger.api.config",
+        "nv_one_logger.training_telemetry",
+        "nv_one_logger.training_telemetry.api",
         "nv_one_logger.training_telemetry.api.training_telemetry_provider",
+        "nv_one_logger. exporter",
         "pytorch_lightning",
     ):
-        logging.getLogger(logger_name).setLevel(logging.ERROR)
+        lg = logging.getLogger(logger_name)
+        lg.setLevel(logging.CRITICAL)
+        lg.propagate = False
     try:
         from nemo.utils import logging as nemo_logging
         nemo_logging.setLevel(logging.ERROR)
@@ -395,6 +400,7 @@ class WarmNeMoDiarizer:
         self._msdd_instance = None
         self._msdd_is_short: Optional[bool] = None
         self._msdd_work_dir: Optional[Path] = None
+        self._cudnn_fallback_active: bool = False
 
     def _ensure_titanet(self):
         if self._titanet is None:
@@ -475,6 +481,7 @@ class WarmNeMoDiarizer:
         import torch
         from omegaconf import OmegaConf
 
+        _quiet_nemo_loggers()
         # Prioritize overlap-aware NeuralDiarizer (NeMo 2.x msdd_models) before ClusteringDiarizer fallback.
         # Do NOT swallow inner dependency errors (e.g. ml_dtypes / onnx AttributeError).
         DiarizerClass = None
@@ -488,6 +495,7 @@ class WarmNeMoDiarizer:
         ]:
             try:
                 mod = importlib.import_module(mod_path)
+                _quiet_nemo_loggers()
                 if hasattr(mod, cls_name):
                     DiarizerClass = getattr(mod, cls_name)
                     break
@@ -617,6 +625,10 @@ class WarmNeMoDiarizer:
                 self._msdd_is_short = bool(is_short)
                 return self._msdd_instance
 
+            orig_cudnn_outer = getattr(getattr(torch, "backends", None), "cudnn", None)
+            prev_cudnn_flag = orig_cudnn_outer.enabled if orig_cudnn_outer is not None else True
+            if self._cudnn_fallback_active and orig_cudnn_outer is not None:
+                orig_cudnn_outer.enabled = False
             try:
                 msdd = _bind_or_create_msdd()
                 try:
@@ -637,6 +649,7 @@ class WarmNeMoDiarizer:
                 err_s = str(err).lower()
                 if "cudnn" in err_s:
                     print("    [!] cuDNN runtime error encountered; falling back to PyTorch native CUDA kernels (cudnn.enabled=False)...", flush=True)
+                    self._cudnn_fallback_active = True
                     orig_cudnn = torch.backends.cudnn.enabled
                     torch.backends.cudnn.enabled = False
                     try:
@@ -662,6 +675,8 @@ class WarmNeMoDiarizer:
                 else:
                     raise
             finally:
+                if orig_cudnn_outer is not None:
+                    orig_cudnn_outer.enabled = prev_cudnn_flag
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 

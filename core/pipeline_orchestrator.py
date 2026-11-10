@@ -319,13 +319,15 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         vid = cand["video_id"]
         st = workspace.get_video_state(vid)
         last_err = str(st.get("last_error") or "").lower()
-        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "neuraldiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker", "out of memory", "invalid device", "cuda failed")):
+        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "neuraldiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker", "out of memory", "invalid device", "cuda failed", "input_manifest.json")):
             st["error_count"] = 0
             st["last_error"] = None
             workspace.atomic_write_json(workspace.state_path(vid), st)
 
+    user_interrupted = False
+
     def _should_stop() -> bool:
-        if exit_code != 0:
+        if user_interrupted or exit_code != 0:
             return True
         if args.batch_videos > 0 and completed_count >= args.batch_videos:
             return True
@@ -379,7 +381,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             exit_code = 2
 
     def _run_phase_c_batch(batch_items: List[Dict[str, Any]], label: str) -> None:
-        nonlocal completed_count, consecutive_errors, last_error_sig
+        nonlocal completed_count, consecutive_errors, last_error_sig, user_interrupted, exit_code
         if not batch_items or _should_stop():
             return
         # Ensure Demucs, NeMo, and MossFormer2 are unloaded so Whisper large-v3 + CTC get full VRAM
@@ -422,6 +424,11 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                         f"| Overlaps={m.get('overlap_windows_count', 0)} | Pedestrians={m.get('pedestrian_turns_count', 0)}",
                         flush=True,
                     )
+            except KeyboardInterrupt:
+                user_interrupted = True
+                exit_code = 130
+                print(f"\n[Stage 1] ⏹️ Stop signal received during {vid} — releasing lock and saving progress...", flush=True)
+                break
             except Exception as exc:
                 _handle_video_error(vid, exc)
             finally:
@@ -430,7 +437,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         pipeline.asr.unload()
 
     def _run_phase_b_batch(batch_items: List[Dict[str, Any]], label: str) -> List[Dict[str, Any]]:
-        nonlocal consecutive_errors, last_error_sig
+        nonlocal consecutive_errors, last_error_sig, user_interrupted, exit_code
         ready_for_c: List[Dict[str, Any]] = []
         if not batch_items or _should_stop():
             return ready_for_c
@@ -466,6 +473,11 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                     consecutive_errors = 0
                     last_error_sig = ""
                     ready_for_c.append(cand)
+            except KeyboardInterrupt:
+                user_interrupted = True
+                exit_code = 130
+                print(f"\n[Stage 1] ⏹️ Stop signal received during {vid} — releasing lock and saving progress...", flush=True)
+                break
             except Exception as exc:
                 _handle_video_error(vid, exc)
             finally:
@@ -482,7 +494,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         return ready_for_c
 
     def _run_phase_a_batch(batch_items: List[Dict[str, Any]], target_slots: int) -> List[Dict[str, Any]]:
-        nonlocal consecutive_errors, last_error_sig
+        nonlocal consecutive_errors, last_error_sig, user_interrupted, exit_code
         ready_for_b: List[Dict[str, Any]] = []
         if not batch_items or _should_stop() or target_slots <= 0:
             return ready_for_b
@@ -513,6 +525,11 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                     consecutive_errors = 0
                     last_error_sig = ""
                     ready_for_b.append(cand)
+            except KeyboardInterrupt:
+                user_interrupted = True
+                exit_code = 130
+                print(f"\n[Stage 1] ⏹️ Stop signal received during {vid} — releasing lock and saving progress...", flush=True)
+                break
             except Exception as exc:
                 _handle_video_error(vid, exc)
             finally:
@@ -652,17 +669,21 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
 
             found_new = False
             wait_t0 = time.time()
-            while True:
-                if deadline is not None and time.time() >= deadline:
-                    break
-                time.sleep(20)
-                elapsed_wait = int(time.time() - wait_t0)
-                candidates = select_stage2_candidates(workspace, manifest)
-                if candidates:
-                    found_new = True
-                    print(f"\n[+] Profile 1 completed {len(candidates)} new scenario(s)! Resuming LLM extraction...", flush=True)
-                    break
-                print(f"     [Standby] Profile 1 is processing audio... ({elapsed_wait}s elapsed)", flush=True)
+            try:
+                while True:
+                    if deadline is not None and time.time() >= deadline:
+                        break
+                    time.sleep(20)
+                    elapsed_wait = int(time.time() - wait_t0)
+                    candidates = select_stage2_candidates(workspace, manifest)
+                    if candidates:
+                        found_new = True
+                        print(f"\n[+] Profile 1 completed {len(candidates)} new scenario(s)! Resuming LLM extraction...", flush=True)
+                        break
+                    print(f"     [Standby] Profile 1 is processing audio... ({elapsed_wait}s elapsed)", flush=True)
+            except KeyboardInterrupt:
+                print("\n[Stage 2] ⏹️ Stop signal received during standby — exiting cleanly.", flush=True)
+                break
 
             if not found_new:
                 break
@@ -692,6 +713,10 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
                     for u in units:
                         log_extracted_unit_live(u)
                     print(f"    [OK] M6_LLM_EXTRACTED [{vid}]: {len(units)} dialectical Q&A unit(s) saved.", flush=True)
+            except KeyboardInterrupt:
+                print(f"\n[Stage 2] ⏹️ Stop signal received during {vid} — releasing lock and saving progress...", flush=True)
+                batch_target_reached = True
+                break
             except Exception as exc:
                 err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
                 print(f"    [ERROR] Stage 2 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
@@ -1225,72 +1250,84 @@ def main(argv: Optional[List[str]] = None) -> int:
         exit_code = 0
         ws = SharedWorkspace(worker_name=args.worker_id or None)
 
-        while True:
-            round_num += 1
-            if deadline is not None and time.time() >= deadline:
-                print(f"\n[Stage 1 Dedicated Worker] Session time budget ({args.max_session_minutes}m) reached. Stopping cleanly.", flush=True)
-                break
-
-            manifest = load_or_create_manifest(ws)
-            cands = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
-            if not cands:
-                print("\n[Stage 1 Dedicated Worker] All candidate videos have completed Stage 1 processing! Stopping cleanly.", flush=True)
-                break
-
-            budget_txt = f"{round((deadline - time.time()) / 60.0, 1)}m remaining" if deadline is not None else "continuous until disconnect"
-            print(
-                f"\n[Stage 1 Dedicated Worker] === In-Process Agile Wave #{round_num} "
-                f"({len(cands)} candidates ready | wave size={wave_size} | {budget_txt}) ===",
-                flush=True,
-            )
-
-            rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
-            wave_args = argparse.Namespace(
-                **{
-                    **vars(args),
-                    "batch_videos": wave_size,
-                    "max_session_minutes": rem_min,
-                }
-            )
-            rc = run_stage1_worker(wave_args)
-            if rc != 0:
-                exit_code = rc
-                print(f"[Stage 1 Dedicated Worker] Wave #{round_num} exited with code {rc}.", flush=True)
-                if rc == 2:  # Fatal abort (e.g. 3 consecutive identical crashes)
+        try:
+            while True:
+                round_num += 1
+                if deadline is not None and time.time() >= deadline:
+                    print(f"\n[Stage 1 Dedicated Worker] Session time budget ({args.max_session_minutes}m) reached. Stopping cleanly.", flush=True)
                     break
-                time.sleep(10)
 
-            # If user explicitly set max-session-minutes > 0 and deadline is reached, exit cleanly
-            if total_budget_min > 0 and deadline is not None and time.time() >= deadline:
-                break
+                manifest = load_or_create_manifest(ws)
+                cands = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
+                if not cands:
+                    print("\n[Stage 1 Dedicated Worker] All candidate videos have completed Stage 1 processing! Stopping cleanly.", flush=True)
+                    break
 
-            # Check if progress was made or if remaining candidates are locked
-            manifest = load_or_create_manifest(ws)
-            cands_after = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
-            if len(cands_after) >= len(cands):
-                active_locks = list(ws.locks_dir.glob("*.stage1.lock.json"))
-                if active_locks:
-                    print(f"[Stage 1 Standby] Remaining candidates currently locked by other workers. Waiting 30s...", flush=True)
-                    time.sleep(30)
-                else:
-                    print(f"[Stage 1 Standby] No candidates progressed in Wave #{round_num}. Waiting 20s before retry...", flush=True)
-                    time.sleep(20)
+                budget_txt = f"{round((deadline - time.time()) / 60.0, 1)}m remaining" if deadline is not None else "continuous until disconnect"
+                print(
+                    f"\n[Stage 1 Dedicated Worker] === In-Process Agile Wave #{round_num} "
+                    f"({len(cands)} candidates ready | wave size={wave_size} | {budget_txt}) ===",
+                    flush=True,
+                )
+
+                rem_min = max(1, int((deadline - time.time()) / 60.0)) if deadline is not None else 0
+                wave_args = argparse.Namespace(
+                    **{
+                        **vars(args),
+                        "batch_videos": wave_size,
+                        "max_session_minutes": rem_min,
+                    }
+                )
+                rc = run_stage1_worker(wave_args)
+                if rc == 130:
+                    exit_code = 0
+                    break
+                if rc != 0:
+                    exit_code = rc
+                    print(f"[Stage 1 Dedicated Worker] Wave #{round_num} exited with code {rc}.", flush=True)
+                    if rc == 2:  # Fatal abort (e.g. 3 consecutive identical crashes)
+                        break
+                    time.sleep(10)
+
+                # If user explicitly set max-session-minutes > 0 and deadline is reached, exit cleanly
+                if total_budget_min > 0 and deadline is not None and time.time() >= deadline:
+                    break
+
+                # Check if progress was made or if remaining candidates are locked
+                manifest = load_or_create_manifest(ws)
+                cands_after = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
+                if len(cands_after) >= len(cands):
+                    active_locks = list(ws.locks_dir.glob("*.stage1.lock.json"))
+                    if active_locks:
+                        print(f"[Stage 1 Standby] Remaining candidates currently locked by other workers. Waiting 30s...", flush=True)
+                        time.sleep(30)
+                    else:
+                        print(f"[Stage 1 Standby] No candidates progressed in Wave #{round_num}. Waiting 20s before retry...", flush=True)
+                        time.sleep(20)
+        except KeyboardInterrupt:
+            print("\n[Stage 1 Dedicated Worker] ⏹️ Interrupted by user — syncing completed shards and exiting cleanly.", flush=True)
+            exit_code = 0
 
         synced = ws.sync_completed_shards_to_sqlite()
         print(f"\n[Stage 1 Dedicated Worker] Final SQLite Sync: {synced}", flush=True)
         return exit_code
 
-    if args.mode == "stage2":
-        args.wait_for_scenarios = True
-        return run_stage2_worker(args)
+    try:
+        if args.mode == "stage2":
+            args.wait_for_scenarios = True
+            return run_stage2_worker(args)
 
-    if args.mode == "stage1-worker":
-        return run_stage1_worker(args)
+        if args.mode == "stage1-worker":
+            rc = run_stage1_worker(args)
+            return 0 if rc == 130 else rc
 
-    if args.mode == "stage2-worker":
-        return run_stage2_worker(args)
+        if args.mode == "stage2-worker":
+            return run_stage2_worker(args)
 
-    return run_auto_orchestrator(args)
+        return run_auto_orchestrator(args)
+    except KeyboardInterrupt:
+        print("\n[YT-SPX] ⏹️ Session stopped by user. Exiting cleanly.", flush=True)
+        return 0
 
 
 if __name__ == "__main__":
