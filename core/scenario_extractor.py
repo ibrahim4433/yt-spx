@@ -1091,6 +1091,7 @@ class Stage2ScenarioExtractor:
         llm_client: Optional[Any] = None,
     ):
         self.workspace = workspace
+        self.context_length = context_length
         if llm_client is not None:
             self.client = llm_client
         else:
@@ -1136,7 +1137,19 @@ class Stage2ScenarioExtractor:
             return []
 
         cohesive_turns = merge_consecutive_speaker_turns(turns)
-        windows = build_episode_windows(turns, max_words_per_window=3400, context_carry_turns=4)
+        # Dynamically scale episode window capacity with active LLM context window:
+        # - At 32K ctx: up to 5,500 words (~35-45 min debates fit into 1 single window!)
+        # - At 28K ctx: up to 4,800 words (~30 min debates)
+        # - At 20K ctx: up to 3,800 words
+        # - At 14K ctx: 3,400 words
+        act_ctx = getattr(self.client, "context_length", getattr(self, "context_length", 20480))
+        if act_ctx >= 30000:
+            dyn_win_words = 5500
+        elif act_ctx >= 26000:
+            dyn_win_words = 4800
+        else:
+            dyn_win_words = 3400
+        windows = build_episode_windows(turns, max_words_per_window=dyn_win_words, context_carry_turns=4)
         speakers_summary = ", ".join(
             f"{s['speaker_id']}={s['role']}({s['display_name_en']})"
             for s in scenario.get("speakers", [])

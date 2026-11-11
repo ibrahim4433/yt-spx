@@ -703,25 +703,48 @@ class LocalGPUClient:
                         )
                         model_path = _resolve_and_cache_gguf_model(gguf_repo, gguf_filename, hf_hub_download)
 
-                    print(
-                        f"[+] Loading GGUF weights + 8-bit KV cache into GPU VRAM "
-                        f"(n_ctx={context_length}, n_batch=2048, n_ubatch=512)...",
-                        flush=True,
-                    )
-                    try:
-                        self.llm = Llama(
-                            model_path=model_path,
-                            n_gpu_layers=-1,
-                            n_ctx=context_length,
-                            n_batch=2048,
-                            n_ubatch=512,
-                            type_k=8,
-                            type_v=8,
-                            flash_attn=True,
-                            verbose=False,
+                    # Dynamic VRAM Ladder: Attempt highest target context (up to 32,768 ctx / ~13.2 GB VRAM)
+                    # and dynamically step down if CUDA memory pressure is detected.
+                    candidate_ladder: List[int] = [context_length]
+                    for step in [28672, 24576, 20480, 16384]:
+                        if step < context_length and step not in candidate_ladder:
+                            candidate_ladder.append(step)
+
+                    loaded_gguf = False
+                    for cand_ctx in candidate_ladder:
+                        print(
+                            f"[+] Loading GGUF weights + 8-bit KV cache into GPU VRAM "
+                            f"(n_ctx={cand_ctx}, n_batch=2048, n_ubatch=512, flash_attn=True)...",
+                            flush=True,
                         )
-                    except Exception as fa_err:
-                        print(f"[-] GGUF flash_attn note ({fa_err}); retrying with standard attention...", flush=True)
+                        try:
+                            self.llm = Llama(
+                                model_path=model_path,
+                                n_gpu_layers=-1,
+                                n_ctx=cand_ctx,
+                                n_batch=2048,
+                                n_ubatch=512,
+                                type_k=8,
+                                type_v=8,
+                                flash_attn=True,
+                                verbose=False,
+                            )
+                            self.context_length = cand_ctx
+                            loaded_gguf = True
+                            break
+                        except Exception as cand_err:
+                            err_s = str(cand_err).lower()
+                            is_mem = "out of memory" in err_s or "cuda" in err_s or "failed to allocate" in err_s
+                            print(
+                                f"[-] GGUF n_ctx={cand_ctx} initialization note ({cand_err}); "
+                                f"{'stepping down context ladder...' if is_mem else 'retrying...'}",
+                                flush=True,
+                            )
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                    if not loaded_gguf:
+                        print(f"[-] High-context GGUF unavailable; retrying with standard attention fallback...", flush=True)
                         fallback_ctx = min(context_length, 14336)
                         self.context_length = fallback_ctx
                         self.llm = Llama(
