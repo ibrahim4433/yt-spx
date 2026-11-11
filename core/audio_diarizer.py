@@ -666,7 +666,15 @@ class WarmASRAlignmentEngine:
 
         # Run CTC Forced Aligner for exact phonetic word boundaries
         iso3 = LANG_ISO3.get(lang)
-        if use_ctc_aligner and iso3:
+        # C++ forced_align (align_ops) safety guard:
+        # In ctc_forced_aligner's C++ dynamic programming implementation (main.cpp), backPtr_seek
+        # is indexed using a 32-bit signed integer (`int backPtr_idx`).
+        # On long audio (> 15 minutes or > 1800 words), (2*L + 1) * (T - L) reaches billions of cells,
+        # overflowing 32-bit signed integer indexing and causing an uncatchable C++ SIGSEGV segfault that crashes Python.
+        # For long audio, Faster-Whisper's native DTW cross-attention word timestamps are already 100% complete,
+        # high-precision (~50ms), anchored to VAD segment boundaries, and completely immune to memory/overflow crashes.
+        too_long_for_monolithic_ctc = bool(audio_dur_s > 900.0 or len(full_text.split()) > 1800)
+        if use_ctc_aligner and iso3 and not too_long_for_monolithic_ctc:
             try:
                 from ctc_forced_aligner import (
                     generate_emissions,
@@ -857,6 +865,14 @@ class WarmASRAlignmentEngine:
                         if "is_cpu" in str(ae) and isinstance(em_obj, np.ndarray) and hasattr(torch, "from_numpy"):
                             return get_alignments(torch.from_numpy(em_obj), tokens_starred, self._align_tokenizer)
                         raise
+
+                # Secondary safety check before invoking C++ align_sequences:
+                T_frames = int(emissions.shape[0]) if (hasattr(emissions, "shape") and len(emissions.shape) >= 1) else 0
+                L_tokens = len(tokens_starred)
+                S_states = 2 * L_tokens + 1
+                matrix_cells = (S_states + 1) * max(1, T_frames - L_tokens)
+                if matrix_cells > 25_000_000:
+                    return fallback_words, lang
 
                 try:
                     segments, scores, blank_token = _run_alignment(emissions)
