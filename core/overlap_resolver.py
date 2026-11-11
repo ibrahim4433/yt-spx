@@ -75,7 +75,7 @@ def parse_rttm_lines(rttm_text: str) -> List[Dict[str, Any]]:
 def detect_simultaneous_overlap_windows(
     rttm_segments: List[Dict[str, Any]],
     total_duration_ms: int = 0,
-    min_overlap_ms: int = 800,
+    min_overlap_ms: int = 600,
     merge_gap_ms: int = 350,
     pad_ms: int = 350,
     max_window_ms: int = 14_000,
@@ -189,6 +189,135 @@ def extract_clean_non_overlap_spans(
 def l2_normalize(vec: np.ndarray) -> np.ndarray:
     norm = float(np.linalg.norm(vec))
     return (vec / norm).astype(np.float32) if norm > 1e-8 else vec.astype(np.float32)
+
+
+def get_deterministic_clip_dir(video_id: str) -> Path:
+    """
+    Returns the deterministic local NVMe temp directory for separated overlap WAV clips
+    (/tmp/yt_spx_clips/{video_id}_sep_clips or OS temp equivalent).
+    Guarantees Phase B (MossFormer2 separation) and Phase C (Whisper ASR) share the exact
+    same clip cache across steps without redundant model unloads or re-separations.
+    """
+    base_tmp = Path(tempfile.gettempdir()) / "yt_spx_clips"
+    d = base_tmp / f"{video_id}_sep_clips"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cleanup_deterministic_clip_dir(video_id: str) -> None:
+    """Removes temporary separated WAV clips from local NVMe after M5 scenario is assembled."""
+    try:
+        d = Path(tempfile.gettempdir()) / "yt_spx_clips" / f"{video_id}_sep_clips"
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def merge_fragmented_speaker_clusters(
+    rttm_segments: List[Dict[str, Any]],
+    speaker_centroids: Dict[str, np.ndarray],
+    threshold: float = 0.80,
+) -> Tuple[List[Dict[str, Any]], Dict[str, np.ndarray], Dict[str, str]]:
+    """
+    Merges speaker clusters whose 192-D TitaNet centroid cosine similarity exceeds threshold (>=0.80).
+    Solves outdoor street-debate fragmentation where mic distance changes or head turns cause
+    NeMo MSDD to split the same speaker into SPK_00 and SPK_03.
+
+    Returns:
+        (merged_rttm_segments, merged_centroids, mapping_of_old_to_new_ids)
+    """
+    if len(speaker_centroids) <= 1 or not rttm_segments:
+        return rttm_segments, speaker_centroids, {}
+
+    # Calculate total speaking duration per speaker to pick the dominant canonical ID
+    spk_durations: Dict[str, int] = {}
+    for s in rttm_segments:
+        dur = max(0, int(s["end_ms"]) - int(s["start_ms"]))
+        spk = s["speaker_id"]
+        spk_durations[spk] = spk_durations.get(spk, 0) + dur
+
+    spk_list = sorted(speaker_centroids.keys())
+    norm_cents = {s: l2_normalize(speaker_centroids[s]) for s in spk_list}
+
+    # Find candidate merge pairs sorted by similarity descending
+    candidate_pairs: List[Tuple[float, str, str]] = []
+    for i in range(len(spk_list)):
+        s_i = spk_list[i]
+        for j in range(i + 1, len(spk_list)):
+            s_j = spk_list[j]
+            sim = float(np.dot(norm_cents[s_i], norm_cents[s_j]))
+            if sim >= threshold:
+                candidate_pairs.append((sim, s_i, s_j))
+
+    candidate_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    # Disjoint-set union to find connected components
+    parent: Dict[str, str] = {s: s for s in spk_list}
+
+    def find(i: str) -> str:
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+
+    def union(a: str, b: str):
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            # Pick the speaker with larger duration as root, or lower alphabetical ID
+            dur_a = spk_durations.get(root_a, 0)
+            dur_b = spk_durations.get(root_b, 0)
+            if dur_a >= dur_b:
+                parent[root_b] = root_a
+            else:
+                parent[root_a] = root_b
+
+    for _, s_i, s_j in candidate_pairs:
+        union(s_i, s_j)
+
+    id_mapping: Dict[str, str] = {s: find(s) for s in spk_list}
+    # Check if any merges actually occurred
+    has_merges = any(k != v for k, v in id_mapping.items())
+    if not has_merges:
+        return rttm_segments, speaker_centroids, {}
+
+    # Merge centroids using duration-weighted average
+    clusters: Dict[str, List[str]] = {}
+    for old_id, new_id in id_mapping.items():
+        clusters.setdefault(new_id, []).append(old_id)
+
+    merged_centroids: Dict[str, np.ndarray] = {}
+    for canon_id, members in clusters.items():
+        if len(members) == 1:
+            merged_centroids[canon_id] = norm_cents[canon_id]
+        else:
+            w_sum = np.zeros_like(norm_cents[canon_id])
+            for m in members:
+                w = max(1.0, float(spk_durations.get(m, 1)))
+                w_sum += w * norm_cents[m]
+            merged_centroids[canon_id] = l2_normalize(w_sum)
+
+    # Update RTTM segments and coalesce adjacent intervals of the same speaker
+    updated_segs: List[Dict[str, Any]] = []
+    for s in rttm_segments:
+        old_spk = s["speaker_id"]
+        new_spk = id_mapping.get(old_spk, old_spk)
+        updated_segs.append({
+            **s,
+            "speaker_id": new_spk,
+        })
+
+    updated_segs.sort(key=lambda x: (x["start_ms"], x["end_ms"], x["speaker_id"]))
+
+    # Coalesce overlapping or adjacent intervals of the same speaker
+    coalesced: List[Dict[str, Any]] = []
+    for s in updated_segs:
+        if coalesced and coalesced[-1]["speaker_id"] == s["speaker_id"] and s["start_ms"] <= (coalesced[-1]["end_ms"] + 150):
+            coalesced[-1]["end_ms"] = max(coalesced[-1]["end_ms"], s["end_ms"])
+        else:
+            coalesced.append(dict(s))
+
+    return coalesced, merged_centroids, id_mapping
 
 
 def assign_separated_streams_to_speakers(
@@ -782,6 +911,17 @@ def run_diarization_m3(
         npz = np.load(str(emb_path))
         centroids = {k: npz[k] for k in npz.files}
         overlaps = workspace.read_json(ov_path, default=[]) or []
+        # Post-Clustering Centroid Merge: Ensure unmerged fragments in previously cached runs are unified
+        rttm_segs, centroids, merge_map = merge_fragmented_speaker_clusters(
+            rttm_segments=rttm_segs,
+            speaker_centroids=centroids,
+            threshold=0.80,
+        )
+        if merge_map:
+            overlaps = detect_simultaneous_overlap_windows(
+                rttm_segs,
+                min_overlap_ms=600,
+            )
         return rttm_segs, centroids, overlaps
 
     samples, sr = read_wav_float32(leveled_16k_wav)
@@ -819,6 +959,29 @@ def run_diarization_m3(
         if embs:
             centroids[spk] = l2_normalize(np.mean(np.stack(embs, axis=0), axis=0))
 
+    # Post-Clustering Centroid Merge: Unify fragmented speaker clusters (cosine similarity >= 0.80)
+    rttm_segs, centroids, merge_map = merge_fragmented_speaker_clusters(
+        rttm_segments=rttm_segs,
+        speaker_centroids=centroids,
+        threshold=0.80,
+    )
+    if merge_map:
+        merges_str = ", ".join(f"{old}->{new}" for old, new in merge_map.items() if old != new)
+        print(f"      [Centroid Merge] Unified fragmented speakers: {merges_str}", flush=True)
+        # Re-detect overlap windows with merged speaker IDs (600ms threshold)
+        overlaps = detect_simultaneous_overlap_windows(
+            rttm_segs,
+            total_duration_ms=total_ms,
+            min_overlap_ms=600,
+        )
+        # Re-write the coalesced RTTM file
+        rttm_lines = []
+        for s in rttm_segs:
+            start_s = s["start_ms"] / 1000.0
+            dur_s = (s["end_ms"] - s["start_ms"]) / 1000.0
+            rttm_lines.append(f"SPEAKER {video_id} 1 {start_s:.3f} {dur_s:.3f} <NA> <NA> {s['speaker_id']} <NA> <NA>")
+        rttm_path.write_text("\n".join(rttm_lines) + "\n", encoding="utf-8")
+
     np.savez_compressed(str(emb_path), **centroids)
     workspace.atomic_write_json(ov_path, overlaps)
 
@@ -832,7 +995,7 @@ def run_diarization_m3(
             "overlaps_json": str(ov_path),
         },
         metrics={
-            "speakers_detected": len(all_spks),
+            "speakers_detected": len(centroids),
             "overlap_windows_count": len(overlaps),
             "overlap_ratio": round(overlap_dur_ms / max(total_ms, 1), 4),
         },
@@ -848,19 +1011,18 @@ def run_overlap_separation_m4(
     workspace: SharedWorkspace,
     separator: WarmMossFormerSeparator,
     diarizer: WarmNeMoDiarizer,
-    local_tmp_dir: Path,
+    local_tmp_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """
     Executes Micro-Step M4 (Window-by-Window Checkpointed Overlap Speech Separation):
     Separates each overlap window into 2 speaker streams, matches each stream to its
     exact speaker centroid via TitaNet-Large cosine assignment, and stores clean clips
-    on Drive so any interruption resumes at the exact unfinished overlap window!
+    in deterministic NVMe temp directory so Phase C resumes at the exact unfinished overlap window!
     """
     vid_diar_dir = workspace.diarization_dir / video_id
-    # Store per-window separated clips strictly in local NVMe SSD (/tmp)
+    # Store per-window separated clips in deterministic local NVMe temp (/tmp/yt_spx_clips/{video_id})
     # Never write small temporary WAV slices to Google Drive FUSE to prevent unparented orphan bloat!
-    sep_dir = local_tmp_dir / f"{video_id}_sep_clips"
-    sep_dir.mkdir(parents=True, exist_ok=True)
+    sep_dir = get_deterministic_clip_dir(video_id)
     manifest_file = vid_diar_dir / "overlap_sep.json"
 
     state = workspace.get_video_state(video_id)
@@ -916,7 +1078,7 @@ def run_overlap_separation_m4(
 
         s_idx = max(0, int(win["start_ms"] * sr / 1000))
         e_idx = min(len(samples), int(win["end_ms"] * sr / 1000))
-        slice_wav = local_tmp_dir / f"{video_id}_{wid}.wav"
+        slice_wav = (local_tmp_dir if local_tmp_dir is not None else sep_dir) / f"{video_id}_{wid}.wav"
         write_wav_float32(slice_wav, samples[s_idx:e_idx], sr=sr)
 
         try:

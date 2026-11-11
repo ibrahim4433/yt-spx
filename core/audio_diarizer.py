@@ -38,6 +38,8 @@ from core.overlap_resolver import (
     run_overlap_separation_m4,
     assign_words_to_speakers_iou,
     realign_words_preserving_interruptions,
+    get_deterministic_clip_dir,
+    cleanup_deterministic_clip_dir,
 )
 from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episodes
 
@@ -205,10 +207,23 @@ def load_audio_waveform_16k(audio_path: Path) -> np.ndarray:
 
 
 THEOLOGICAL_VOCAB_PROMPT_EN = (
-    "Speakers' Corner Dawah philosophical and theological street debate. "
-    "Allah, Quran, Surah, Ayah, Prophet Muhammad, Tawheed, Shirk, Sunnah, Hadith, "
-    "Trinity, Jesus, Messiah, Christ, Bible, Torah, Injeel, Gospel, John, Isaiah, Paul, "
-    "Contingency, Necessary Being, Objective Morality, Scientism, Sheikh Uthman, Hamza, Mohammed Hijab, Mansur."
+    "Speakers' Corner London Dawah philosophical and theological street debate. "
+    "Allah, Subhanahu wa Ta'ala, Prophet Muhammad (peace be upon him), Rasulullah, "
+    "Quran, Surah, Ayah, Tawheed, Shirk, Aqeedah, Sunnah, Hadith, Sahih al-Bukhari, Sahih Muslim, "
+    "Trinity, Jesus Christ, Messiah, Son of God, Holy Spirit, Bible, Old Testament, New Testament, "
+    "Torah, Injeel, Gospel of John, Gospel of Matthew, Paul, Isaiah 53, Deuteronomy 18, Septuagint, "
+    "Kalam Cosmological Argument, Contingency, Necessary Being, Axioms, Objective Morality, Scientism, "
+    "Sheikh Uthman Farooq, Hamza Andreas Tzortzis, Mohammed Hijab, Mansur, Ali Dawah, Adnan Rashid, Shamsi, Hashimi."
+)
+
+THEOLOGICAL_VOCAB_PROMPT_AR = (
+    "مناظرات ركن الخطباء وحوارات الأديان والفلسفة الإسلامية وعلم الكلام والدعوة في لندن. "
+    "الله سبحانه وتعالى، النبي محمد صلى الله عليه وسلم، القرآن الكريم، السورة، الآية، التوحيد، الشرك، "
+    "العقيدة، ألوهية، ربوبية، الأسماء والصفات، السنة النبوية، الحديث الشريف، صحيح البخاري، صحيح مسلم، "
+    "برهان التطبيق، دليل الإمكان والحاجة، واجب الوجود، ممكن الوجود، نقد الإلحاد والداروينية، الأخلاق الموضوعية، "
+    "الثالوث، التجسد، الفداء، يسوع المسيح، الكتاب المقدس، العهد القديم، العهد الجديد، التوراة، الإنجيل، "
+    "إنجيل يوحنا، متى، مرقس، لوقا، رسائل بولس، سفر التكوين، إشعياء، التحريف، عصمة الأنبياء، "
+    "الشيخ عثمان فاروق، حمزة أندرياس تزورتزس، محمد حجاب، منصور، علي دعوة، عدنان رشيد، الهاشمي، شمس الدين."
 )
 
 HALLUCINATION_PHRASES = {
@@ -555,7 +570,14 @@ class WarmASRAlignmentEngine:
                 print(f"   [!] Language probe note ({e}); defaulting to 'en'", flush=True)
                 lang = "en"
 
-        init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN if lang == "en" else None
+        # Select rich contextual theological prompt based on detected or forced language
+        if lang == "ar":
+            init_prompt = THEOLOGICAL_VOCAB_PROMPT_AR
+        elif lang == "en":
+            init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN
+        else:
+            # Priming with English theological terminology preserves loanwords for other languages
+            init_prompt = THEOLOGICAL_VOCAB_PROMPT_EN
 
         def _consume_segments(waveform: np.ndarray, target_lang: Optional[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
             # Scale batched inference up to 16 on Colab T4 (safe ~12.2 GB VRAM ceiling with step-down fallback)
@@ -1099,7 +1121,7 @@ class Stage1AudioPipeline:
             # Verify or self-heal M4 separated clips before unloading separator/diarizer
             # Clips reside strictly in local NVMe SSD (/tmp), never on Google Drive
             vid_diar_dir = self.workspace.diarization_dir / vid
-            sep_dir = local_tmp / f"{vid}_sep_clips"
+            sep_dir = get_deterministic_clip_dir(vid)
             manifest_file = vid_diar_dir / "overlap_sep.json"
             sep_manifest: List[Dict[str, Any]] = self.workspace.read_json(manifest_file, default=[]) or []
 
@@ -1259,6 +1281,7 @@ class Stage1AudioPipeline:
             print("   " + "=" * 70, flush=True)
 
             # Remove temporary per-window WAV clips from local SSD now that scenario JSON is finalized
+            cleanup_deterministic_clip_dir(vid)
             shutil.rmtree(local_tmp / f"{vid}_sep_clips", ignore_errors=True)
 
             self.workspace.advance_micro_step(

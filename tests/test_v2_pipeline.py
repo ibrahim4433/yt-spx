@@ -28,6 +28,13 @@ from core.overlap_resolver import (
     assign_separated_streams_to_speakers,
     assign_words_to_speakers_iou,
     realign_words_preserving_interruptions,
+    merge_fragmented_speaker_clusters,
+    get_deterministic_clip_dir,
+    cleanup_deterministic_clip_dir,
+)
+from core.audio_diarizer import (
+    THEOLOGICAL_VOCAB_PROMPT_EN,
+    THEOLOGICAL_VOCAB_PROMPT_AR,
 )
 from core.speaker_roles import VoiceprintRegistry, classify_speakers_and_episodes
 from core.scenario_extractor import build_episode_windows, Stage2ScenarioExtractor
@@ -154,6 +161,89 @@ class TestOverlapResolverAndAlignment(unittest.TestCase):
             speakers_seq,
             ["SPK_00", "SPK_00", "SPK_01", "SPK_01", "SPK_00", "SPK_00"],
         )
+
+    def test_600ms_overlap_detection_default(self):
+        rttm_text = "\n".join([
+            "SPEAKER test 1 0.000 5.000 <NA> <NA> speaker_0 <NA> <NA>",
+            "SPEAKER test 1 4.300 3.000 <NA> <NA> speaker_1 <NA> <NA>",  # 700ms overlap [4300..5000]
+        ])
+        segs = parse_rttm_lines(rttm_text)
+        # Default min_overlap_ms is now 600ms, so 700ms must be detected!
+        overlaps = detect_simultaneous_overlap_windows(segs, total_duration_ms=10_000)
+        self.assertEqual(len(overlaps), 1)
+        self.assertEqual(overlaps[0]["core_start_ms"], 4300)
+        self.assertEqual(overlaps[0]["core_end_ms"], 5000)
+
+    def test_post_clustering_centroid_merge_unifies_fragmented_speakers(self):
+        # SPK_00 and SPK_02 have >0.90 cosine similarity (fragmented Da'ee)
+        # SPK_01 has 0.0 similarity (distinct interlocutor)
+        c0 = np.zeros(192, dtype=np.float32)
+        c0[0] = 0.99
+        c0[1] = 0.14
+        c0 = c0 / np.linalg.norm(c0)
+
+        c2 = np.zeros(192, dtype=np.float32)
+        c2[0] = 0.98
+        c2[1] = 0.20
+        c2 = c2 / np.linalg.norm(c2)
+
+        c1 = np.zeros(192, dtype=np.float32)
+        c1[5] = 1.0  # orthogonal
+
+        centroids = {
+            "SPK_00": c0,
+            "SPK_01": c1,
+            "SPK_02": c2,
+        }
+
+        # SPK_00 has 30s speech, SPK_02 has 10s speech
+        rttm_segs = [
+            {"start_ms": 0, "end_ms": 30000, "speaker_id": "SPK_00"},
+            {"start_ms": 30500, "end_ms": 40000, "speaker_id": "SPK_01"},
+            {"start_ms": 40500, "end_ms": 50500, "speaker_id": "SPK_02"},
+        ]
+
+        merged_segs, merged_cents, id_map = merge_fragmented_speaker_clusters(
+            rttm_segs,
+            centroids,
+            threshold=0.80,
+        )
+
+        # SPK_02 should be merged into SPK_00 because SPK_00 has larger duration
+        self.assertIn("SPK_02", id_map)
+        self.assertEqual(id_map["SPK_02"], "SPK_00")
+        self.assertNotIn("SPK_02", merged_cents)
+        self.assertIn("SPK_00", merged_cents)
+        self.assertIn("SPK_01", merged_cents)
+
+        # SPK_01 must NOT be merged
+        self.assertEqual(id_map.get("SPK_01", "SPK_01"), "SPK_01")
+
+        # RTTM segments should only contain SPK_00 and SPK_01
+        speakers_in_segs = {s["speaker_id"] for s in merged_segs}
+        self.assertEqual(speakers_in_segs, {"SPK_00", "SPK_01"})
+
+    def test_deterministic_clip_dir_lifecycle(self):
+        vid = "test_vid_lifecycle_99"
+        d = get_deterministic_clip_dir(vid)
+        self.assertTrue(d.exists())
+        test_file = d / "sample.wav"
+        test_file.write_text("audio data", encoding="utf-8")
+        self.assertTrue(test_file.exists())
+
+        cleanup_deterministic_clip_dir(vid)
+        self.assertFalse(d.exists())
+
+    def test_theological_multilingual_prompts_coverage(self):
+        self.assertGreater(len(THEOLOGICAL_VOCAB_PROMPT_EN), 100)
+        self.assertGreater(len(THEOLOGICAL_VOCAB_PROMPT_AR), 100)
+        # Check Arabic terms
+        self.assertIn("التوحيد", THEOLOGICAL_VOCAB_PROMPT_AR)
+        self.assertIn("الثالوث", THEOLOGICAL_VOCAB_PROMPT_AR)
+        self.assertIn("عثمان", THEOLOGICAL_VOCAB_PROMPT_AR)
+        # Check English terms
+        self.assertIn("Contingency", THEOLOGICAL_VOCAB_PROMPT_EN)
+        self.assertIn("Tawheed", THEOLOGICAL_VOCAB_PROMPT_EN)
 
 
 class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
