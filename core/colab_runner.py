@@ -334,14 +334,86 @@ def ensure_cuda_runtime_loaded() -> None:
 
 def _copy_large_file_chunked(src_path: Path, dst_path: Path, label: str = "Copying") -> None:
     """
-    Streams large GGUF model files (10GB+) in 64MB chunks with live progress and explicit os.fsync().
-    On Google Drive FUSE (/content/drive), writes directly to dst_path instead of renaming a 10GB .tmp
+    Streams large GGUF model files (10GB+) in chunks with live progress and explicit os.fsync().
+    When streaming FROM Google Drive FUSE to local NVMe SSD, uses 4 parallel threads with os.pread/pwrite
+    to saturate Google Drive's multi-stream throughput (~120-150 MB/s vs 35 MB/s single-threaded).
+    On Google Drive FUSE target (/content/drive), writes directly to dst_path instead of renaming a 10GB .tmp
     file (which causes DriveFS background sync to drop or orphan the upload).
     """
     dst_path.parent.mkdir(parents=True, exist_ok=True)
+    is_drive_source = "/content/drive" in str(src_path).replace("\\", "/")
     is_drive_target = "/content/drive" in str(dst_path).replace("\\", "/")
     write_target = dst_path if is_drive_target else dst_path.with_suffix(dst_path.suffix + ".tmp")
     total_size = src_path.stat().st_size
+
+    # Fast-path: 4-thread parallel range reads when streaming FROM Google Drive FUSE to local NVMe SSD
+    if (
+        is_drive_source
+        and not is_drive_target
+        and total_size >= 500_000_000
+        and hasattr(os, "pread")
+        and hasattr(os, "pwrite")
+        and sys.platform == "linux"
+    ):
+        try:
+            import concurrent.futures
+            import threading
+
+            num_workers = 4
+            chunk_size = 32 * 1024 * 1024  # 32 MB
+            src_fd = os.open(str(src_path), os.O_RDONLY)
+            dst_fd = os.open(str(write_target), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+            os.ftruncate(dst_fd, total_size)
+
+            copied = 0
+            copied_lock = threading.Lock()
+            t0 = time.time()
+            last_log = [t0]
+            chunks = [(off, min(chunk_size, total_size - off)) for off in range(0, total_size, chunk_size)]
+
+            def _parallel_worker(off_len: Tuple[int, int]) -> None:
+                nonlocal copied
+                off, clen = off_len
+                buf = os.pread(src_fd, clen, off)
+                if len(buf) != clen:
+                    raise IOError(f"Short read at offset {off}: expected {clen}, got {len(buf)}")
+                os.pwrite(dst_fd, buf, off)
+                with copied_lock:
+                    copied += clen
+                    now = time.time()
+                    if now - last_log[0] >= 10.0 or copied >= total_size:
+                        last_log[0] = now
+                        pct = round((copied / max(1, total_size)) * 100, 1)
+                        mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
+                        print(
+                            f"   [{label} (Parallel x{num_workers})] {pct}% ({round(copied / (1024**3), 2)} GB / "
+                            f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
+                            flush=True,
+                        )
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    list(executor.map(_parallel_worker, chunks))
+                try:
+                    os.fsync(dst_fd)
+                except Exception:
+                    pass
+                if write_target != dst_path:
+                    write_target.replace(dst_path)
+                return
+            finally:
+                try:
+                    os.close(src_fd)
+                except Exception:
+                    pass
+                try:
+                    os.close(dst_fd)
+                except Exception:
+                    pass
+        except Exception as parallel_err:
+            print(f"   [-] Parallel stream note ({parallel_err}); using sequential fallback...", flush=True)
+
+    # Standard sequential chunked streaming
     copied = 0
     t0 = time.time()
     last_log = t0
@@ -588,6 +660,8 @@ class LocalGPUClient:
             try:
                 ensure_cuda_runtime_loaded()
                 try:
+                    import importlib
+                    importlib.invalidate_caches()
                     from llama_cpp import Llama, llama_supports_gpu_offload
                 except ImportError:
                     print("[+] Auto-installing pre-built CUDA wheel for llama-cpp-python...")

@@ -587,12 +587,16 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
         "huggingface_hub",
         "tqdm",
         "nvidia-cuda-runtime-cu12",
+        "diskcache",
+        "jinja2",
     ]
     print("   -> Ensuring Stage 2 LLM core packages (cached on fast local SSD)...")
     _fast_install(llm_pkgs, constraints_path)
 
     def _test_llama_cpp() -> bool:
         try:
+            import importlib
+            importlib.invalidate_caches()
             from core.colab_runner import ensure_cuda_runtime_loaded
             ensure_cuda_runtime_loaded()
             import llama_cpp
@@ -608,7 +612,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
             cached = list(w_dir.glob(f"llama_cpp_python*{py_tag}*.whl"))
             if cached:
                 print(f"   -> Found cached llama-cpp-python GPU wheel on Drive ({cached[0].name})...")
-                _fast_install([str(cached[0])], no_deps=True)
+                _fast_install([str(cached[0])], no_deps=False)
                 if _test_llama_cpp():
                     return
         for cu_ver in ["cu124", "cu122", "cu121"]:
@@ -620,8 +624,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                     "pip",
                     "install",
                     "-q",
-                    "--force-reinstall",
-                    "--no-deps",
+                    "--prefer-binary",
                 ]
                 + pip_cache
                 + [
@@ -640,11 +643,12 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                                 sys.executable,
                                 "-m",
                                 "pip",
-                                "wheel",
+                                "download",
                                 "-q",
                                 "--no-deps",
-                                "-w",
+                                "-d",
                                 str(w_dir),
+                                "--only-binary=:all:",
                                 f"--extra-index-url=https://abetlen.github.io/llama-cpp-python/whl/{cu_ver}",
                                 "llama-cpp-python",
                             ],
@@ -652,6 +656,7 @@ def ensure_stage2_dependencies(constraints_path: Path) -> None:
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )
+                        print(f"   -> [OK] Cached llama-cpp-python wheel on Drive for 0.5s future startups!")
                     except Exception:
                         pass
                 break

@@ -236,6 +236,35 @@ LANG_ISO3 = {
 
 PUNCT_SUPPORTED_LANGS = {"en", "fr", "de", "es", "it", "nl", "pt", "bg", "pl", "cs", "sk", "sl"}
 
+# wav2vec2/MMS conv front-end: receptive field 400 samples, hop 320 -> pad 80 samples per chunk so
+# a chunk of N (multiple of 320) samples produces exactly N/320 CTC frames.
+_CTC_RF_PAD = 80
+
+
+def _ctc_emissions_to_numpy_f32(em: Any) -> Any:
+    """
+    Converts CTC emissions (torch.Tensor / np.ndarray, shape (T, C) or (1, T, C)) to a C-contiguous
+    float32 NumPy array of shape (T, C). The PyPI `ctc-forced-aligner` (1.0.x, ONNX fork) asserts
+    `emissions.dtype == numpy.float32`, which a torch.Tensor can never satisfy.
+    Unknown objects (e.g. test doubles) are returned float32-cast.
+    """
+    try:
+        if hasattr(em, "float"):
+            em = em.float()
+        if hasattr(em, "detach"):
+            em = em.detach()
+        if hasattr(em, "cpu"):
+            em = em.cpu()
+        if hasattr(em, "numpy"):
+            em = em.numpy()
+        if isinstance(em, np.ndarray):
+            if em.ndim == 3 and em.shape[0] == 1:
+                em = em[0]
+            return np.ascontiguousarray(em, dtype=np.float32)
+    except Exception:
+        pass
+    return em
+
 
 def ms_to_fmt(ms: int, always_hours: bool = False) -> str:
     ms = max(0, int(ms))
@@ -513,6 +542,7 @@ class WarmASRAlignmentEngine:
         audio_waveform = load_audio_waveform_16k(wav_path)
         if len(audio_waveform) < 3200:
             return [], forced_language or "en"
+        audio_dur_s = float(len(audio_waveform)) / 16000.0
 
         # Detect language on first 45s if not forced
         lang = forced_language
@@ -647,7 +677,13 @@ class WarmASRAlignmentEngine:
                 )
                 self._ensure_aligner()
                 ratio = getattr(getattr(self._align_model, "config", None), "inputs_to_logits_ratio", 320)
-                stride = float(ratio) / 16000.0
+                try:
+                    ratio = int(ratio)
+                except (TypeError, ValueError):
+                    ratio = 320
+                # postprocess_results() expects the frame stride in MILLISECONDS (20 ms for wav2vec2/MMS)
+                # and divides by 1000 internally to return seconds.
+                stride = float(ratio) * 1000.0 / 16000.0
                 emissions = None
 
                 if hasattr(self._align_model, "run"):
@@ -701,7 +737,9 @@ class WarmASRAlignmentEngine:
                                 and (offsets[idx_off] + chunk_size) <= total_len
                             ):
                                 off = offsets[idx_off]
-                                full_batch_chunks.append(audio_waveform[off : off + chunk_size])
+                                # +80 trailing samples so wav2vec2's 400-sample receptive field yields exactly
+                                # chunk_size/320 = 1500 frames (otherwise 1499 -> 20 ms drift per 30 s chunk).
+                                full_batch_chunks.append(np.pad(audio_waveform[off : off + chunk_size], (0, _CTC_RF_PAD)))
                                 idx_off += 1
 
                             if len(full_batch_chunks) > 1:
@@ -724,14 +762,16 @@ class WarmASRAlignmentEngine:
 
                             # Single chunk path (either ctc_chunk_batch == 1, or 1 full chunk, or trailing partial chunk)
                             if full_batch_chunks:
-                                chunk = full_batch_chunks[0]
+                                chunk = full_batch_chunks[0]  # already receptive-field padded
                             else:
                                 offset = offsets[idx_off]
                                 idx_off += 1
                                 chunk = audio_waveform[offset : min(offset + chunk_size, total_len)]
-                            rem = len(chunk) % 320
-                            if rem != 0:
-                                chunk = np.pad(chunk, (0, 320 - rem))
+                                rem = len(chunk) % 320
+                                if rem != 0:
+                                    chunk = np.pad(chunk, (0, 320 - rem))
+                                # Pad receptive field so frames == len(chunk) / 320 exactly (no cumulative drift)
+                                chunk = np.pad(chunk, (0, _CTC_RF_PAD))
                             c_tensor = torch.from_numpy(chunk)
                             if hasattr(self._align_model, "dtype"):
                                 c_tensor = c_tensor.to(self._align_model.dtype)
@@ -756,24 +796,14 @@ class WarmASRAlignmentEngine:
 
                 del audio_waveform
 
-                if isinstance(emissions, torch.Tensor) or hasattr(emissions, "is_cpu"):
-                    if hasattr(emissions, "cpu"):
-                        emissions = emissions.cpu()
-                    if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.size(0) == 1:
-                        emissions = emissions.squeeze(0)
-                    if hasattr(emissions, "float"):
-                        emissions = emissions.float()
-                elif isinstance(emissions, np.ndarray):
-                    if hasattr(emissions, "ndim") and emissions.ndim == 3 and emissions.shape[0] == 1:
-                        emissions = np.squeeze(emissions, axis=0)
-                    emissions = emissions.astype(np.float32)
-                    if hasattr(torch, "from_numpy"):
-                        try:
-                            emissions = torch.from_numpy(emissions)
-                        except Exception:
-                            pass
-                elif isinstance(emissions, (list, tuple)):
+                # Normalize emissions to a CPU float32 NumPy (T, C) array. The installed PyPI
+                # `ctc-forced-aligner` (ONNX fork) asserts `emissions.dtype == numpy.float32`, so passing a
+                # torch.Tensor ALWAYS failed with "log_probs must be float32" and silently fell back to
+                # Whisper DTW word timestamps.
+                if isinstance(emissions, (list, tuple)):
                     emissions = [e.cpu().float() if hasattr(e, "cpu") and hasattr(e, "float") else e for e in emissions]
+                else:
+                    emissions = _ctc_emissions_to_numpy_f32(emissions)
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -788,16 +818,16 @@ class WarmASRAlignmentEngine:
                 # mms-300m-1130-forced-aligner outputs 31 classes (0..30), and get_alignments maps `<star>` to index 31.
                 def _append_star_column(em_obj):
                     try:
-                        if isinstance(em_obj, torch.Tensor):
+                        if isinstance(em_obj, np.ndarray):
+                            em_obj = em_obj.astype(np.float32, copy=False)
+                            if em_obj.ndim == 2:
+                                star_col = np.zeros((em_obj.shape[0], 1), dtype=np.float32)
+                                return np.ascontiguousarray(np.concatenate([em_obj, star_col], axis=-1))
+                        elif isinstance(em_obj, torch.Tensor):
                             em_obj = em_obj.float()
                             if em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
                                 star_col = torch.zeros((em_obj.size(0), 1), dtype=torch.float32, device=em_obj.device)
                                 return torch.cat([em_obj, star_col], dim=-1)
-                        elif isinstance(em_obj, np.ndarray):
-                            em_obj = em_obj.astype(np.float32)
-                            if em_obj.ndim == 2:
-                                star_col = np.zeros((em_obj.shape[0], 1), dtype=np.float32)
-                                return np.concatenate([em_obj, star_col], axis=-1)
                     except Exception:
                         pass
                     return em_obj
@@ -816,50 +846,31 @@ class WarmASRAlignmentEngine:
                         if em_cols == len(vocab_dict):
                             emissions = _append_star_column(emissions)
 
-                if isinstance(emissions, torch.Tensor):
-                    emissions = emissions.to(dtype=torch.float32)
-                elif isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
-                    emissions = torch.from_numpy(emissions.astype(np.float32))
+                def _run_alignment(em_obj):
+                    """
+                    Calls get_alignments with NumPy float32 first (PyPI ONNX fork API); if the installed package is
+                    the upstream torch API (`emissions.is_cpu`), retries with a float32 torch.Tensor view.
+                    """
+                    try:
+                        return get_alignments(em_obj, tokens_starred, self._align_tokenizer)
+                    except AttributeError as ae:
+                        if "is_cpu" in str(ae) and isinstance(em_obj, np.ndarray) and hasattr(torch, "from_numpy"):
+                            return get_alignments(torch.from_numpy(em_obj), tokens_starred, self._align_tokenizer)
+                        raise
 
                 try:
-                    segments, scores, blank_token = get_alignments(
-                        emissions,
-                        tokens_starred,
-                        self._align_tokenizer,
-                    )
-                except AttributeError as ae:
-                    if "is_cpu" in str(ae) and isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
-                        em_tensor = torch.from_numpy(emissions.astype(np.float32))
-                        if hasattr(em_tensor, "ndim") and em_tensor.ndim == 3 and em_tensor.size(0) == 1:
-                            em_tensor = em_tensor.squeeze(0)
-                        segments, scores, blank_token = get_alignments(
-                            em_tensor.to(dtype=torch.float32),
-                            tokens_starred,
-                            self._align_tokenizer,
-                        )
-                    else:
-                        raise
+                    segments, scores, blank_token = _run_alignment(emissions)
                 except Exception as align_err:
                     err_msg = str(align_err).lower()
                     if "within [0," in err_msg or "targets" in err_msg:
                         emissions = _append_star_column(emissions)
-                        if isinstance(emissions, torch.Tensor):
-                            emissions = emissions.to(dtype=torch.float32)
-                        segments, scores, blank_token = get_alignments(
-                            emissions,
-                            tokens_starred,
-                            self._align_tokenizer,
-                        )
+                        segments, scores, blank_token = _run_alignment(emissions)
                     elif "float32" in err_msg or "log_probs" in err_msg:
-                        if isinstance(emissions, torch.Tensor):
-                            emissions = emissions.to(dtype=torch.float32)
-                        elif isinstance(emissions, np.ndarray) and hasattr(torch, "from_numpy"):
-                            emissions = torch.from_numpy(emissions.astype(np.float32))
-                        segments, scores, blank_token = get_alignments(
-                            emissions,
-                            tokens_starred,
-                            self._align_tokenizer,
-                        )
+                        if hasattr(emissions, "float"):
+                            emissions = emissions.float()
+                        elif isinstance(emissions, np.ndarray):
+                            emissions = np.ascontiguousarray(emissions, dtype=np.float32)
+                        segments, scores, blank_token = _run_alignment(emissions)
                     else:
                         raise
 
@@ -870,7 +881,28 @@ class WarmASRAlignmentEngine:
 
                 spans = get_spans(tokens_starred, segments, blank_token)
                 word_timestamps = postprocess_results(text_starred, spans, stride, scores)
-                return word_timestamps, lang
+                # Normalize to the {'word','text','start','end'} (seconds) schema used downstream
+                normalized_words: List[Dict[str, Any]] = []
+                for w in word_timestamps or []:
+                    if not isinstance(w, dict):
+                        continue
+                    w_txt = str(w.get("word") or w.get("text") or "").strip()
+                    if not w_txt:
+                        continue
+                    nw = dict(w)
+                    nw["word"] = w_txt
+                    nw["text"] = w_txt
+                    nw["start"] = float(w.get("start", 0.0))
+                    nw["end"] = float(w.get("end", nw["start"]))
+                    normalized_words.append(nw)
+                if not normalized_words:
+                    raise RuntimeError("CTC aligner returned no words")
+                # Sanity guard: aligned timeline must fit inside the audio (catches stride/unit regressions)
+                if normalized_words[-1]["end"] > audio_dur_s * 1.05 + 1.0:
+                    raise RuntimeError(
+                        f"CTC timestamps exceed audio length ({normalized_words[-1]['end']:.1f}s > {audio_dur_s:.1f}s)"
+                    )
+                return normalized_words, lang
             except Exception as e:
                 print(f"   [!] CTC alignment fallback note ({lang}): {e}")
 
