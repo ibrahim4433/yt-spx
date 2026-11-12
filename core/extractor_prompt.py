@@ -31,6 +31,13 @@ When a person enters the website with a doubt or misconception, they will search
 CRITICAL RULE 1: PERSPECTIVE OF THE QUESTION (صياغة السؤال من وجهة نظر السائل أو صاحب الشبهة)
 - The question ("question_en", "question_ar") MUST ALWAYS be formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
 - It represents the FALSE CLAIM, OBJECTION, QUESTION or MISCONCEPTION they bring to the table (e.g. "Isn't Jesus God in the flesh according to the Bible?", "Why does God allow innocent children to suffer?", "If everything needs a creator, who created God?").
+- STRICT PROHIBITION ON 1ST-PERSON CONFESSIONAL INVERSIONS (حظر صياغة الاعترافات الشخصية بضمير المتكلم):
+  * NEVER formulate the question as an awkward 1st-person confession or debate concession!
+  * (e.g., NEVER write: "Why do I hold anti-Islamic views if I haven't read the Quran?" or "Why do I oppose Islam?").
+  * Real seekers search objective objections: "Can one validly critique Islam without reading its primary texts?", "Is it intellectually fair to judge Islam by the behavior of individual Muslims?".
+- MANDATORY INTERROGATIVE SYNTAX (إلزامية الصياغة الاستفهامية):
+  * "question_en" MUST always be a grammatically complete interrogative question ending with `?`.
+  * NEVER leave it as a raw spoken declarative statement (e.g., do NOT write "God needs a designer. No, listen." -> Rewrite as: "If the universe requires a designer, why doesn't God also require a designer?").
 - `socratic_question` / `socratic_question_ar` represents the DA'EE'S attacking question or clincher counter-question (إلزام الخصم والسؤال السقراطي الهجومي). DO NOT confuse this with `question_en`!
 - `core_answer_summary_en` / `core_answer_summary_ar` represents the DA'EE'S decisive Islamic proof, refutation, and rational theological truth (البرهان الإسلامي والرد المقنع الشافي).
 
@@ -38,8 +45,9 @@ CRITICAL RULE 2: DIRECT CONVINCING TRUTH (الجواب المقنع المبره
 - DO NOT write narrative summaries of the conversation: "The Da'ee counters by citing...", "Hashim questions...", "The speaker explains that...".
 - WRITE THE ACTUAL, CONVINCING INTELLECTUAL AND SCRIPTURAL TRUTH DIRECTLY: Expose the false assumption, state the Islamic rational principle, cite the decisive proof, and explain the theological wisdom. A seeker reading the card must understand why Islam is the only rational, uncorrupted truth.
 
-CRITICAL RULE 3: ZERO CONVERSATIONAL NOISE (حظر الحشو والتفاهات اللفظية)
+CRITICAL RULE 3: ZERO CONVERSATIONAL NOISE & STREET DRAMA (حظر الحشو وشغب الشارع والمواقف الأمنية)
 - NEVER extract rhetorical interjections, fragments, or passing conversational filler (e.g., NEVER extract "Let her be?", "What did you say?", "Excuse me?", "Are you listening?").
+- NEVER extract situational street drama, police interactions, weapon brandishing, bystander yelling, dog petting, arrests, or street logistical chatter! These are street incidents, NOT theological apologetics cards.
 - Every extracted question must be a genuine, substantive theological/philosophical objection, inquiry, or dogma (e.g. "Who created God?", "Is Jesus God in the Bible?", "Why does God allow suffering?").
 
 CRITICAL RULE 4: MONOLOGUES, INTROS, LIVE COMMENTS & ANTICIPATED OBJECTIONS (استخراج الشبهات المفترضة وأسئلة البث والتعليقات والمقدمات)
@@ -52,8 +60,9 @@ CRITICAL RULE 4: MONOLOGUES, INTROS, LIVE COMMENTS & ANTICIPATED OBJECTIONS (ا�
   * Set "interlocutor_type" to the worldview/target audience of the doubt (e.g. "Inquiring Seeker", "Atheist / Materialist", "Christian / Trinitarian", "Muslim with Doubts").
   * Set "interlocutor_verbatim_quote" to the Da'ee's words framing the doubt or question.
 
-CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES (حظر تلفيق أو إعادة صياغة الاقتباسات)
-- `verbatim_quote` and `interlocutor_verbatim_quote` MUST be copied EXACTLY word-for-word from the transcript turns!
+CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES & ZERO PROMPT LEAKAGE (حظر تلفيق الاقتباسات وحظر نسخ أمثلة البرومبت)
+- `verbatim_quote` and `interlocutor_verbatim_quote` MUST be copied EXACTLY word-for-word from the transcript turns of the current video!
+- NEVER copy quotes, premises, or text from the few-shot example demonstrations in this prompt (such as the First Cause quote "The rule of science and philosophy is: whatever begins to exist has a cause..."). Copying prompt demonstration text into an extracted card is a catastrophic grounding failure!
 - NEVER fabricate, paraphrase, or smooth what the Da'ee or interlocutor said into an artificial written essay.
 - If you want to deliver an authoritative, polished academic refutation, put it in `core_answer_summary_en` and `core_answer_summary_ar`, but keep `verbatim_quote` 100% faithful to the actual words spoken on camera.
 

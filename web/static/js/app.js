@@ -1125,13 +1125,20 @@ function renderCards(cards) {
     const serialCode = `QA-${String(card.serial_number || index + 1).padStart(3, "0")}`;
     const showParallel = isParallelMode ? !cardParallelOverrides.has(cardId) : cardParallelOverrides.has(cardId);
 
-    const qEn = card.question_en || card.question_ar || "";
-    const qAr = card.question_ar || card.question_en || "";
-    const sumEn = card.core_answer_summary_en || card.core_answer_summary_ar || "";
-    const sumAr = card.core_answer_summary_ar || card.core_answer_summary_en || "";
+    const hasQuestionAr = Boolean(card.question_ar && card.question_ar.trim());
+    const hasSummaryAr = Boolean(card.core_answer_summary_ar && card.core_answer_summary_ar.trim());
 
-    const primaryQuestion = isAr ? qAr : qEn;
-    const primarySummary = isAr ? sumAr : sumEn;
+    const qEn = card.question_en || card.question_ar || "";
+    const qAr = hasQuestionAr
+      ? card.question_ar
+      : (showParallel ? '<span class="text-muted ar-pending-badge" dir="rtl" style="font-size:0.85em; font-weight:normal; opacity:0.75;">[التحقيق والترجمة بالعربية الفصحى قيد الإعداد...]</span>' : (card.question_en || ""));
+    const sumEn = card.core_answer_summary_en || card.core_answer_summary_ar || "";
+    const sumAr = hasSummaryAr
+      ? card.core_answer_summary_ar
+      : (showParallel ? '<span class="text-muted ar-pending-badge" dir="rtl" style="font-size:0.9em; font-style:italic; opacity:0.75;">[البيان العقلي والرد بالعربية الفصحى قيد الإعداد...]</span>' : (card.core_answer_summary_en || ""));
+
+    const primaryQuestion = isAr ? (hasQuestionAr ? card.question_ar : (card.question_en || "")) : qEn;
+    const primarySummary = isAr ? (hasSummaryAr ? card.core_answer_summary_ar : (card.core_answer_summary_en || "")) : sumEn;
 
     const categoryName = isAr
       ? (card.topic_category_ar || getLocalizedCategory(card.topic_category, "ar"))
@@ -1149,7 +1156,7 @@ function renderCards(cards) {
       ? `
         <div class="question-parallel-grid">
           <div class="q-col-en"><h3>${escapeHtml(qEn)}</h3></div>
-          <div class="q-col-ar"><h3>${escapeHtml(qAr)}</h3></div>
+          <div class="q-col-ar"><h3>${hasQuestionAr ? escapeHtml(card.question_ar) : qAr}</h3></div>
         </div>
       `
       : `<div class="question-single"><h3>${escapeHtml(primaryQuestion)}</h3></div>`;
@@ -1158,7 +1165,7 @@ function renderCards(cards) {
       ? `
         <div class="core-thesis-parallel">
           <p class="thesis-en">${escapeHtml(sumEn)}</p>
-          <p class="thesis-ar">${escapeHtml(sumAr)}</p>
+          <p class="thesis-ar">${hasSummaryAr ? escapeHtml(card.core_answer_summary_ar) : sumAr}</p>
         </div>
       `
       : `<p class="core-thesis-block">${escapeHtml(primarySummary)}</p>`;

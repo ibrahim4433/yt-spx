@@ -764,9 +764,13 @@ def clean_latin_tokens_in_arabic(text: str) -> str:
         pattern = r'\b' + re.escape(eng_term) + r'\b'
         val = re.sub(pattern, ar_term, val, flags=re.IGNORECASE)
 
-    # 3. Purge any remaining stray Latin/English tokens from Arabic fields
+    # 3. Handle known compound Latin-Arabic splices
+    val = re.sub(r'بيرمINGTON', 'برمنغهام', val, flags=re.IGNORECASE)
+    val = re.sub(r'فutility', 'عبثية وعدم جدوى', val, flags=re.IGNORECASE)
+
+    # 4. Purge any remaining stray Latin/English tokens from Arabic fields
     val = re.sub(r'(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])', ' ', val)
-    val = re.sub(r'\b[A-Za-z]+\b', '', val)
+    val = re.sub(r'[A-Za-z]+', '', val)
     val = re.sub(r'\(\s*\)', '', val)
     val = re.sub(r'\[\s*\]', '', val)
     val = re.sub(r'[ \t]+', ' ', val).strip()

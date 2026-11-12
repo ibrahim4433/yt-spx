@@ -280,12 +280,26 @@ def canonicalize_topic_category(raw_category: str) -> str:
 def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
     """
     Enforces quality threshold: discards conversational noise, rhetorical filler,
-    personal street interview chit-chat, or truncated sentence fragments.
+    personal street interview chit-chat, situational street drama/police incidents,
+    or truncated sentence fragments.
     Allows concise, foundational theological questions (e.g. 'Is Jesus God?', 'Who created God?').
     """
     q_en_clean = (q_en or "").strip().lower().rstrip("?").strip()
     words_en = q_en_clean.split()
     if len(words_en) < 3:
+        return False
+
+    # Discard non-theological situational street drama / police / security chatter
+    street_drama_patterns = [
+        r"\bpolice\b", r"\bfirearm\b", r"\bweapon\b", r"\bbrandish\b", r"\bbrandishing\b",
+        r"\bto the t\b", r"\bpet him\b", r"\barrest\b", r"\bsecurity guard\b",
+        r"\bhandcuff\b", r"\bdispatch\b", r"\bpatrol car\b", r"\b911\b"
+    ]
+    if any(re.search(pat, q_en_clean, re.I) for pat in street_drama_patterns):
+        return False
+
+    # Discard awkward 1st-person confessional inversions (e.g., 'why do i oppose islam...')
+    if q_en_clean.startswith("why do i ") or q_en_clean.startswith("why am i "):
         return False
 
     q_ar_clean = (q_ar or "").strip().rstrip("؟").strip()
@@ -308,7 +322,7 @@ def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
     trivial_phrases_ar = [
         "أين أصبت", "كم عمرك", "ما اسمك", "من أنت", "هل تسمعني",
         "ماذا قلت", "عفوا", "معذرة", "أهلا", "مرحبا", "أين تسكن",
-        "هل يمكن التقاط صورة", "تشرفنا"
+        "هل يمكن التقاط صورة", "تشرفنا", "الشرطة", "سلاح ناري"
     ]
     for tp in trivial_phrases_ar:
         if q_ar_clean.startswith(tp) or q_ar_clean == tp:
@@ -1399,6 +1413,17 @@ class Stage2ScenarioExtractor:
                         print(f"        Truth Proof: {ans_preview}")
                 else:
                     print("      (No substantive debate objections in this window - skipped)")
+
+        # 4-Layer Ingestion Barrier: Ensure 100% Arabic Localization before advancing to M6
+        unlocalized = [u for u in all_units if not has_valid_arabic_localization(u)]
+        if unlocalized:
+            logger.error(
+                "Video %s cannot advance to M6_LLM_EXTRACTED: %d of %d cards lack valid Arabic localization!",
+                video_id, len(unlocalized), len(all_units)
+            )
+            if verbose:
+                print(f"\n   [ERROR] Video {video_id} has {len(unlocalized)}/{len(all_units)} unlocalized cards! Halting M6 commit.")
+            return []
 
         # Re-number sequential IDs cleanly and write final immutable shard
         for idx, u in enumerate(all_units, start=1):
