@@ -116,6 +116,21 @@ def classify_ytdlp_output(output_lower: str) -> str:
     return ""
 
 
+def build_js_runtime_args(include_remote_components: bool = True) -> List[str]:
+    """Builds repeatable yt-dlp --js-runtimes flags (one runtime per flag) plus EJS components."""
+    for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
+        if d.exists() and str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+
+    args: List[str] = []
+    for runtime in ("deno", "node"):
+        if shutil.which(runtime):
+            args.extend(["--js-runtimes", runtime])
+    if include_remote_components:
+        args.extend(["--remote-components", "ejs:github"])
+    return args
+
+
 def sanitize_cookie_file(src_path: Path, dst_path: Path) -> None:
     """
     Standardizes Netscape header, ensures strict tab separation (repairs space-aligned exports),
@@ -217,29 +232,30 @@ class CookiePool:
     # Discovery & registry
     # ------------------------------------------------------------------
     def discover(self) -> List[Path]:
-        dirs = [
-            self.ws.root / "cookies",
-            self.ws.root / "Cookies",
-            self.ws.data_dir / "cookies",
+        dirs: List[Tuple[Path, bool]] = [
+            (self.ws.root / "cookies", False),
+            (self.ws.root / "Cookies", False),
+            (self.ws.data_dir / "cookies", False),
         ]
         if self.ws.is_drive and self.ws.root.parent.exists():
             dirs.extend([
-                self.ws.root.parent / "cookies",
-                self.ws.root.parent / "Cookies",
+                (self.ws.root.parent / "cookies", False),
+                (self.ws.root.parent / "Cookies", False),
             ])
-        singles = [
-            self.ws.root / "cookies.txt",
-            self.ws.data_dir / "cookies.txt",
+        singles: List[Tuple[Path, bool]] = [
+            (self.ws.root / "cookies.txt", False),
+            (self.ws.data_dir / "cookies.txt", False),
         ]
         if self.include_repo_dir:
-            dirs.append(BASE_DIR / "cookies")
-            dirs.append(BASE_DIR / "Cookies")
-            singles.append(BASE_DIR / "cookies.txt")
+            dirs.append((BASE_DIR / "cookies", True))
+            dirs.append((BASE_DIR / "Cookies", True))
+            singles.append((BASE_DIR / "cookies.txt", True))
 
         found: List[Path] = []
         seen = set()
+        seen_workspace_names = set()
 
-        def _add(p: Path) -> None:
+        def _add(p: Path, from_repo: bool = False) -> None:
             try:
                 if not p.is_file():
                     return
@@ -248,23 +264,32 @@ class CookiePool:
                 key = str(p.resolve())
             except OSError:
                 return
-            if key not in seen:
-                seen.add(key)
-                found.append(p)
+            if key in seen:
+                return
+            if from_repo and p.name in seen_workspace_names:
+                return
+            seen.add(key)
+            if not from_repo:
+                seen_workspace_names.add(p.name)
+            found.append(p)
 
-        for d in dirs:
-            if d.is_dir():
-                try:
-                    for p in sorted(d.iterdir()):
-                        if p.is_file() and not p.name.startswith("."):
-                            name_lower = p.name.lower()
-                            if name_lower.endswith((".txt", ".cookie", ".cookies")) or "cookie" in name_lower:
-                                _add(p)
-                except OSError:
-                    pass
+        def _scan_dir(d: Path, from_repo: bool = False) -> None:
+            if not d.is_dir():
+                return
+            try:
+                for p in sorted(d.iterdir()):
+                    if p.is_file() and not p.name.startswith("."):
+                        name_lower = p.name.lower()
+                        if name_lower.endswith((".txt", ".cookie", ".cookies")) or "cookie" in name_lower:
+                            _add(p, from_repo=from_repo)
+            except OSError:
+                pass
 
-        for s in singles:
-            _add(s)
+        for d, from_repo in dirs:
+            _scan_dir(d, from_repo=from_repo)
+
+        for s, from_repo in singles:
+            _add(s, from_repo=from_repo)
 
         return found
 
@@ -305,10 +330,10 @@ class CookiePool:
     # Selection
     # ------------------------------------------------------------------
     def healthy_cookies(self) -> List[Path]:
-        """Returns usable cookie files ordered: most recently successful first, then least failures."""
+        """Returns usable cookie files: proven/zero-failure (newest mtime first) ahead of previously failed cookies."""
         now = time.time()
         reg = self._load()
-        usable: List[Tuple[float, int, str, Path]] = []
+        usable: List[Tuple[int, float, float, str, Path]] = []
         for p in self.discover():
             ok_off, _ = validate_cookie_file_offline(p)
             if not ok_off:
@@ -320,9 +345,13 @@ class CookiePool:
             fresh = entry.get("fingerprint") and entry["fingerprint"] != self._fingerprint(p)
             last_ok = 0.0 if fresh else float(entry.get("last_ok_at", 0.0))
             fails = 0 if fresh else int(entry.get("consecutive_failures", 0))
-            usable.append((last_ok, -fails, self.cookie_key(p), p))
-        usable.sort(key=lambda t: (t[0], t[1]), reverse=True)
-        return [t[3] for t in usable]
+            try:
+                mtime = float(p.stat().st_mtime)
+            except OSError:
+                mtime = 0.0
+            usable.append((1 if fails == 0 else 0, last_ok, mtime, self.cookie_key(p), p))
+        usable.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
+        return [t[4] for t in usable]
 
     def mark_ok(self, path: Path) -> None:
         reg = self._load()
@@ -352,6 +381,7 @@ class CookiePool:
             quarantined_until = float(entry.get("quarantined_until", 0.0) or 0.0)
         else:
             fails += 1
+            entry["last_ok_at"] = 0.0
             max_cap = QUARANTINE_SEC["invalid"] if kind == "invalid" else 3600
             quarantine = min(base * (2 ** max(0, fails - 1)), max_cap)
             quarantined_until = time.time() + quarantine
@@ -460,13 +490,10 @@ class CookiePool:
                 "--no-playlist",
                 "--no-progress",
                 "--print", "id",
-                "--remote-components", "ejs:github",
                 "--extractor-args", "youtube:player_skip=initial_data",
                 "--cookies", str(jar),
             ]
-            runtimes = [r for r in ("deno", "node") if shutil.which(r)]
-            if runtimes:
-                cmd += ["--js-runtimes", ",".join(runtimes)]
+            cmd.extend(build_js_runtime_args())
             cmd.append(test_url)
             try:
                 proc = subprocess.run(

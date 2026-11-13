@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
-from core.cookie_pool import CookiePool, classify_ytdlp_output, sanitize_cookie_file
+from core.cookie_pool import CookiePool, build_js_runtime_args, classify_ytdlp_output, sanitize_cookie_file
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -81,7 +81,8 @@ def _attempt_pytubefix_download(url: str, vid: str, tmp_dir: Path, expected_dur:
     dl_name = f"{vid}.mp4"
     for client_name, kwargs in (
         ("ANDROID_VR", {}),
-        ("WEB", {"use_po_token": True}),
+        ("VISION_OS", {}),
+        ("WEB", {}),
     ):
         dl_path = tmp_dir / dl_name
         dl_path.unlink(missing_ok=True)
@@ -182,7 +183,7 @@ def fetch_video_audio_m1(
     workspace: SharedWorkspace,
     min_global_gap_sec: float = 15.0,
     max_wait_for_slot_sec: float = 90.0,
-    max_cookie_attempts: int = 4,
+    max_cookie_attempts: int = 16,
 ) -> Tuple[Optional[Path], Dict[str, Any]]:
     """
     Executes Micro-Step M1 (YouTube Audio Fetch) with full resume & anti-ban protection.
@@ -244,19 +245,7 @@ def fetch_video_audio_m1(
             "-o", out_tmpl,
         ]
 
-        # Detect available JS runtimes (Deno & Node in Colab)
-        for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
-            if d.exists() and str(d) not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
-
-        runtimes = []
-        if shutil.which("deno"):
-            runtimes.append("deno")
-        if shutil.which("node"):
-            runtimes.append("node")
-        if runtimes:
-            base_cmd.extend(["--js-runtimes", ",".join(runtimes)])
-        base_cmd.extend(["--remote-components", "ejs:github"])
+        base_cmd.extend(build_js_runtime_args())
 
         # Multi-attempt strategy:
         # 1. Anonymous download FIRST (visionos/HLS avoids PO tokens when unflagged).
@@ -265,7 +254,9 @@ def fetch_video_audio_m1(
         # 2. Healthy rotating cookie pool for bot-challenged / restricted / age-gated videos.
         # 3. Anonymous android_vr retry if not yet tried, followed by PytubeFix fallback.
         pool = CookiePool(workspace)
-        healthy = pool.healthy_cookies()[:max_cookie_attempts]
+        healthy = pool.healthy_cookies()
+        if max_cookie_attempts > 0:
+            healthy = healthy[:max_cookie_attempts]
 
         plan: List[Tuple[Optional[Path], Optional[str], str]] = [
             (None, None, "anonymous (visionos/hls)"),

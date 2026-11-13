@@ -76,15 +76,21 @@ def setup_colab_drive() -> bool:
     print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
     print(f"   -> Active Code Directory : {CURRENT_DIR}")
     try:
-        from core.cookie_pool import CookiePool
+        from core.cookie_pool import CookiePool, validate_cookie_file_offline
 
         (ws.root / "cookies").mkdir(parents=True, exist_ok=True)
         ws.clear_youtube_circuit_breaker()
         pool = CookiePool(ws)
         pool.reset_quarantine()
+        discovered = pool.discover()
         healthy = pool.healthy_cookies()
-        total_discovered = len(pool.discover())
-        print(f"   -> Ingestion strategy  : HLS 234/233 stream (anti-bot) (fallback cookies: {len(healthy)} healthy / {total_discovered} total)")
+        print(f"   -> Ingestion strategy  : HLS 234/233 stream (anti-bot) (fallback cookies: {len(healthy)} healthy / {len(discovered)} total)")
+        if healthy:
+            print(f"   -> Active cookie order : {', '.join(pool.cookie_key(p) for p in healthy)}")
+        for p in discovered:
+            ok_off, off_reason = validate_cookie_file_offline(p)
+            if not ok_off:
+                print(f"   -> Skipped cookie      : {pool.cookie_key(p)} ({off_reason})")
     except Exception as exc:
         print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
     return True

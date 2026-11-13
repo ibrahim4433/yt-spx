@@ -1676,12 +1676,17 @@ class TestColabWave5Regressions(unittest.TestCase):
             captured_cmds.append(list(cmd))
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="dQw4w9WgXcQ\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name in ("deno", "node") else None
+
+        with patch("shutil.which", side_effect=fake_which), patch("subprocess.run", side_effect=fake_run):
             ok, kind, _ = pool.test_cookie_online(cookie, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         self.assertTrue(ok)
         self.assertEqual(kind, "ok")
         cmd_str = " ".join(captured_cmds[0])
         self.assertNotIn("player_client=android", cmd_str)
+        self.assertNotIn("deno,node", cmd_str)
+        self.assertIn("--js-runtimes deno --js-runtimes node", cmd_str)
         self.assertIn("--remote-components ejs:github", cmd_str)
 
     def test_ensure_deno_runtime_not_skipped_by_node(self):
@@ -1759,8 +1764,9 @@ class TestColabWave5Regressions(unittest.TestCase):
         self.assertTrue(raw_audio.exists())
         self.assertEqual([p.name for p in CookiePool(self.ws, include_repo_dir=False).healthy_cookies()], ["good.txt"])
         self.assertEqual(len(seen_cmds), 3)
+        self.assertTrue(all("deno,node" not in c for c in seen_cmds))
 
-        # Case 2: All yt-dlp attempts fail -> PytubeFix tries ANDROID_VR then WEB with use_po_token=True
+        # Case 2: All yt-dlp attempts fail -> PytubeFix tries ANDROID_VR, VISION_OS, WEB without interactive use_po_token=True
         vid2 = "pt_fallback_vid"
         pt_calls = []
 
@@ -1784,8 +1790,8 @@ class TestColabWave5Regressions(unittest.TestCase):
         class FakeYouTube:
             def __init__(self, url, client=None, **kwargs):
                 pt_calls.append((client, kwargs))
-                if client == "ANDROID_VR":
-                    raise RuntimeError("ANDROID_VR failed")
+                if client in ("ANDROID_VR", "VISION_OS"):
+                    raise RuntimeError(f"{client} failed")
                 self.streams = FakeStreamQuery(has_stream=True)
 
         fake_pt = types.ModuleType("pytubefix")
@@ -1804,7 +1810,7 @@ class TestColabWave5Regressions(unittest.TestCase):
              patch("time.sleep", return_value=None):
             raw2, _ = fetch_video_audio_m1({"video_id": vid2}, self.ws, min_global_gap_sec=0.0)
         self.assertTrue(raw2.exists())
-        self.assertEqual(pt_calls, [("ANDROID_VR", {}), ("WEB", {"use_po_token": True})])
+        self.assertEqual(pt_calls, [("ANDROID_VR", {}), ("VISION_OS", {}), ("WEB", {})])
 
         # Case 3: Both yt-dlp and PytubeFix fail on bot challenge -> raises YouTubeBotChallengeError
         class BrokenYouTube:
@@ -1818,6 +1824,77 @@ class TestColabWave5Regressions(unittest.TestCase):
              patch("time.sleep", return_value=None):
             with self.assertRaises(YouTubeBotChallengeError):
                 fetch_video_audio_m1({"video_id": "blocked_vid"}, self.ws, min_global_gap_sec=0.0)
+
+    def test_tries_more_than_4_cookies_and_prioritizes_new_cookies(self):
+        import os
+        import subprocess
+        import time as _t
+        from unittest.mock import patch
+        from core.cookie_pool import CookiePool
+        from core.yt_audio_fetcher import fetch_video_audio_m1
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        now = _t.time()
+
+        names = [
+            "cookies.txt",
+            "cookies_acct1.txt",
+            "cookies_acct2.txt",
+            "cookies_acct3.txt",
+            "cookies_acct4.txt",
+            "cookies_acct5.txt",
+            "cookies_acct6.txt",
+        ]
+        paths = {}
+        for idx, name in enumerate(names):
+            p = cdir / name
+            p.write_text(
+                f"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t{future}\t__Secure-3PSID\ttok_{idx}\n",
+                encoding="utf-8",
+            )
+            os.utime(p, (now - 100 + idx * 10, now - 100 + idx * 10))
+            paths[name] = p
+
+        pool = CookiePool(self.ws, include_repo_dir=False)
+        # Previously challenged acct1 loses last_ok_at priority; even once cooldown expires, fails>0 ranks strictly last
+        pool.mark_ok(paths["cookies_acct1.txt"])
+        pool.mark_failed(paths["cookies_acct1.txt"], "challenged", "Sign in to confirm you're not a bot")
+        reg = pool._load()
+        reg[pool.cookie_key(paths["cookies_acct1.txt"])]["quarantined_until"] = now - 1.0
+        pool._save(reg)
+        self.assertEqual([p.name for p in pool.healthy_cookies()][-1], "cookies_acct1.txt")
+
+        # After startup reset_quarantine(), newest zero-failure cookies (acct6, acct5) still lead all 7 cookies
+        pool.reset_quarantine()
+        ordered_names = [p.name for p in pool.healthy_cookies()]
+        self.assertEqual(len(ordered_names), 7)
+        self.assertEqual(ordered_names[:2], ["cookies_acct6.txt", "cookies_acct5.txt"])
+
+        # All 7 cookies must be tried without slicing at 4; succeed on the 7th cookie
+        tried_cookie_runs = []
+
+        def fake_subp(cmd, *args, **kwargs):
+            if "--cookies" in cmd:
+                tried_cookie_runs.append(1)
+                if len(tried_cookie_runs) == 7:
+                    tmp_dir = Path(cmd[cmd.index("-o") + 1]).parent
+                    (tmp_dir / "multi_cookie_vid.opus").write_bytes(b"OggS" + b"\x00" * 10000)
+                    (tmp_dir / "multi_cookie_vid.info.json").write_text('{"duration": 60.0}', encoding="utf-8")
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[download] 100%")
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="ERROR: [youtube] Sign in to confirm you're not a bot",
+            )
+
+        with patch("core.yt_audio_fetcher.CookiePool", side_effect=lambda w: CookiePool(w, include_repo_dir=False)), \
+             patch("subprocess.run", side_effect=fake_subp), \
+             patch("time.sleep", return_value=None):
+            raw_audio, _ = fetch_video_audio_m1({"video_id": "multi_cookie_vid"}, self.ws, min_global_gap_sec=0.0)
+        self.assertTrue(raw_audio.exists())
+        self.assertEqual(len(tried_cookie_runs), 7)
 
     def test_orchestrator_trips_breaker_after_3_bot_challenges_without_poisoning(self):
         import argparse
