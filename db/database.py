@@ -593,6 +593,7 @@ def ingest_scenario_payload(scenario: Dict[str, Any], db_path: Optional[Path] = 
 
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
+_HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]")
 
 _PHILOSOPHICAL_VOCABULARY = [
@@ -700,6 +701,43 @@ _SCRIPT_REPLACEMENTS = [
     ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
     ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
     ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
+    # Classical Arabic apologetics glossary repairs (domain-blind machine translation drift)
+    ("للיהודים", "لليهود"),
+    ("الיהודים", "اليهود"),
+    ("יהודים", "يهود"),
+    ("في القرن السادس الميلادي في عربة", "في القرن السادس الميلادي في الجزيرة العربية"),
+    ("في القرن السابع الميلادي في عربة", "في القرن السابع الميلادي في الجزيرة العربية"),
+    ("في القرن السادس في عربة", "في القرن السادس في الجزيرة العربية"),
+    ("في القرن السابع في عربة", "في القرن السابع في الجزيرة العربية"),
+    ("في عربة في القرن السادس", "في الجزيرة العربية في القرن السادس"),
+    ("في عربة في القرن السابع", "في الجزيرة العربية في القرن السابع"),
+    ("في عربة القرن السادس", "في الجزيرة العربية في القرن السادس"),
+    ("في عربة القرن السابع", "في الجزيرة العربية في القرن السابع"),
+    ("عربة في القرن السادس", "الجزيرة العربية في القرن السادس"),
+    ("عربة في القرن السابع", "الجزيرة العربية في القرن السابع"),
+    ("عربة في القرن", "الجزيرة العربية في القرن"),
+    ("الصدف والمؤامرات", "الصدف والتزامنات"),
+    ("الصدف والموامرات", "الصدف والتزامنات"),
+    ("والموامرات", "والتزامنات"),
+    ("الموامرات", "التزامنات"),
+    ("المؤامرات النفسية", "التزامنات النفسية"),
+    ("المؤامرات غير السببية", "التزامنات غير السببية"),
+    ("البوذية والطائفة", "البوذية والطاوية"),
+    ("الطائفة والكونفوشيوسية", "الطاوية والكونفوشيوسية"),
+    ("والطائفة و", "والطاوية و"),
+    ("فلسفة الطائفة", "فلسفة الطاوية"),
+    ("ديانة الطائفة", "الديانة الطاوية"),
+    ("مذهب الطائفة", "المذهب الطاوي"),
+    ("الرسول بول", "بولس الرسول"),
+    ("بول الرسول", "بولس الرسول"),
+    ("رسائل بول", "رسائل بولس"),
+    ("إنجيل ماتيو", "إنجيل متى"),
+    ("إنجيل مارك", "إنجيل مرقس"),
+    ("إنجيل لوك", "إنجيل لوقا"),
+    ("إنجيل جون", "إنجيل يوحنا"),
+    ("القديس بيتر", "القديس بطرس"),
+    ("سمعان بيتر", "سمعان بطرس"),
+    ("الرسول جيمس", "الرسول يعقوب"),
     ("。，？，。", "؟"),
     ("。", "."),
     ("，", "،"),
@@ -768,9 +806,32 @@ def clean_latin_tokens_in_arabic(text: str) -> str:
     val = re.sub(r'بيرمINGTON', 'برمنغهام', val, flags=re.IGNORECASE)
     val = re.sub(r'فutility', 'عبثية وعدم جدوى', val, flags=re.IGNORECASE)
 
-    # 4. Purge any remaining stray Latin/English tokens from Arabic fields
+    # 3B. Targeted regex replacements for historical/apologetic terms
+    val = re.sub(r'(القرن\s+(?:السادس|السابع)(?:\s+الميلادي)?\s+في\s+)عربة\b', r'\1الجزيرة العربية', val)
+    val = re.sub(r'\b(في\s+)?عربة\s+في\s+القرن\s+(السادس|السابع)\b', r'في الجزيرة العربية في القرن \2', val)
+    val = re.sub(r'\bفي\s+عربة\s+القرن\s+(السادس|السابع)\b', r'في الجزيرة العربية في القرن \1', val)
+    val = re.sub(r'\bعربة\s+في\s+القرن\s+(السادس|السابع)\b', r'الجزيرة العربية في القرن \1', val)
+    val = re.sub(r'(الصدف\s+و)ال(?:مؤ|مو)امرات\b', r'\1التزامنات', val)
+    val = re.sub(r'\bال(?:مؤ|مو)امرات(\s+(?:النفسية|غير السببية))', r'التزامنات\1', val)
+    val = re.sub(r'\b(مذهب|فلسفة|ديانة|الديانة)\s+الطائفة\b', r'\1 الطاوية', val)
+    val = re.sub(r'\b(البوذية|الهندوسية|الكونفوشيوسية|الشنتوية)(\s+و\s*)الطائفة\b', r'\1\2الطاوية', val)
+    val = re.sub(r'\bالطائفة(\s+و\s*(?:البوذية|الهندوسية|الكونفوشيوسية|الشنتوية))', r'الطاوية\1', val)
+    val = re.sub(r'\bالرسول\s+بول\b', 'بولس الرسول', val)
+    val = re.sub(r'\bبول\s+الرسول\b', 'بولس الرسول', val)
+    val = re.sub(r'\b(شهادة|كلام|رسالة|رسائل|تعاليم|التركيز\s+على|قبل|عن|مع|على|من|باسم|مثل)\s+بول\b', r'\1 بولس', val)
+    val = re.sub(r'(?<![\w\u0600-\u06ff])([وفبكل]?)ماتيو\b', r'\1متى', val)
+    val = re.sub(r'\bإنجيل\s+ماتيو\b', 'إنجيل متى', val)
+    val = re.sub(r'\bإنجيل\s+مارك\b', 'إنجيل مرقس', val)
+    val = re.sub(r'\bإنجيل\s+لوك\b', 'إنجيل لوقا', val)
+    val = re.sub(r'\bإنجيل\s+جون\b', 'إنجيل يوحنا', val)
+    val = re.sub(r'\bالقديس\s+بيتر\b', 'القديس بطرس', val)
+    if any(ctx in val for ctx in ("الإنجيل", "العهد الجديد", "متى", "مرقس", "لوقا", "يوحنا", "المسيح", "يسوع", "شاهد")):
+        val = re.sub(r'(?<![\w\u0600-\u06ff])([وفبكل]?)بول\b', r'\1بولس', val)
+
+    # 4. Purge any remaining stray Latin/English tokens and Hebrew/CJK/Cyrillic from Arabic fields
     val = re.sub(r'(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])', ' ', val)
     val = re.sub(r'[A-Za-z]+', '', val)
+    val = _HEBREW_RE.sub('', val)
     val = re.sub(r'\(\s*\)', '', val)
     val = re.sub(r'\[\s*\]', '', val)
     val = re.sub(r'[ \t]+', ' ', val).strip()
@@ -962,6 +1023,7 @@ def sanitize_text_field(text: Optional[str], is_arabic: Optional[bool] = None) -
 
     if apply_arabic_cleaning:
         val = clean_latin_tokens_in_arabic(val)
+        val = _HEBREW_RE.sub("", val)
     else:
         for old_s, new_s in [
             ("。，？，。", "؟"),
@@ -975,7 +1037,101 @@ def sanitize_text_field(text: Optional[str], is_arabic: Optional[bool] = None) -
 
     val = _CYRILLIC_RE.sub("", val)
     val = _CJK_RE.sub("", val)
-    return val.strip()
+    return re.sub(r"[ \t]{2,}", " ", val).strip()
+
+
+ARABIC_UNIT_SCALAR_KEYS = (
+    "question_ar",
+    "core_answer_summary_ar",
+    "fallacy_or_misconception_exposed_ar",
+    "analogy_or_metaphor_ar",
+    "socratic_question_ar",
+    "verbatim_quote_ar",
+    "interlocutor_verbatim_quote_ar",
+)
+
+
+def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonical cleaner for all Classical Arabic fields across scalars, lists, citations, and dialogue turns."""
+    if not isinstance(item, dict):
+        return item
+
+    for k in ARABIC_UNIT_SCALAR_KEYS:
+        val = item.get(k)
+        if isinstance(val, str) and val:
+            item[k] = sanitize_text_field(val, is_arabic=True)
+
+    for list_key in ("logical_premises_ar", "analogies_ar"):
+        raw_list = item.get(list_key)
+        if isinstance(raw_list, str) and raw_list.strip().startswith("["):
+            try:
+                raw_list = json.loads(raw_list)
+            except Exception:
+                pass
+        if isinstance(raw_list, list):
+            item[list_key] = [
+                cleaned
+                for p in raw_list
+                if isinstance(p, str)
+                for cleaned in (sanitize_text_field(p, is_arabic=True),)
+                if cleaned
+            ]
+
+    citations = item.get("scriptural_citations")
+    if isinstance(citations, list):
+        for cit in citations:
+            if isinstance(cit, dict) and isinstance(cit.get("significance_ar"), str) and cit["significance_ar"]:
+                cit["significance_ar"] = sanitize_text_field(cit["significance_ar"], is_arabic=True)
+
+    for ex_key in ("dialogue_exchange", "dialogue_trajectory"):
+        exchanges = item.get(ex_key)
+        if isinstance(exchanges, list):
+            for ex in exchanges:
+                if isinstance(ex, dict) and isinstance(ex.get("text_ar"), str) and ex["text_ar"]:
+                    ex["text_ar"] = sanitize_text_field(ex["text_ar"], is_arabic=True)
+
+    return item
+
+
+def _row_field(row_or_dict: Any, key: str) -> Any:
+    if row_or_dict is None:
+        return None
+    if isinstance(row_or_dict, dict):
+        return row_or_dict.get(key)
+    try:
+        return row_or_dict[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def resolve_turn_speaker_labels(
+    role: str,
+    turn_obj: Any,
+    daee_name_en: str,
+    daee_name_ar: str,
+) -> tuple[str, str]:
+    """Returns role-consistent (speaker_label_en, speaker_label_ar), preventing Da'ee names on interlocutor turns."""
+    is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+    fallback_en = daee_name_en or "Main Da'ee" if is_daee else "Interlocutor"
+    fallback_ar = daee_name_ar or "الداعية" if is_daee else "المحاور"
+
+    if turn_obj is None:
+        return fallback_en, fallback_ar
+
+    turn_role = _row_field(turn_obj, "speaker_role")
+    if turn_role and (turn_role in ("MAIN_DAEE", "CO_DAEE")) != is_daee:
+        return fallback_en, fallback_ar
+
+    lbl_en = str(_row_field(turn_obj, "speaker_label_en") or "").strip()
+    lbl_ar = str(_row_field(turn_obj, "speaker_label_ar") or "").strip()
+
+    if not is_daee:
+        if daee_name_en and daee_name_en.lower() in lbl_en.lower():
+            lbl_en = fallback_en
+        if daee_name_ar and daee_name_ar in lbl_ar:
+            lbl_ar = fallback_ar
+
+    return (lbl_en or fallback_en), (lbl_ar or fallback_ar)
 
 
 def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Dict[str, Any]:
@@ -998,19 +1154,7 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
         if k in u:
             u[k] = sanitize_text_field(u[k], is_arabic=False)
 
-    for k in (
-        "question_ar",
-        "core_answer_summary_ar",
-        "fallacy_or_misconception_exposed_ar",
-        "analogy_or_metaphor_ar",
-        "socratic_question_ar",
-        "interlocutor_verbatim_quote_ar",
-        "verbatim_quote_ar",
-    ):
-        if k in u:
-            u[k] = sanitize_text_field(u[k], is_arabic=True)
-
-    # 2. Sanitize premises
+    # 2. Sanitize English premises and all Classical Arabic fields via shared helper
     if "logical_premises" in u:
         val = u.get("logical_premises")
         if isinstance(val, list):
@@ -1023,17 +1167,7 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
             except Exception:
                 pass
 
-    if "logical_premises_ar" in u:
-        val = u.get("logical_premises_ar")
-        if isinstance(val, list):
-            u["logical_premises_ar"] = [sanitize_text_field(p, is_arabic=True) for p in val if sanitize_text_field(p, is_arabic=True)]
-        elif isinstance(val, str) and val.startswith("["):
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, list):
-                    u["logical_premises_ar"] = [sanitize_text_field(p, is_arabic=True) for p in parsed if sanitize_text_field(p, is_arabic=True)]
-            except Exception:
-                pass
+    sanitize_arabic_unit_fields(u)
 
     # 3. Swap / repair Arabic premises if misplaced in English premises
     p_en = u.get("logical_premises") or []
@@ -1090,13 +1224,15 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
             ).fetchone() if tid else None
 
             role = ex_copy.get("role") or (turn["speaker_role"] if turn else "MAIN_DAEE")
-            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
-            fallback_ar = u.get("daee_name_ar") if is_daee else "المحاور"
-            fallback_en = u.get("daee_name_en") if is_daee else "Interlocutor"
-
             ex_copy["role"] = role
-            ex_copy["speaker_label_ar"] = (turn["speaker_label_ar"] if turn and turn["speaker_label_ar"] else None) or fallback_ar
-            ex_copy["speaker_label_en"] = (turn["speaker_label_en"] if turn and turn["speaker_label_en"] else None) or fallback_en
+            lbl_en, lbl_ar = resolve_turn_speaker_labels(
+                role=role,
+                turn_obj=turn,
+                daee_name_en=str(u.get("daee_name_en") or "Main Da'ee"),
+                daee_name_ar=str(u.get("daee_name_ar") or "الداعية"),
+            )
+            ex_copy["speaker_label_ar"] = lbl_ar
+            ex_copy["speaker_label_en"] = lbl_en
             if turn and ("timestamp_formatted" not in ex_copy or ex_copy["timestamp_formatted"] in ("00:00", "")):
                 ex_copy["timestamp_formatted"] = turn["start_fmt"]
                 ex_copy["timestamp_seconds"] = int(turn["start_ms"] // 1000)
@@ -1151,6 +1287,20 @@ def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Non
         exchange_list = []
     turn_count = int(unit.get("dialogue_trajectory_turns_count") or len(exchange_list))
 
+    # Speaker Integrity Guard: Da'ee and Interlocutor speaker IDs cannot be identical
+    daee_spk = str(unit.get("daee_speaker_id") or "").strip()
+    inter_spk = str(unit.get("interlocutor_speaker_id") or "").strip()
+    if daee_spk and inter_spk and daee_spk == inter_spk:
+        inter_spk = ""
+
+    # Interrogative Syntax Normalization
+    q_en = str(unit.get("question_en") or "").strip()
+    if q_en and not q_en.endswith("?"):
+        q_en = re.sub(r'[\s.,:;!?؟]+$', '', q_en) + "?"
+    q_ar = str(unit.get("question_ar") or "").strip()
+    if q_ar and not q_ar.endswith("؟"):
+        q_ar = re.sub(r'[\s.,:;!?؟]+$', '', q_ar) + "؟"
+
     conn.execute(
         """
         INSERT OR REPLACE INTO qa_units (
@@ -1181,16 +1331,16 @@ def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Non
             int(unit.get("answer_timestamp_seconds", unit.get("timestamp_seconds", 0))),
             unit.get("answer_timestamp_formatted", unit.get("timestamp_formatted", "00:00")),
             int(unit.get("episode_index", 1)),
-            unit.get("daee_speaker_id", ""),
+            daee_spk,
             unit.get("daee_profile_id", ""),
             unit.get("daee_name_en", ""),
             unit.get("daee_name_ar", ""),
-            unit.get("interlocutor_speaker_id", ""),
+            inter_spk,
             unit.get("topic_category", "Theology & God's Existence"),
             unit.get("topic_subcategory", ""),
             unit.get("interlocutor_type", "Inquiring Seeker"),
-            unit.get("question_en", ""),
-            unit.get("question_ar", ""),
+            q_en,
+            q_ar,
             unit.get("core_answer_summary_en", ""),
             unit.get("core_answer_summary_ar", ""),
             json.dumps(unit.get("logical_premises", []), ensure_ascii=False),

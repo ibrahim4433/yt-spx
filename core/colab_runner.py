@@ -47,12 +47,13 @@ except (ImportError, ValueError):
     )
 
 try:
-    from db.database import sanitize_text_field
+    from db.database import sanitize_text_field, sanitize_arabic_unit_fields
 except (ImportError, ValueError):
     try:
-        from ..db.database import sanitize_text_field
+        from ..db.database import sanitize_text_field, sanitize_arabic_unit_fields
     except Exception:
         sanitize_text_field = None
+        sanitize_arabic_unit_fields = None
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -201,50 +202,14 @@ def clean_llm_json_response(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Removes stray CJK/Korean tokens or common Arabic-Latin splices from generated fields."""
-    replacements = [
-        ("따라서،", "لذلك،"),
-        ("따라서", "لذلك"),
-        ("여전히", "لا تزال"),
-        ("المiracles", "المعجزات"),
-        ("فالمachines", "فالآلات"),
-        ("كمessenger", "كرسول"),
-        ("للمonotheism", "للتوحيد"),
-        ("السcribes", "النساخ"),
-        ("للسcribes", "للنساخ"),
-        ("نihilist", "عدمي"),
-        ("النihilists", "العدميون"),
-        ("بprocesseات", "بعمليات"),
-        ("مutually exclusive", "متنافيين"),
-        ("ال hypocritical", "النفاق وازدواجية المعايير"),
-        ("بهomo جنسياً", "بميول مثلية"),
-        ("التطهيرracial", "التطهير العرقي"),
-        ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
-        ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
-        ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
-        ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
-        ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
-        ("condemn", "يُدين"),
-        ("والincest", "وزنا المحارم"),
-        ("الincest", "زنا المحارم"),
-        ("incest", "زنا المحارم"),
-        ("two natures and two wills", "طبيعتين وإرادتين"),
-        ("two natures", "طبيعتين"),
-        ("two wills", "إرادتين"),
-        ("bikinis", "لباس البحر الفاضح"),
-        ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
-        ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
-        ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
-        ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
-        ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
-        ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
-        ("。，？，。", "؟"),
-        ("。", "."),
-        ("，", "،"),
-        ("？", "؟"),
-        ("！", "!"),
-    ]
-    ar_keys = [
+    """Delegates to the canonical Classical Arabic sanitizer in db.database (with standalone regex fallback)."""
+    if not isinstance(item, dict):
+        return item
+    if sanitize_arabic_unit_fields is not None:
+        return sanitize_arabic_unit_fields(item)
+
+    _fallback_re = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+")
+    ar_keys = (
         "question_ar",
         "core_answer_summary_ar",
         "fallacy_or_misconception_exposed_ar",
@@ -252,35 +217,19 @@ def sanitize_extracted_arabic_unit(item: Dict[str, Any]) -> Dict[str, Any]:
         "socratic_question_ar",
         "verbatim_quote_ar",
         "interlocutor_verbatim_quote_ar",
-    ]
+    )
     for k in ar_keys:
         val = item.get(k)
         if isinstance(val, str) and val:
-            if sanitize_text_field is not None:
-                item[k] = sanitize_text_field(val, is_arabic=True)
-            else:
-                for old_s, new_s in replacements:
-                    if old_s in val:
-                        val = val.replace(old_s, new_s)
-                val = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", val)
-                item[k] = val.strip()
-
-    premises = item.get("logical_premises_ar")
-    if isinstance(premises, list):
-        clean_premises = []
-        for p in premises:
-            if isinstance(p, str):
-                if sanitize_text_field is not None:
-                    cp = sanitize_text_field(p, is_arabic=True)
-                else:
-                    cp = p
-                    for old_s, new_s in replacements:
-                        if old_s in cp:
-                            cp = cp.replace(old_s, new_s)
-                    cp = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", cp).strip()
-                if cp:
-                    clean_premises.append(cp)
-        item["logical_premises_ar"] = clean_premises
+            item[k] = _fallback_re.sub("", sanitize_text_field(val, is_arabic=True) if sanitize_text_field else val).strip()
+    for list_key in ("logical_premises_ar", "analogies_ar"):
+        vals = item.get(list_key)
+        if isinstance(vals, list):
+            item[list_key] = [
+                cleaned for p in vals if isinstance(p, str)
+                for cleaned in (_fallback_re.sub("", sanitize_text_field(p, is_arabic=True) if sanitize_text_field else p).strip(),)
+                if cleaned
+            ]
     return item
 
 

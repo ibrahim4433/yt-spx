@@ -476,10 +476,10 @@ class SharedWorkspace:
                 units = payload.get("units", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
                 
                 # Ingestion Guard: Block unlocalized units from entering SQLite
+                from core.scenario_extractor import has_valid_arabic_localization
+
                 def _has_ar(u: Dict[str, Any]) -> bool:
-                    q_ar = str(u.get("question_ar") or "").strip()
-                    ans_ar = str(u.get("core_answer_summary_ar") or "").strip()
-                    return bool(q_ar and ans_ar and any("\u0600" <= ch <= "\u06ff" for ch in q_ar) and any("\u0600" <= ch <= "\u06ff" for ch in ans_ar))
+                    return has_valid_arabic_localization(u)
 
                 if units and not all(_has_ar(u) for u in units):
                     print(f"   [DRIVE_SYNC GUARD] Skipping QA shard for {vid}: Contains unlocalized units lacking Arabic fields.")

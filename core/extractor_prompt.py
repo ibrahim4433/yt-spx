@@ -60,9 +60,12 @@ CRITICAL RULE 4: MONOLOGUES, INTROS, LIVE COMMENTS & ANTICIPATED OBJECTIONS (ا�
   * Set "interlocutor_type" to the worldview/target audience of the doubt (e.g. "Inquiring Seeker", "Atheist / Materialist", "Christian / Trinitarian", "Muslim with Doubts").
   * Set "interlocutor_verbatim_quote" to the Da'ee's words framing the doubt or question.
 
-CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES & ZERO PROMPT LEAKAGE (حظر تلفيق الاقتباسات وحظر نسخ أمثلة البرومبت)
+CRITICAL RULE 5: 100% LITERAL VERBATIM SPOKEN QUOTES & ZERO PROMPT LEAKAGE (حظر تلفيق الاقتباسات وحظر نسخ أمثلة البرومبت نهائياً)
 - `verbatim_quote` and `interlocutor_verbatim_quote` MUST be copied EXACTLY word-for-word from the transcript turns of the current video!
-- NEVER copy quotes, premises, or text from the few-shot example demonstrations in this prompt (such as the First Cause quote "The rule of science and philosophy is: whatever begins to exist has a cause..."). Copying prompt demonstration text into an extracted card is a catastrophic grounding failure!
+- CRITICAL ANTI-LEAKAGE MANDATE:
+  * NEVER copy quotes, premises, analogies, or phrases from prompt examples or instructions!
+  * NEVER output memorized debate cliches: DO NOT mention train freight carriages, soldier/commander orders, power plant lamps, child medical surgery, "whatever begins to exist has a cause", or Mark 13:32 unless THOSE EXACT WORDS were actually spoken aloud on camera in THIS CURRENT VIDEO!
+  * Copying prompt demonstration text or memorized debate cliches into an extracted card is a CATASTROPHIC GROUNDING FAILURE triggering an automatic rejection score of 0.
 - NEVER fabricate, paraphrase, or smooth what the Da'ee or interlocutor said into an artificial written essay.
 - If you want to deliver an authoritative, polished academic refutation, put it in `core_answer_summary_en` and `core_answer_summary_ar`, but keep `verbatim_quote` 100% faithful to the actual words spoken on camera.
 
@@ -133,129 +136,138 @@ EXACT JSON OUTPUT SCHEMA (Array of Objects):
   }
 ]
 
-GOLD-STANDARD FEW-SHOT EXAMPLES (STUDY CLOSELY FOR PERSPECTIVE, TONE, AND DEPTH):
+GOLD-STANDARD STRUCTURAL META-DEMONSTRATIONS (SCHEMA & DIALECTICAL BLUEPRINT):
 
-EXAMPLE 1 (Comparative Religion & Christianity — Scriptural Refutation & Christology):
+NOTICE ON INPUT GROUNDING & ANTI-LEAKAGE:
+The following examples are ABSTRACT STRUCTURAL BLUEPRINTS illustrating the required tone, depth, and schema formatting.
+NEVER copy placeholder variables, analogies, or text from these blueprints into extracted cards.
+Every extracted card MUST be derived 100% from the actual spoken dialogue in the provided video transcript!
+
+EXAMPLE 1 (Comparative Religion & Christianity — Scriptural Refutation & Christology Blueprint):
 {
-  "question_turn_id": "LMJF4YwWNaM_T0014",
-  "answer_turn_id": "LMJF4YwWNaM_T0015",
-  "question_en": "Isn't Jesus God in the flesh according to the Bible, so why do Muslims reject his divinity?",
-  "question_ar": "أليس المسيح هو الله المتجسد في الجسد بنص الكتاب المقدس، فلماذا ينكر المسلمون ألوهيته؟",
+  "question_turn_id": "[TURN_ID_WHERE_INTERLOCUTOR_RAISED_SCRIPTURAL_OBJECTION]",
+  "answer_turn_id": "[TURN_ID_WHERE_DAEE_BEGAN_SCRIPTURAL_REFUTATION]",
+  "question_en": "If [Passage or Doctrine X] is claimed to support [Theological Claim Y], why do Muslims argue [Contradictory Fact Z] refutes this interpretation?",
+  "question_ar": "إذا كان [النص أو المعتقد المقابل] يُستدل به على [الدعوى اللاهوتية المعينة]، فلماذا يرى المسلمون أن [الحقيقة القطعية المضادة] تبطل هذا الاستدلال؟",
   "topic_category": "Comparative Religion & Christianity",
   "topic_category_ar": "مقارنة الأديان والمسيحية",
-  "topic_subcategory": "Divinity of Christ & Omniscience",
+  "topic_subcategory": "[Specific Scriptural or Christological Subtopic]",
   "interlocutor_type": "Christian / Trinitarian",
-  "core_answer_summary_en": "True divinity inherently requires absolute, infinite omniscience and independence. In the Gospels, Jesus explicitly disclaims knowledge of the Day of Judgment (Mark 13:32: 'No one knows, not even the Son, but only the Father'). A being whose knowledge is finite, growing, and dependent cannot logically be the All-Knowing, Self-Sufficient Creator. Islam honors Jesus as a noble, mighty Messenger of God, but strictly upholds that God alone possesses absolute perfection.",
-  "core_answer_summary_ar": "الألوهية الحقة تقتضي بالضرورة الإحاطة والعلم المطلق بكل شيء والاستغناء التام عن الخلق. وتصريح المسيح في الأناجيل بنفي علمه بموعد الساعة (مرقس 13: 32: «لا يعلم بها أحد ولا الابن إلا الآب») يثبت يقيناً أنه كائن محدود العلم، والمحدود يستحيل عقلاً أن يكون هو الإله الخالق واجب الوجود. والإسلام يعظم المسيح رسولاً كريماً ومعلماً للتوحيد، وينزه الله تعالى عن العجز والحلول والموت.",
+  "core_answer_summary_en": "True divine attributes inherently require absolute perfection and independence. When a scriptural text or theological premise attributes inherent limitation, dependency, or lack of knowledge to a being, that being cannot logically be the All-Knowing, Self-Sufficient Creator. Islam honors all true Prophets of God as noble teachers of pure monotheism, while strictly upholding that God alone possesses absolute perfection.",
+  "core_answer_summary_ar": "الألوهية الحقة تقتضي بالضرورة الإحاطة والاستغناء التام عن الخلق ونفي كل نقص أو عجز. وحين يثبت النص أو الدليل العقلي محدودية علم كائن ما أو افتقاره وتبعيته، يمتنع عقلاً أن يكون هو الإله الخالق واجب الوجود. والإسلام يعظم أنبياء الله جميعاً دعاة للتوحيد الخالص، وينزه الخالق سبحانه عن المحدودية والحلول والموت.",
   "logical_premises": [
-    "Premise 1: An omniscient God possesses infinite knowledge of all things and cannot be ignorant of any event.",
-    "Premise 2: Jesus explicitly admits in Mark 13:32 that he does not know the timing of the Last Day.",
-    "Conclusion: Therefore, Jesus is finite in knowledge and cannot be the Almighty God."
+    "Premise 1: An omniscient God possesses infinite knowledge and absolute independence without inherent limitation.",
+    "Premise 2: The text or entity under discussion is explicitly shown to exhibit finite knowledge, dependency, and limitation.",
+    "Conclusion: Therefore, the entity under discussion is created and contingent, and cannot be the Almighty God."
   ],
   "logical_premises_ar": [
-    "المقدمة الأولى: الإله الحق عليم بالضرورة بكل شيء ولا يطرأ على علمه جهل أو نقص.",
-    "المقدمة الثانية: المسيح صرح بنفسه في إنجيل مرقس (13: 32) بعدم علمه بوقت الساعة واختصاص الآب وحده بذلك.",
-    "النتيجة: إذن، المسيح مخلوق محدود العلم، والمحدود يستحيل عقلاً أن يكون هو الإله الخالق العليم بكل شيء."
+    "المقدمة الأولى: الإله الحق يجب عقلاً أن يتصف بالكمال المطلق والاستغناء التام عن كل ما سواه.",
+    "المقدمة الثانية: النص أو الكيان المشاهد يتصف صراحة بالمحدودية والافتقار ومحدودية الإدراك.",
+    "النتيجة: إذن هذا الكيان مخلوق حادث ومفتقر، ويستحيل عقلاً أن يكون هو الإله الخالق."
   ],
-  "fallacy_or_misconception_exposed": "Category Mistake: Conflating the mortal limitations of a chosen human prophet with the uncreated, infinite nature of the Creator.",
-  "fallacy_or_misconception_exposed_ar": "خلط المقولات: الخلط بين عوارض المخلوق المحدود المحتاج وبين صفات الخالق واجب الوجود المنزه عن الجهل والنقص.",
-  "analogy_or_metaphor": "A lamp drawing current from a power plant shines brightly, but it is not the power plant itself; similarly, a prophet receiving revelation speaks truth, but is not the Omniscient God who sent it.",
-  "analogy_or_metaphor_ar": "المصباح الذي يستمد نوره من محطة توليد الطاقة يضيء المكان، لكنه ليس محطة الطاقة ذاتها؛ كذلك النبي الذي يوحى إليه يعلم ما علمه الله، لكنه ليس هو الإله العليم بذاته.",
-  "socratic_question": "If Jesus is fully God and God knows all things, who was hiding the knowledge of the Hour from Jesus when he admitted he did not know it?",
-  "socratic_question_ar": "إذا كان يسوع إلهاً تام الألوهية والله يعلم كل شيء، فمن الذي كان يحجب علم الساعة عن يسوع حين صرّح بجهلها؟",
-  "interlocutor_verbatim_quote": "He is God in flesh. Is He God or no?",
-  "interlocutor_verbatim_quote_ar": "هو الله في الجسد. هل هو إله أم لا؟",
-  "verbatim_quote": "In Mark 13:32 it says, 'But of that day and hour no one knows, not even the angels in heaven, nor the Son, but only the Father.' So how can the Son not know if He is God?",
-  "verbatim_quote_ar": "في إنجيل مرقس 13: 32 يقول: «وأما ذلك اليوم وتلك الساعة فلا يعلم بهما أحد ولا الملائكة الذين في السماء ولا الابن إلا الآب». فكيف لا يعلم الابن إن كان هو الله؟",
+  "fallacy_or_misconception_exposed": "Category Mistake & Equivocation: Conflating a contingent, dependent creature with the necessary, self-sufficient Creator.",
+  "fallacy_or_misconception_exposed_ar": "مغالطة الخلط بين المقولات والاشتراك اللفظي: التسوية بين المخلوق المفتقر الحادث وبين الخالق الغني واجب الوجود.",
+  "analogy_or_metaphor": "[Relatable concrete real-world comparison or thought experiment articulated by the Da'ee in the debate]",
+  "analogy_or_metaphor_ar": "[المثال الواقعي أو القياس الحسي التوضيحي الذي ضربه الداعية في الحوار لتقريب المعنى]",
+  "socratic_question": "[The clincher reflective counter-question formulated by the Da'ee to expose the contradiction]",
+  "socratic_question_ar": "[السؤال الحواري أو الإلزامي الذي وجهه الداعية لإظهار التناقض الداخلي في دعوى المحاور]",
+  "interlocutor_verbatim_quote": "[EXACT 100% word-for-word quote from transcript where interlocutor voiced the objection]",
+  "interlocutor_verbatim_quote_ar": "[الترجمة العربية الفصحى لاقتباس المحاور الحرفي من المقطع]",
+  "verbatim_quote": "[EXACT 100% word-for-word quote from transcript where Da'ee delivered core proof]",
+  "verbatim_quote_ar": "[الترجمة العربية الفصحى لاقتباس الداعية البرهاني من المقطع]",
   "dialogue_exchange": [
-    {"turn_id": "LMJF4YwWNaM_T0014", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "He is God in flesh. Is He God or no?", "text_ar": "هو الله في الجسد. هل هو الله أم لا؟"},
-    {"turn_id": "LMJF4YwWNaM_T0015", "role": "MAIN_DAEE", "move_type": "Reply", "text_en": "In Mark 13:32 it says, 'But of that day and hour no one knows, not even the angels in heaven, nor the Son, but only the Father.' So how can the Son not know if He is God?", "text_ar": "في إنجيل مرقس 13: 32 يقول: ولكن في ذلك اليوم والساعة لا يعلم أحد ولا الابن إلا الآب وحده. فكيف لا يعلم الابن إن كان هو الله؟"}
+    {"turn_id": "[TURN_ID_01]", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "[Verbatim utterance of interlocutor from transcript]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_02]", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "[Verbatim utterance of Da'ee probing the premise]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_03]", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "[Verbatim utterance of interlocutor clarifying their stance]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_04]", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "[Verbatim utterance of Da'ee delivering the decisive proof]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"}
   ],
-  "timestamp_seconds": 101,
-  "timestamp_formatted": "01:41",
-  "tags": ["Trinity", "Omniscience", "Mark 13:32", "Jesus in Islam"]
+  "timestamp_seconds": 90,
+  "timestamp_formatted": "01:30",
+  "tags": ["[Primary Theme]", "[Core Concept]", "[Theological Proof]"]
 }
 
-EXAMPLE 2 (Theology & God's Existence — Philosophical Proofs & Kalam / First Cause):
+EXAMPLE 2 (Theology & God's Existence — Rational Cosmological Proof Blueprint):
 {
-  "question_turn_id": "CsWdrUXYnWg_T0003",
-  "answer_turn_id": "CsWdrUXYnWg_T0004",
-  "question_en": "If everything requires a creator, who created God? Isn't exempting God just an arbitrary exception (special pleading)?",
-  "question_ar": "إذا كان لكل شيء خالق وموجد، فمن خلق الله؟ أليس استثناء وجود الإله مجرد مغالطة تحكمية واستثناء خاص غير مبرر؟",
+  "question_turn_id": "[TURN_ID_WHERE_INTERLOCUTOR_RAISED_OBJECTION]",
+  "answer_turn_id": "[TURN_ID_WHERE_DAEE_BEGAN_CORE_PROOF]",
+  "question_en": "If [Contingent Entity X] exhibits [Inherent Limitation Y], how can believers claim [Ultimate Theological Reality Z] possesses [Transcendent Divine Attribute W]?",
+  "question_ar": "إذا كان [الكيان الحادث أو المخلوق] يتصف بـ [النقص أو المحدودية المشاهدة]، فكيف يثبت لـ [الخالق سبحانه] كمال [الصفة الإلهية المطلقة]؟",
   "topic_category": "Theology & God's Existence",
   "topic_category_ar": "العقيدة ووجود الله",
-  "topic_subcategory": "First Cause & Contingency (Kalam)",
+  "topic_subcategory": "[Specific Subtopic of Debate]",
   "interlocutor_type": "Atheist / Materialist",
-  "core_answer_summary_en": "The law of causality states that whatever begins to exist or is contingent upon external factors requires an external cause. It does not state that 'everything' has a cause. A contingent, physical entity with a beginning cannot bring itself into existence. An infinite regress of dependent causes is logically impossible, as it would prevent any effect from ever occurring. Therefore, reason demands an uncaused, eternal, necessary First Cause (Allah)—Self-Sufficient, uncreated, and existing independently of time and space.",
-  "core_answer_summary_ar": "مبدأ السببية العقلي ينص على أن كل ما هو حادث (له بداية) أو ممكن الوجود (مفتقر لغيره) يستلزم بالضرورة محدثاً وسبباً كافياً، ولا ينص على أن 'كل شيء' له خالق. والتسلسل اللانهائي في الفاعلين والعلل الحادثة ممتنع ومستحيل عقلاً، لأنه لو توقف كل سبب على سبب قبله إلى ما لا نهاية لما وُجد أي أثر أصلاً. وعليه، فإن العقل والبرهان القاطع يوجبان انتهاء سلسلة الحوادث إلى علة أولى أزلية واجبة الوجود بذاتها، مستغنية عن غيرها، غير مخلوقة ولا محدودة بالزمان أو المكان، وهي الله سبحانه الواحد القهار.",
+  "core_answer_summary_en": "The objection commits a foundational category error by projecting the finite, dependent limitations of created phenomena onto the uncreated, necessary Creator. A contingent entity whose existence depends on prior external conditions cannot be equated with the Necessary Being whose essence is independent, self-sufficient, and absolute. The Da'ee establishes through deductive reasoning that [Primary Rational Principle articulated in dialogue]. Therefore, the alleged contradiction collapses because the objection falsely assumed parity between created effects and the transcendent First Cause.",
+  "core_answer_summary_ar": "تسقط هذه الشبهة لخلطها بين عوارض المخلوق الحادث المفتقر وبين صفات الخالق واجب الوجود المنزه عن النقص والاحتياج؛ فقياس الغائب على الشاهد هنا باطل عقلاً لقيامه على الفارق الجوهري. وقد بيّن الداعية بالبرهان العقلي أن [الأصل البرهاني المذكور في الحوار]. وعليه، فإن الإلزام منتفٍ لفساد المقدمة التي سوت بين المحدث المحدود وبين الإله واجب الوجود لذاته.",
   "logical_premises": [
-    "Premise 1: Any entity that begins to exist or is contingent upon external conditions is an originated effect that necessarily requires an external cause.",
-    "Premise 2: The universe is physical, temporal, and contingent, and an actual infinite regress of dependent causes is logically impossible.",
-    "Conclusion: Therefore, the chain of causation must terminate in an uncaused, eternal, necessary First Cause (Allah), who was never created."
+    "Premise 1: [Major Premise - Universal theological axiom or ontological law articulated by the Da'ee, establishing an absolute standard]",
+    "Premise 2: [Minor Premise - Observed empirical fact, opponent admission, or contextual reality established in the debate]",
+    "Conclusion: [Inescapable deduction refuting the objection and proving the Islamic theological reality based strictly on the dialogue]"
   ],
   "logical_premises_ar": [
-    "المقدمة الأولى: كل ما له بداية زمانية أو كان وجوده ممكناً مفتقراً لغيره فهو حادث يستلزم بالضرورة فاعلاً ومحدثاً أوجده.",
-    "المقدمة الثانية: الكون المادي حادث ذو بداية وممكن الافتقار، والتسلسل اللانهائي في العلل والفاعلين محال عقلاً.",
-    "النتيجة: إذن، يجب عقلاً انتهاء سلسلة الوجود إلى واجب الوجود لذاته، علة أولى أزلية غير مخلوقة ولا مبتدأة، وهي الله سبحانه."
+    "المقدمة الأولى: [القاعدة العقلية أو العقدية الكلية، مثال: كل ما ثبت افتقاره ومحدوديته استحال عقلاً أن يكون واجباً بذاته أو غنياً عن غيره]",
+    "المقدمة الثانية: [الواقع المشاهد أو اعتراف الخصم، مثال: الكيان محل البحث محصور بالزمان ومفتقر في وجوده لغيره]",
+    "النتيجة: [الإلزام العقلي الحاسم الذي يدحض الشبهة ويقرر أصل التوحيد المستنبط من الحوار]"
   ],
-  "fallacy_or_misconception_exposed": "Strawman & Category Mistake: Distorting the causal principle from 'whatever begins to exist has a cause' to 'everything has a creator', and mistakenly applying the temporal limitations of created effects to the uncreated Necessary Being.",
-  "fallacy_or_misconception_exposed_ar": "مغالطة رجل القش وخلط المقولات: تحريف قاعدة السببية العقلية من 'لكل حادث محدث' إلى 'لكل شيء صانع'، وإسقاط عوارض المخلوق المحدود بالزمان والمكان على الخالق الأزلي واجب الوجود.",
-  "analogy_or_metaphor": "A train of freight carriages cannot move on its own; connecting an infinite line of unpowered carriages will never move the train without an engine that generates its own locomotion. Similarly, a chain of dependent causes requires an independent First Cause.",
-  "analogy_or_metaphor_ar": "عربات القطار لا تتحرك بذاتها، وربط عدد لانهائي من العربات المعطلة ببعضها لن يحرك القطار شبراً واحداً ما لم يكن هناك قاطرة ذاتية الحركة ومولدة للطاقة؛ كذلك سلسلة الأسباب المفتقرة تستحيل دون سبب أول غني بذاته.",
-  "socratic_question": "If a soldier cannot fire his rifle until he receives an order from the soldier behind him, and that soldier must wait for an order from another infinitely, will the shot ever be fired? If the shot was fired, wasn't there a first commander?",
-  "socratic_question_ar": "لو كان الجندي لا يطلق النار حتى يتلقى أمراً من جندي قبله، والآخر ينتظر إذناً من ثالث إلى ما لا نهاية، فهل كانت الرصاصة ستنطلق أبداً؟ وبما أن رصاصة الكون وُجدت، أفلا يقتضي ذلك وجود آمر أول غير مأمور؟",
-  "interlocutor_verbatim_quote": "If you say God created the universe, you haven't solved anything. Who made God then? You can't just stop at God.",
-  "interlocutor_verbatim_quote_ar": "إذا قلت إن الله خلق الكون، فأنت لم تحل شيئاً. من الذي صنع الله إذن؟ لا يمكنك التوقف عند الله فقط.",
-  "verbatim_quote": "The rule of science and philosophy is: whatever begins to exist has a cause. God did not begin to exist. An infinite regress of causes is impossible. You need an uncaused First Cause.",
-  "verbatim_quote_ar": "قاعدة العلم والمنطق هي: كل ما له بداية فله سبب. والله لا بداية له، والتسلسل اللانهائي في الأسباب مستحيل عقلاً؛ فلا بد من مسبب أول غير مسبب.",
+  "fallacy_or_misconception_exposed": "Category Mistake & False Equivalence: Inappropriately projecting temporal, created constraints onto the transcendent Necessary Being.",
+  "fallacy_or_misconception_exposed_ar": "خلط المقولات وقياس مع الفارق: إسقاط عوارض المخلوق الزماني الحادث على الخالق الأزلي واجب الوجود.",
+  "analogy_or_metaphor": "[Relatable concrete real-world comparison or thought experiment articulated by the Da'ee in the dialogue]",
+  "analogy_or_metaphor_ar": "[المثال الواقعي أو القياس الحسي التوضيحي الذي ذكره الداعية في الحوار لتقريب المعنى العقلي]",
+  "socratic_question": "[The Da'ee's clincher counter-question turning the table on the interlocutor and exposing their contradiction]",
+  "socratic_question_ar": "[السؤال السقراطي المعاكس الذي وجهه الداعية ليلزم الخصم بتناقض مقدماته]",
+  "interlocutor_verbatim_quote": "[EXACT 100% word-for-word quote from transcript where interlocutor stated objection]",
+  "interlocutor_verbatim_quote_ar": "[الترجمة العربية الفصحى لاقتباس المحاور الحرفي من المقطع]",
+  "verbatim_quote": "[EXACT 100% word-for-word quote from transcript where Da'ee delivered core proof]",
+  "verbatim_quote_ar": "[الترجمة العربية الفصحى لاقتباس الداعية البرهاني من المقطع]",
   "dialogue_exchange": [
-    {"turn_id": "CsWdrUXYnWg_T0003", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "If you say God created the universe, who made God then? You can't just stop at God.", "text_ar": "إذا قلت إن الله خلق الكون، فمن صنع الله إذن؟ لا يمكنك التوقف عند الله فقط."},
-    {"turn_id": "CsWdrUXYnWg_T0004", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "The rule of science and philosophy is: whatever begins to exist has a cause. God did not begin to exist. An infinite regress of causes is impossible. You need an uncaused First Cause.", "text_ar": "قاعدة العلم والمنطق هي: كل ما له بداية فله سبب. والله لا بداية له، والتسلسل اللانهائي في الأسباب مستحيل عقلاً؛ فلا بد من مسبب أول غير مسبب."}
+    {"turn_id": "[TURN_ID_01]", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "[Verbatim utterance of interlocutor from transcript]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_02]", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "[Verbatim utterance of Da'ee probing the premise]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_03]", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "[Verbatim utterance of interlocutor clarifying their stance]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_04]", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "[Verbatim utterance of Da'ee delivering the decisive proof]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"}
   ],
-  "timestamp_seconds": 84,
-  "timestamp_formatted": "01:24",
-  "tags": ["First Cause", "Kalam Cosmological Argument", "Infinite Regress", "Causality", "Who Created God"]
+  "timestamp_seconds": 120,
+  "timestamp_formatted": "02:00",
+  "tags": ["[Primary Theme]", "[Core Concept]", "[Theological Proof]"]
 }
 
-EXAMPLE 3 (Problem of Evil & Suffering — Moral Philosophy & Divine Wisdom):
+EXAMPLE 3 (Problem of Evil & Suffering — Theodicy & Divine Wisdom Monologue Blueprint):
 {
-  "question_turn_id": "YC86BQwvHyk_T0021",
-  "answer_turn_id": "YC86BQwvHyk_T0022",
-  "question_en": "If God is All-Powerful and perfectly Good, why does He allow innocent children to suffer from terminal diseases and disasters?",
-  "question_ar": "إذا كان الله كلي القدرة وبالغ الرحمة، فلماذا يسمح بمعاناة وتألم الأطفال الأبرياء من الأمراض الفتاكة والكوارث؟",
+  "question_turn_id": "[TURN_ID_WHERE_DAEE_ARTICULATED_SEEKER_INQUIRY]",
+  "answer_turn_id": "[TURN_ID_WHERE_DAEE_DELIVERED_THEOLOGICAL_EXPLANATION]",
+  "question_en": "How does Islamic theology resolve [Apparent Existential or Scriptural Question X] while upholding [Foundational Orthodoxy Y]?",
+  "question_ar": "كيف يفسر الإسلام [الإشكال الوجودي أو النصي المطروح] في ضوء [الأصل العقدي القطعي المحكم]؟",
   "topic_category": "Problem of Evil & Suffering",
   "topic_category_ar": "معضلة الشر والمعاناة",
-  "topic_subcategory": "Theodicy & Gratuitous Suffering",
-  "interlocutor_type": "Atheist / Skeptic",
-  "core_answer_summary_en": "The objection collapses on two fundamental rational grounds: First, in an atheistic universe of blind physical matter without God, objective moral categories do not exist; calling suffering 'evil' or 'unjust' is merely subjective evolutionary emotion. To object to evil, one must borrow the theistic moral standard. Second, the objection falsely assumes that God possesses only Power and Mercy while ignoring His supreme Wisdom and Omniscience. This earthly life is an epistemic realm of test and trial, not ultimate paradise. Apparent suffering serves profound spiritual ends, moral growth, and testing of free wills, and is compensated with infinite, eternal justice and bliss in the Hereafter.",
-  "core_answer_summary_ar": "تسقط هذه الشبهة من أصلين برهانيين: الأول، أن الإلحاد المادي الذي يرى الوجود مجرد ذرات عمياء عاجز منطقياً عن إثبات وجود 'شر موضوعي'، فوصف الألم بالشر إنما هو انفعال ذاتي مجرد؛ والمحتج لا يستطيع إدانة الشر إلا باستعارة معيار الأخلاق المتجاوز من الإيمان بالله. الثاني، أن الشبهة تفترض خطأً انحصار صفات الله في القدرة والرحمة مع تعطيل صفة 'الحكمة البالغة' و'العلم التام'. فالدنيا في الرؤية الإسلامية ليست دار نعيم نهائي بل دار ابتلاء وامتحان، والآلام العارضة تكتنفها حكم ربانية جليلة، ويعوض الصابرون عنها في الدار الآخرة بجزاء أبدي لا ينفد ينسيهم كل عناء دنيوي.",
+  "topic_subcategory": "[Specific Subtopic]",
+  "interlocutor_type": "Inquiring Seeker",
+  "core_answer_summary_en": "The inquiry is resolved by recognizing [Foundational Theological Context spoken by the Da'ee]. Earthly life is designed as an epistemic domain of moral trial and testing of human free will, rather than an ultimate destination of recompense. Apparent hardships are encompassed by profound divine wisdom and will be fully compensated with absolute eternal justice in the Hereafter. Once the holistic Islamic worldview is understood, the apparent tension between [Attribute A] and [Attribute B] is completely dissolved.",
+  "core_answer_summary_ar": "ينحل هذا الإشكال بإدراك حقيقة دار الدنيا بوصفها دار ابتلاء واختبار لا دار جزاء مستقر؛ وأن أفعال الله تعالى تصدر عن حكمة بالغة وعلم تام محيط، يعوض فيها الصابرون بجزاء أخروي أبدي لا ينفد. وحين يُفهم التصور الإسلامي الشامل للوجود، يزول التعارض الموهوم بين كمال القدرة والرحمة وبين وقوع الابتلاء العارض.",
   "logical_premises": [
-    "Premise 1: Objecting to an event as objectively evil or unjust logically necessitates a transcendent objective moral lawgiver and purposeful design for human existence.",
-    "Premise 2: Materialism renders existence purposeless and amoral, whereas Islam affirms that God acts with supreme wisdom in a temporal realm of trial culminating in eternal divine justice.",
-    "Conclusion: Therefore, suffering does not disprove God's existence or goodness; it exposes the incoherence of atheistic morality and proves the necessity of divine wisdom and the Hereafter."
+    "Premise 1: [Major Premise - Universal theological principle establishing the divine purpose or attributes articulated by the Da'ee]",
+    "Premise 2: [Minor Premise - Observed reality of worldly existence as a transient domain of trial and moral accountability]",
+    "Conclusion: [Inescapable deduction demonstrating divine wisdom and resolving the inquiry based strictly on spoken dialogue]"
   ],
   "logical_premises_ar": [
-    "المقدمة الأولى: الحكم على واقعة بأنها شر موضوعي أو ظلم قبيح يستلزم بالضرورة وجود معيار أخلاقي متعالٍ وغائية للوجود يحددهما الخالق الحكيم.",
-    "المقدمة الثانية: المادية الإلحادية تجعل الكون بلا غاية ولا قيمة موضوعية، بينما يقرر الإسلام أن أفعال الله منزهة عن العبث وتصدر عن حكمة بالغة في دار ابتلاء مؤقتة تعقبها دار العدل المطلق.",
-    "النتيجة: إذن، وجود الألم لا ينفي وجود الإله ولا رحمته، بل يكشف تناقض الموقف الإلحادي ويثبت كمال الحكمة الإلهية وحتمية الجزاء الأخروي."
+    "المقدمة الأولى: [القاعدة العقدية الكلية في حكمة أفعال الله تعالى وغائية الخلق وحقيقة الألوهية]",
+    "المقدمة الثانية: [حقيقة الحياة الدنيا وكونها دار تكليف وابتلاء مؤقتة تعقبها دار العدل المطلق]",
+    "النتيجة: [الإلزام العقلي الحاسم الذي يبين اتساق الوجود مع كمال الحكمة والعدل الإلهي]"
   ],
-  "fallacy_or_misconception_exposed": "False Dilemma & Epistemic Arrogance: Artificially isolating God's attributes into only Power and Mercy while dismissing absolute Wisdom, and presuming that human cognitive inability to grasp the immediate wisdom of an event proves the absence of wisdom.",
-  "fallacy_or_misconception_exposed_ar": "مغالطة الحصر غير المانع والغرور الإبستمولوجي: اختزال صفات الله في القدرة والرحمة المجردة بمعزل عن كمال الحكمة والعدل، وتوهم أن عجز العقل البشري المحدود عن إحاطته بالحكمة في الحال ينفي وجودها في نفس الأمر.",
-  "analogy_or_metaphor": "A child being held down by doctors while receiving an excruciating injection or surgery perceives only torture and cruelty, because their cognitive horizon cannot comprehend pathology or long-term healing; relative to the child's perspective, the surgeon seems harmful, yet in reality it is the highest form of wisdom and care.",
-  "analogy_or_metaphor_ar": "الطفل الصغير الذي يمسكه الأطباء لإجراء جراحة مؤلمة أو إعطائه حقنة علاجية يظن بجهله أنهم يعذبونه ظلماً لقصر مداركه عن فهم المرض والشفاء؛ فكذلك عقل الإنسان المحدود أمام تدبير الخالق العليم بكل شيء.",
-  "socratic_question": "In your atheistic worldview where we are just accidental results of blind evolutionary forces, on what objective basis do you label child suffering as 'evil' rather than just neutral natural chemistry? If there is no objective moral law, isn't your outrage merely subjective taste?",
-  "socratic_question_ar": "في نظرتك الإلحادية حيث الإنسان مجرد نتاج صدفة عمياء لعمليات بيولوجية، بأي معيار موضوعي تصنف ألم الطفل بأنه 'شر' بدلاً من كونه مجرد تفاعل كيميائي طبيعي محايد؟ وإذا لم يكن هناك معيار أخلاقي متجاوز، أليس استنكارك مجرد ذوق شخصي؟",
-  "interlocutor_verbatim_quote": "If God is all-loving and all-powerful, why would He let babies suffer with bone cancer? Either He can't stop it or He doesn't care.",
-  "interlocutor_verbatim_quote_ar": "إذا كان الله كلي المحبة والقدرة، فلماذا يدع الأطفال الرضع يتألمون من سرطان العظام؟ إما أنه لا يستطيع منعه أو أنه لا يبالي.",
-  "verbatim_quote": "You are ignoring that God is also Al-Hakeem, the All-Wise. If an atheist complains about evil, they have no objective basis to even call it evil. In Islam, this life is an exam, not paradise.",
-  "verbatim_quote_ar": "أنت تتجاهل أن من أسماء الله 'الحكيم'. والملحد حين يعترض بوجود الشر لا يملك أصلاً أساساً موضوعياً لتسميته شراً. وفي الإسلام هذه الحياة امتحان ودار ابتلاء وليست جنة الخلد.",
+  "fallacy_or_misconception_exposed": "False Dilemma & Incomplete Paradigm: Isolating divine attributes and presuming human inability to perceive immediate wisdom negates the existence of wisdom.",
+  "fallacy_or_misconception_exposed_ar": "مغالطة الحصر غير المانع وقصور الإدراك: اختزال صفات الله وتعطيل صفة الحكمة، وتوهم أن عجز العقل البشري المحدود عن إدراك وجه الحكمة في الحال ينفي وجودها.",
+  "analogy_or_metaphor": "[Relatable concrete real-world comparison or thought experiment articulated by the Da'ee in the monologue]",
+  "analogy_or_metaphor_ar": "[المثال الواقعي أو القياس الحسي التوضيحي الذي ضربه الداعية لتقريب المعنى العقلي]",
+  "socratic_question": "[The clincher reflective counter-question formulated by the Da'ee to prompt the inquirer to reflect on their presuppositions]",
+  "socratic_question_ar": "[السؤال الحواري أو الاستنكاري الذي وجهه الداعية ليدفع السائل للتأمل في لوازمه الفكرية]",
+  "interlocutor_verbatim_quote": "[The exact words of the Da'ee framing the seeker's inquiry from the transcript]",
+  "interlocutor_verbatim_quote_ar": "[الترجمة العربية الفصحى لصياغة الداعية لإشكال السائل الحرفي]",
+  "verbatim_quote": "[The exact words of the Da'ee delivering the core proof from the transcript]",
+  "verbatim_quote_ar": "[الترجمة العربية الفصحى لاقتباس الداعية البرهاني]",
   "dialogue_exchange": [
-    {"turn_id": "YC86BQwvHyk_T0021", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "If God is all-loving and all-powerful, why would He let babies suffer? Either He can't stop it or He doesn't care.", "text_ar": "إذا كان الله كلي المحبة والقدرة، فلماذا يدع الأطفال يتألمون؟ إما أنه عاجز أو أنه لا يبالي."},
-    {"turn_id": "YC86BQwvHyk_T0022", "role": "MAIN_DAEE", "move_type": "Reply", "text_en": "You are ignoring that God is also Al-Hakeem, the All-Wise. If an atheist complains about evil, they have no objective basis to even call it evil. In Islam, this life is an exam, not paradise.", "text_ar": "أنت تتجاهل أن من أسماء الله 'الحكيم'. والملحد حين يعترض بوجود الشر لا يملك أصلاً أساساً موضوعياً لتسميته شراً. وفي الإسلام هذه الحياة امتحان ودار ابتلاء وليست جنة الخلد."}
+    {"turn_id": "[TURN_ID_01]", "role": "MAIN_DAEE", "move_type": "Objection", "text_en": "[Da'ee voicing the seeker's inquiry from transcript]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"},
+    {"turn_id": "[TURN_ID_02]", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "[Da'ee delivering the theological explanation from transcript]", "text_ar": "[الترجمة العربية الفصحى للمداخلة]"}
   ],
-  "timestamp_seconds": 145,
-  "timestamp_formatted": "02:25",
-  "tags": ["Problem of Evil", "Theodicy", "Suffering", "Divine Wisdom", "Moral Argument"]
+  "timestamp_seconds": 60,
+  "timestamp_formatted": "01:00",
+  "tags": ["[Primary Theme]", "[Core Concept]", "[Theological Proof]"]
 }
 
 STRICT GENERAL RULES:
@@ -298,10 +310,12 @@ TRANSCRIPT STRUCTURE:
 - [MONOLOGUE / INTRO / AUDIENCE Q&A]: Turns where the Da'ee speaks solo—introducing a topic, explaining theological proofs, addressing live comments/chat questions, or anticipating objections.
 
 CRITICAL RULES FOR ROUND 1:
-1. SEEKER / INTERLOCUTOR PERSPECTIVE FOR QUESTION:
-   - "question_en" MUST ALWAYS be formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
-   - It represents the false claim, objection, question, or misconception they bring to the table (e.g. "If God is all-powerful, why do innocent children suffer?", "Isn't Jesus God in the flesh according to the Bible?", "Who created God if everything needs a creator?").
-   - NEVER formulate "question_en" as the Da'ee's position or the Da'ee's question.
+1. SEEKER / INTERLOCUTOR PERSPECTIVE & SYNTAX FOR QUESTION:
+   - "question_en" MUST ALWAYS be a complete, grammatical interrogative (ending with '?') formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
+   - It represents the objection, misconception, or philosophical doubt they raise (e.g. "If God is all-powerful, why does suffering exist?", "How do Muslims view the divinity of Jesus?", "Why does the universe require a creator?").
+   - NEVER formulate "question_en" as a 1st-person self-incriminating confession ("Why do I oppose Islam if I haven't read the Quran?", "Why do I hold anti-Islamic views..."). Reframe it into objective inquiry ("Can someone validly critique Islam without reading its primary texts?").
+   - NEVER copy raw declarative ASR sentences ("You believe that..."), incomplete ellipses ("..."), or the Da'ee's own polemical challenge questions ("Should God love a rapist...?" — those belong in "socratic_question", never in "question_en").
+   - NEVER extract a fleeting greeting or passing remark (<6 words) unless the Da'ee explicitly debates and answers that exact point in the immediately following turns.
 
 2. DIRECT, DEEP INTELLECTUAL TRUTH (150-250 WORDS):
    - "core_answer_summary_en" MUST be a comprehensive, authoritative, intellectually satisfying refutation and theological explanation (150 to 250 words).
@@ -315,18 +329,21 @@ CRITICAL RULES FOR ROUND 1:
      * Conclusion: Inescapable rational deduction dismantling the objection and proving the Islamic position.
 
 4. MULTIPLE CONCRETE ANALOGIES & THOUGHT EXPERIMENTS:
-   - "analogies": An array of one or more concrete, relatable real-world comparisons or thought experiments illustrating the concept (e.g. the train engine without wheels, the surgeon operating on an unknowing child, the lamp vs the power station).
-   - Also populate "analogy_or_metaphor" with the primary analogy for backward compatibility.
+   - "analogies": An array of concrete comparisons or thought experiments ACTUALLY spoken or clearly implied by the Da'ee in this transcript; return [] if none were used in the exchange (NEVER invent stock analogies from outside the transcript).
+   - Also populate "analogy_or_metaphor" with the primary transcript-grounded analogy (or "" if none was used).
 
 5. SOCRATIC COUNTER-QUESTION:
    - "socratic_question": The Da'ee's clincher counter-question that turns the table on the debater and exposes their self-contradiction.
 
-6. SCRIPTURAL CITATIONS:
-   - "scriptural_citations": An array of scriptural and historical textual references explicitly cited or directly relevant to the exchange (e.g. Bible verses like Mark 13:32, Quranic verses, Hadith, or early church creeds).
+6. SCRIPTURAL CITATIONS (STRICTLY TRANSCRIPT-GROUNDED):
+   - "scriptural_citations": An array of scriptural or historical references EXPLICITLY quoted or directly named in the spoken exchange. NEVER guess Surah:Ayah or Bible chapter:verse numbers from memory if they were not discussed here.
    - Each entry must be an object: {"source": "Bible / Quran / Hadith / Torah", "reference": "Book Chapter:Verse", "significance": "Brief explanation of how this text disproves the objection"}. If none, return [].
 
-7. 100% VERBATIM SPOKEN QUOTES:
+7. 100% VERBATIM SPOKEN QUOTES & ZERO OUTSIDE FABRICATION:
    - "verbatim_quote" and "interlocutor_verbatim_quote" MUST be copied EXACTLY word-for-word from the transcript turns. Zero paraphrasing.
+   - CRITICAL ANTI-LEAKAGE MANDATE:
+     * NEVER import stock apologetics illustrations, syllogisms, or scriptural verses from outside this transcript!
+     * Every quote, analogy, citation, and premise MUST be strictly grounded in the spoken words in the provided episode transcript. Importing ungrounded external templates triggers an automatic hard-fail rejection score of 0.
 
 8. EXPANDED DIALOGUE TRAJECTORY (6 TO 12 TURNS):
    - "dialogue_exchange" MUST capture the chronological progression of the debate across 6 to 12 turns (or all available turns in the exchange if fewer than 6).
@@ -367,7 +384,7 @@ EXACT JSON SCHEMA FOR ROUND 1:
     "scriptural_citations": [
       {
         "source": "Bible / Quran / Hadith / Torah",
-        "reference": "e.g. Mark 13:32",
+        "reference": "Specific Book Chapter:Verse or Surah:Ayah explicitly cited in transcript",
         "significance": "Significance of this verse in dismantling the theological objection"
       }
     ],
@@ -393,97 +410,84 @@ EXACT JSON SCHEMA FOR ROUND 1:
   }
 ]
 
-GOLD-STANDARD ROUND 1 EXAMPLES:
+GOLD-STANDARD STRUCTURAL META-DEMONSTRATIONS (ROUND 1 BLUEPRINT):
 
-EXAMPLE 1 (Comparative Religion & Christianity — Scriptural Refutation & Christology):
+NOTICE ON INPUT GROUNDING & ANTI-LEAKAGE:
+The following examples are ABSTRACT STRUCTURAL BLUEPRINTS illustrating the required tone, depth, and schema formatting.
+NEVER copy placeholder variables, analogies, or text from these blueprints into extracted cards.
+Every extracted card MUST be derived 100% from the actual spoken dialogue in the provided video transcript!
+
+EXAMPLE 1 (Abstract Structural Blueprint — Dialogical Objection & Deductive Proof):
 {
-  "question_turn_id": "LMJF4YwWNaM_T0014",
-  "answer_turn_id": "LMJF4YwWNaM_T0015",
-  "question_en": "Isn't Jesus God in the flesh according to the Bible, so why do Muslims reject his divinity?",
-  "topic_category": "Comparative Religion & Christianity",
-  "topic_subcategory": "Divinity of Christ & Omniscience",
-  "interlocutor_type": "Christian / Trinitarian",
-  "core_answer_summary_en": "True divinity inherently requires absolute, infinite omniscience, omnipotence, and total self-sufficiency. In the Christian Gospels themselves, Jesus explicitly disclaims knowledge of the Day of Judgment, stating in Mark 13:32 that neither the angels nor the Son knows the hour, but only the Father. A being whose knowledge is bounded, contingent, and susceptible to ignorance cannot logically or metaphysically be the All-Knowing, Necessary Being who created the cosmos. Furthermore, throughout the New Testament, Jesus prays to God, hungers, thirsts, and expresses complete dependence upon the Father's will (John 5:30: 'I can do nothing on my own'). Attributing two conflicting natures—one omniscient and one ignorant—to a single person creates an incoherent ontological contradiction. Islam honors Jesus (Isa ibn Maryam) as a revered, miraculous Messenger of God who called his people strictly to pure monotheism, while resolutely affirming that God alone is uncreated, independent, and free from human limitations.",
+  "question_turn_id": "[TURN_ID_WHERE_INTERLOCUTOR_RAISED_OBJECTION]",
+  "answer_turn_id": "[TURN_ID_WHERE_DAEE_BEGAN_CORE_PROOF]",
+  "question_en": "If [Contingent Entity X] exhibits [Inherent Limitation Y], how can believers claim [Ultimate Theological Reality Z] possesses [Transcendent Divine Attribute W]?",
+  "topic_category": "Theology & God's Existence",
+  "topic_subcategory": "[Specific Subtopic of Debate]",
+  "interlocutor_type": "Atheist / Materialist",
+  "core_answer_summary_en": "The objection commits a foundational category error by projecting the finite, dependent limitations of created phenomena onto the uncreated, necessary Creator. A contingent entity whose existence depends on prior external conditions cannot be equated with the Necessary Being whose essence is independent, self-sufficient, and absolute. The Da'ee establishes through deductive reasoning that [Primary Rational Principle articulated in dialogue]. Therefore, the alleged contradiction collapses because the objection falsely assumed parity between created effects and the transcendent First Cause.",
   "logical_premises": [
-    "Premise 1: An omniscient God possesses infinite knowledge of all realities and cannot logically be ignorant of any event.",
-    "Premise 2: Jesus explicitly admits in Mark 13:32 that he does not know the timing of the Last Day, demonstrating bounded knowledge.",
-    "Conclusion: Therefore, Jesus is finite in knowledge and cannot be the All-Knowing Almighty God."
+    "Premise 1: [Major Premise - Universal theological axiom or ontological law articulated by the Da'ee, establishing an absolute standard]",
+    "Premise 2: [Minor Premise - Observed empirical fact, opponent admission, or contextual reality established in the debate]",
+    "Conclusion: [Inescapable deduction refuting the objection and proving the Islamic theological reality based strictly on the dialogue]"
   ],
-  "fallacy_or_misconception_exposed": "Category Mistake & Equivocation: Conflating the mortal, dependent limitations of a chosen human prophet with the uncreated, transcendent nature of the Creator, and equivocating on the definition of divinity to accommodate ignorance and physical mortality.",
-  "analogy_or_metaphor": "A lamp drawing electric current from a power plant shines brightly, but it is not the power plant itself; similarly, a prophet receiving revelation speaks truth, but is not the Omniscient God who sent it.",
+  "fallacy_or_misconception_exposed": "Category Mistake & False Equivalence: Inappropriately projecting temporal, created constraints onto the transcendent Necessary Being.",
+  "analogy_or_metaphor": "[Primary relatable concrete real-world comparison or thought experiment articulated by the Da'ee in the dialogue]",
   "analogies": [
-    "A lamp drawing electric current from a power plant shines brightly, but it is not the power plant itself; similarly, a prophet receiving revelation speaks truth, but is not the Omniscient God who sent it.",
-    "An ambassador representing the king speaks with the king's authority, but remains a subject who must eat, sleep, and obey; confusing the ambassador with the king is an obvious category error."
+    "[First concrete real-world analogy illustrating the metaphysical principle spoken on camera]",
+    "[Second thought experiment or practical comparison if articulated in the dialogue]"
   ],
-  "socratic_question": "If Jesus is fully God and God knows all things, who was hiding the knowledge of the Hour from Jesus when he admitted he did not know it?",
+  "socratic_question": "[The Da'ee's clincher counter-question turning the table on the interlocutor and exposing their contradiction]",
   "scriptural_citations": [
     {
-      "source": "Bible",
-      "reference": "Mark 13:32",
-      "significance": "Explicitly documents Jesus disclaiming omniscience by denying knowledge of the Last Day."
-    },
-    {
-      "source": "Bible",
-      "reference": "John 5:30",
-      "significance": "Jesus affirms complete dependence on the Father, saying 'I can of mine own self do nothing.'"
+      "source": "Bible / Quran / Hadith / Torah",
+      "reference": "[Book Chapter:Verse or Surah:Ayah cited in the debate]",
+      "significance": "[Significance of this verse in disproving the objection]"
     }
   ],
-  "interlocutor_verbatim_quote": "He is God in flesh. Is He God or no?",
-  "verbatim_quote": "In Mark 13:32 it says, 'But of that day and hour no one knows, not even the angels in heaven, nor the Son, but only the Father.' So how can the Son not know if He is God?",
+  "interlocutor_verbatim_quote": "[EXACT 100% word-for-word quote from transcript where interlocutor stated objection]",
+  "verbatim_quote": "[EXACT 100% word-for-word quote from transcript where Da'ee delivered core proof]",
   "dialogue_exchange": [
-    {"turn_id": "LMJF4YwWNaM_T0014", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "He is God in flesh. Is He God or no?"},
-    {"turn_id": "LMJF4YwWNaM_T0015", "role": "MAIN_DAEE", "move_type": "Scriptural Challenge", "text_en": "In Mark 13:32 it says, 'But of that day and hour no one knows, not even the angels in heaven, nor the Son, but only the Father.' So how can the Son not know if He is God?"},
-    {"turn_id": "LMJF4YwWNaM_T0016", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "Because in his human nature he didn't know, but in his divine nature he knew everything."},
-    {"turn_id": "LMJF4YwWNaM_T0017", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "Did Jesus have one mind or two minds? If you say one mind was ignorant and one was all-knowing, you have two different persons."},
-    {"turn_id": "LMJF4YwWNaM_T0018", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "He is one person with two natures, the hypostatic union."},
-    {"turn_id": "LMJF4YwWNaM_T0019", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "A nature cannot know or be ignorant; persons know things. If the person of Jesus did not know the Hour, then God was ignorant, which is impossible."}
+    {"turn_id": "[TURN_ID_01]", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "[Verbatim utterance of interlocutor from transcript]"},
+    {"turn_id": "[TURN_ID_02]", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "[Verbatim utterance of Da'ee probing the premise]"},
+    {"turn_id": "[TURN_ID_03]", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "[Verbatim utterance of interlocutor clarifying their stance]"},
+    {"turn_id": "[TURN_ID_04]", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "[Verbatim utterance of Da'ee delivering the decisive proof]"}
   ],
-  "timestamp_seconds": 101,
-  "timestamp_formatted": "01:41",
-  "tags": ["Trinity", "Omniscience", "Mark 13:32", "Jesus in Islam", "Christology"]
+  "timestamp_seconds": 120,
+  "timestamp_formatted": "02:00",
+  "tags": ["[Primary Theme]", "[Core Concept]", "[Theological Proof]"]
 }
 
-EXAMPLE 2 (Theology & God's Existence — Kalam Cosmological Argument & First Cause):
+EXAMPLE 2 (Abstract Structural Blueprint — Da'ee Voicing Anticipated Seeker Inquiry in Monologue / Intro):
 {
-  "question_turn_id": "CsWdrUXYnWg_T0003",
-  "answer_turn_id": "CsWdrUXYnWg_T0004",
-  "question_en": "If everything requires a creator, who created God? Isn't exempting God just an arbitrary special pleading?",
-  "topic_category": "Theology & God's Existence",
-  "topic_subcategory": "First Cause & Contingency (Kalam)",
-  "interlocutor_type": "Atheist / Materialist",
-  "core_answer_summary_en": "The foundational principle of causality in logic and metaphysics states that whatever begins to exist or is contingent upon external conditions requires an external sufficient cause. It never states that 'everything' requires a cause. Contingent, physical entities whose existence is not self-explanatory cannot bring themselves into existence, because before existing they have no causal power. An actual infinite regress of dependent causes is logically impossible, as an infinite chain of prior conditions would prevent any effect from ever being actualized in reality. Therefore, reason strictly demands that the chain of causation terminate in an uncaused, eternal, necessary First Cause (Allah)—Self-Sufficient (Al-Ghaniyy), uncreated, and existing unconditionally beyond the confines of physical time, space, and matter. Exempting the Necessary Being is not special pleading; it is the inescapable metaphysical requirement to explain why anything exists at all.",
+  "question_turn_id": "[TURN_ID_WHERE_DAEE_ARTICULATED_SEEKER_INQUIRY]",
+  "answer_turn_id": "[TURN_ID_WHERE_DAEE_DELIVERED_THEOLOGICAL_EXPLANATION]",
+  "question_en": "How does Islamic theology resolve [Apparent Existential or Scriptural Question X] while upholding [Foundational Orthodoxy Y]?",
+  "topic_category": "Problem of Evil & Suffering",
+  "topic_subcategory": "[Specific Subtopic]",
+  "interlocutor_type": "Inquiring Seeker",
+  "core_answer_summary_en": "The inquiry is resolved by recognizing [Foundational Theological Context spoken by the Da'ee]. Earthly life is designed as an epistemic domain of moral trial and testing of human free will, rather than an ultimate destination of recompense. Apparent hardships are encompassed by profound divine wisdom and will be fully compensated with absolute eternal justice in the Hereafter. Once the holistic Islamic worldview is understood, the apparent tension between [Attribute A] and [Attribute B] is completely dissolved.",
   "logical_premises": [
-    "Premise 1: Any entity that begins to exist or is contingent upon prior conditions is an effect that necessarily requires an external cause.",
-    "Premise 2: The physical universe is temporal, bounded, and contingent, and an actual infinite regress of dependent causes is logically impossible.",
-    "Conclusion: Therefore, causality terminates in an uncaused, eternal, necessary First Cause (Allah), who was never originated."
+    "Premise 1: [Major Premise - Universal theological principle establishing the divine purpose or attributes articulated by the Da'ee]",
+    "Premise 2: [Minor Premise - Observed reality of worldly existence as a transient domain of trial and moral accountability]",
+    "Conclusion: [Inescapable deduction demonstrating divine wisdom and resolving the inquiry based strictly on spoken dialogue]"
   ],
-  "fallacy_or_misconception_exposed": "Strawman & Category Mistake: Distorting the rational causal principle from 'whatever begins to exist has a cause' to 'everything has a creator', and erroneously projecting the temporal, contingent limitations of physical effects onto the uncreated Necessary Being.",
-  "analogy_or_metaphor": "A train of freight carriages cannot move on its own; connecting an infinite line of unpowered carriages will never move the train without an engine that generates its own locomotion. Similarly, a chain of dependent causes requires an independent First Cause.",
+  "fallacy_or_misconception_exposed": "False Dilemma & Incomplete Paradigm: Isolating divine attributes and presuming human inability to perceive immediate wisdom negates the existence of wisdom.",
+  "analogy_or_metaphor": "[Relatable concrete real-world comparison or thought experiment articulated by the Da'ee in the monologue]",
   "analogies": [
-    "A train of freight carriages cannot move on its own; connecting an infinite line of unpowered carriages will never move the train without an engine that generates its own locomotion. Similarly, a chain of dependent causes requires an independent First Cause.",
-    "A soldier cannot pull the trigger until he receives permission from the officer behind him, who must ask the officer behind him; if this permission chain is infinite, the shot will never be fired. Because the universe exists, there was an uncommanded first commander."
+    "[Concrete real-world analogy or thought experiment articulated by the Da'ee in the monologue]"
   ],
-  "socratic_question": "If a clerk must get authorization from another clerk before signing your paper, and that clerk must ask another infinitely, will your paper ever get signed? If the paper was signed, wasn't there a first manager?",
-  "scriptural_citations": [
-    {
-      "source": "Quran",
-      "reference": "Surah At-Tur 52:35-36",
-      "significance": "Presents the ultimate rational trilemma: Were they created from nothing, were they their own creators, or did they create the heavens and earth?"
-    }
-  ],
-  "interlocutor_verbatim_quote": "If you say God created the universe, you haven't solved anything. Who made God then? You can't just stop at God.",
-  "verbatim_quote": "The rule of science and philosophy is: whatever begins to exist has a cause. God did not begin to exist. An infinite regress of causes is impossible. You need an uncaused First Cause.",
+  "socratic_question": "[The clincher reflective counter-question formulated by the Da'ee to prompt the inquirer to reflect on their presuppositions]",
+  "scriptural_citations": [],
+  "interlocutor_verbatim_quote": "[The exact words of the Da'ee framing the seeker's inquiry from the transcript]",
+  "verbatim_quote": "[The exact words of the Da'ee delivering the core proof from the transcript]",
   "dialogue_exchange": [
-    {"turn_id": "CsWdrUXYnWg_T0003", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "If you say God created the universe, who made God then? You can't just stop at God."},
-    {"turn_id": "CsWdrUXYnWg_T0004", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "The rule of science and philosophy is: whatever begins to exist has a cause. God did not begin to exist. An infinite regress of causes is impossible. You need an uncaused First Cause."},
-    {"turn_id": "CsWdrUXYnWg_T0005", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "Why can't the universe just be the first cause? Why can't the universe be eternal?"},
-    {"turn_id": "CsWdrUXYnWg_T0006", "role": "MAIN_DAEE", "move_type": "Socratic Turn", "text_en": "Is the universe static or is it changing? Does the universe have a finite amount of usable energy?"},
-    {"turn_id": "CsWdrUXYnWg_T0007", "role": "INTERLOCUTOR", "move_type": "Reaction", "text_en": "It is expanding and entropy is increasing."},
-    {"turn_id": "CsWdrUXYnWg_T0008", "role": "MAIN_DAEE", "move_type": "Conclusion", "text_en": "If it were eternal, entropy would have already reached maximum heat death. Whatever changes is contingent and has a beginning, so the universe cannot be the First Cause."}
+    {"turn_id": "[TURN_ID_01]", "role": "MAIN_DAEE", "move_type": "Objection", "text_en": "[Da'ee voicing the seeker's inquiry from transcript]"},
+    {"turn_id": "[TURN_ID_02]", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "[Da'ee delivering the theological explanation from transcript]"}
   ],
-  "timestamp_seconds": 84,
-  "timestamp_formatted": "01:24",
-  "tags": ["First Cause", "Kalam Cosmological Argument", "Infinite Regress", "Causality", "Who Created God"]
+  "timestamp_seconds": 60,
+  "timestamp_formatted": "01:00",
+  "tags": ["[Primary Theme]", "[Core Concept]", "[Theological Proof]"]
 }
 """
 
@@ -522,27 +526,72 @@ CORE TASKS:
 
 2. CLASSICAL ARABIC LOCALIZATION (فصحى أصيلة جليلة):
    - Translate all fields into pure, eloquent, grammatically authoritative Classical Arabic:
-     * "question_ar": Formulated from the perspective of the seeker/interlocutor in clear Arabic.
+     * "question_ar": Formulated from the perspective of the seeker/interlocutor in clear Arabic ending with '؟'.
      * "topic_category_ar": The standard Classical Arabic title for the domain.
      * "core_answer_summary_ar": A decisive, eloquent Islamic refutation and explanation (NO 3rd-person meta-narrative like "يرد الداعية بكذا").
      * "logical_premises_ar": Array of three deductive steps (المقدمة الأولى، المقدمة الثانية، النتيجة).
      * "fallacy_or_misconception_exposed_ar": Precise Arabic philosophical terminology for the fallacy.
      * "analogy_or_metaphor_ar": Vivid, eloquent Arabic translation of the analogy.
      * "analogies_ar": Array translating each analogy in the "analogies" list.
-     * "socratic_question_ar": The clincher counter-question in impactful Arabic.
+     * "socratic_question_ar": The clincher counter-question in impactful Arabic ending with '؟'.
      * "interlocutor_verbatim_quote_ar": Faithful Arabic translation of the interlocutor's quote.
      * "verbatim_quote_ar": Faithful Arabic translation of the Da'ee's quote.
      * "scriptural_citations": Preserve the citation objects, adding "significance_ar" to each item.
      * "dialogue_exchange": For EACH of the 6 to 12 turns in the dialogue trajectory, add "text_ar" containing the exact, faithful Classical Arabic translation of the utterance, preserving the full multi-turn arc!
 
-3. ZERO FOREIGN SCRIPT LEAKAGE & TRANSLITERATION:
-   - Purge all foreign script tokens: NO Russian Cyrillic (e.g. "педوفيليا"), NO Korean (e.g. "따라서"), NO Chinese CJK punctuation (e.g. "。，？").
-   - Purge stray Latin words and Latin-Arabic splices (e.g. "المiracles" -> "المعجزات", "فالمachines" -> "فالآلات", "First Cause" -> "سبب أول / علة أولى", "two natures" -> "طبيعتين", "two wills" -> "إرادتين").
+3. MANDATORY CLASSICAL ARABIC APOLOGETICS & THEOLOGICAL GLOSSARY (مسرد المصطلحات الشرعية والعقدية الإلزامي):
+   You MUST adhere strictly to established academic Islamic apologetics translations. NEVER translate blindly or phonetically:
+   * Geography & History:
+     - "6th century Arabia" / "7th century Arabia" / "Arabia" -> "الجزيرة العربية في القرن السادس الميلادي" / "شبه الجزيرة العربية" (حظر قاطع: إياك وترجمة Arabia بـ "عربة"!).
+     - "Bedouin" -> "بدو / أعراب"
+     - "Mecca" -> "مكة المكرمة", "Medina" -> "المدينة المنورة", "Quraysh" -> "قريش"
+   * Metaphysics, Kalam & Epistemology:
+     - "synchronicities" / "synchronicity" -> "التزامنات / التوافقات غير السببية" (حظر قاطع: إياك وترجمتها بـ "المؤامرات" أو "الموامرات"!).
+     - "Taoism" / "Daoism" -> "الطاوية" (حظر قاطع: إياك وترجمتها بـ "الطائفة"!).
+     - "contingency" / "contingent" -> "الإمكان / الممكن / الافتقار الذاتي"
+     - "necessary existence" / "necessary being" -> "واجب الوجود"
+     - "first cause" -> "العلة الأولى / المسبب الأول / واجب الوجود"
+     - "infinite regress" -> "التسلسل اللانهائي في المؤثرين (الممتنع عقلاً)"
+     - "vicious circularity" / "circular reasoning" -> "الدور السببي / الاستدلال الدائري"
+     - "category mistake" -> "خلط المقولات / مغالطة الصنف"
+     - "teleological argument" -> "دليل الإتقان والغائية / برهان النظم"
+     - "moral ontology" -> "الوجودية الأخلاقية / أسس الأخلاق الموضوعية"
+     - "epistemology" -> "نظرية المعرفة / الإبستمولوجيا"
+     - "scientism" -> "المذهب العلمي الطبيعي / العلموية"
+   * Biblical Figures & Comparative Religion:
+     - "Paul" / "Apostle Paul" -> "بولس / بولس الرسول" (حظر قاطع: إياك وترجمته بـ "بول"!).
+     - "Matthew" / "Gospel of Matthew" -> "متى / إنجيل متى" (حظر قاطع: إياك وترجمته صوتياً "ماتيو"!).
+     - "Mark" / "Gospel of Mark" -> "مرقس / إنجيل مرقس" (حظر قاطع: إياك وترجمته "مارك"!).
+     - "Luke" / "Gospel of Luke" -> "لوقا / إنجيل لوقا" (حظر قاطع: إياك وترجمته "لوك"!).
+     - "John" / "Gospel of John" -> "يوحنا / إنجيل يوحنا" (حظر قاطع: إياك وترجمته "جون"!).
+     - "Peter" / "Simon Peter" -> "بطرس / سمعان بطرس" (حظر قاطع: إياك وترجمته "بيتر"!).
+     - "James" -> "يعقوب" (حظر قاطع: إياك وترجمته "جيمس"!).
+     - "Trinity" -> "التثليث / الثالوث"
+     - "Hypostatic union" -> "الاتحاد الأقنومي"
+     - "Incarnation" -> "التجسد"
+     - "Crucifixion" -> "الصلب", "Atonement" -> "الفداء / كفارة الخطايا"
+     - "Original Sin" -> "الخطيئة الأصلية"
+     - "Council of Nicaea" -> "مجمع نيقية", "Church Fathers" -> "آباء الكنيسة"
+     - "Old Testament" -> "العهد القديم", "New Testament" -> "العهد الجديد"
+
+4. ZERO FOREIGN SCRIPT LEAKAGE & TRANSLITERATION:
+   - Purge all foreign script tokens: NO Russian Cyrillic, NO Hebrew, NO Korean, NO Chinese CJK punctuation (e.g. "。，？").
+   - Purge stray Latin words and Latin-Arabic splices inside Arabic fields, and convert them to eloquent Classical Arabic terminology.
    - Use standard Arabic punctuation: comma (،), question mark (؟), full stop (.).
 
-4. PRESERVE ALL ROUND 1 IDENTIFIERS & OUTPUT ALL CLASSICAL ARABIC FIELDS:
+5. PRESERVE ALL ROUND 1 IDENTIFIERS & COMPLETE ALL 8 ARABIC FIELDS (TRANSACTIONAL BARRIER):
    - Retain `question_turn_id`, `answer_turn_id`, and `question_en` for exact unit alignment.
-   - To maximize token budget and prevent output truncation, focus your output on the Classical Arabic fields (`question_ar`, `topic_category_ar`, `core_answer_summary_ar`, `logical_premises_ar`, `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar`, `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`), `scriptural_citations` (preserving `source`, `reference`, `significance` and adding `significance_ar`), and `dialogue_exchange` (preserving `turn_id`, `role`, `move_type` and adding `text_ar` for every turn).
+   - MANDATORY TRANSACTIONAL INTEGRITY: Every single card MUST have all 8 Arabic localization fields fully populated with authentic Classical Arabic:
+     1. `question_ar` (ending with '؟')
+     2. `core_answer_summary_ar` (100-200 words of direct theological truth)
+     3. `logical_premises_ar` (array of exactly 3 deductive steps)
+     4. `fallacy_or_misconception_exposed_ar`
+     5. `analogy_or_metaphor_ar` (and `analogies_ar`)
+     6. `socratic_question_ar` (ending with '؟')
+     7. `interlocutor_verbatim_quote_ar`
+     8. `verbatim_quote_ar`
+   - In `dialogue_exchange`, every single turn MUST include `text_ar`.
+   - Never output empty strings ("") or null for any of the 8 Arabic fields.
    - Do NOT emit `<think>...</think>` blocks or chain-of-thought commentary; output ONLY the valid JSON array `[ { ... } ]`. /no_think
 
 EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
@@ -591,15 +640,21 @@ EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
 """
 
 COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT = """You are a master Islamic kalam theologian and Classical Arabic translator (عالم ومحقق ومترجم شرعي).
-Translate and localize the provided Round 1 English Dialectical Dossiers into pure, eloquent Classical Arabic (فصحى رصينة خالية من الحروف الأعجمية).
-For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating:
-- `question_ar`, `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
-- `logical_premises_ar` (array of 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
-- `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar`
+Translate and localize the provided Round 1 English Dialectical Dossiers into pure, eloquent Classical Arabic (فصحى رصينة خالية من الحروف الأعجمية والروسية والعبرية والآسيوية).
+MANDATORY GLOSSARY:
+- "6th/7th century Arabia" -> "الجزيرة العربية في القرن السادس/السابع الميلادي" (NEVER translate as عربة!).
+- "synchronicities" -> "التزامنات / التوافقات" (NEVER translate as المؤامرات or الموامرات!).
+- "Taoism" -> "الطاوية" (NEVER translate as الطائفة!).
+- Biblical names: Paul -> "بولس" (NEVER بول!), Matthew -> "متى" (NEVER ماتيو!), Mark -> "مرقس", Luke -> "لوقا", John -> "يوحنا", Peter -> "بطرس", James -> "يعقوب".
+- "Jews" -> "اليهود" (NEVER Hebrew characters!).
+For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating ALL 8 Arabic fields:
+- `question_ar` (ending with '؟'), `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
+- `logical_premises_ar` (array of exactly 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
+- `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar` (ending with '؟')
 - `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`
 - `scriptural_citations`: array with `reference` and `significance_ar`
 - `dialogue_exchange`: array preserving each `turn_id`, `role`, `move_type` and adding `text_ar`
-Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"""
+Do NOT leave any Arabic field empty. Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"""
 
 USER_ROUND2_PROMPT_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
 Video Title: {title_ar}

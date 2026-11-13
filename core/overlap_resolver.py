@@ -1022,7 +1022,8 @@ def run_overlap_separation_m4(
     vid_diar_dir = workspace.diarization_dir / video_id
     # Store per-window separated clips in deterministic local NVMe temp (/tmp/yt_spx_clips/{video_id})
     # Never write small temporary WAV slices to Google Drive FUSE to prevent unparented orphan bloat!
-    sep_dir = get_deterministic_clip_dir(video_id)
+    sep_dir = (Path(local_tmp_dir) / f"{video_id}_sep_clips") if local_tmp_dir is not None else get_deterministic_clip_dir(video_id)
+    sep_dir.mkdir(parents=True, exist_ok=True)
     manifest_file = vid_diar_dir / "overlap_sep.json"
 
     state = workspace.get_video_state(video_id)

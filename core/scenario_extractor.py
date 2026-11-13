@@ -21,8 +21,11 @@ import re
 import json
 import time
 import shutil
+import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
 from core.extractor_prompt import (
@@ -37,12 +40,22 @@ from core.extractor_prompt import (
 from core.audio_diarizer import ms_to_fmt
 
 try:
-    from db.database import sanitize_text_field
+    from db.database import (
+        sanitize_text_field,
+        sanitize_arabic_unit_fields,
+        resolve_turn_speaker_labels,
+    )
 except (ImportError, ValueError):
     try:
-        from ..db.database import sanitize_text_field
+        from ..db.database import (
+            sanitize_text_field,
+            sanitize_arabic_unit_fields,
+            resolve_turn_speaker_labels,
+        )
     except Exception:
         sanitize_text_field = None
+        sanitize_arabic_unit_fields = None
+        resolve_turn_speaker_labels = None
 
 
 def _is_dialectical_payload_item(x: Any) -> bool:
@@ -150,49 +163,20 @@ def clean_llm_json_array(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Purges stray Cyrillic/Russian, CJK/Hangul tokens, or Latin-Arabic splices from generated Classical Arabic fields."""
-    replacements = [
-        ("따라서،", "لذلك،"), ("따라서", "لذلك"), ("여전히", "لا تزال"),
-        ("المiracles", "المعجزات"), ("فالمachines", "فالآلات"), ("كمessenger", "كرسول"),
-        ("للمonotheism", "للتوحيد"), ("السcribes", "النساخ"), ("للسcribes", "للنساخ"),
-        ("نihilist", "عدمي"), ("النihilists", "العدميون"), ("بprocesseات", "بعمليات"),
-        ("ت дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
-        ("дисквалифицируют его как совершенный божественный текст", "تسقط عنه صفة النص الإلهي الكامل المعصوم"),
-        ("педوفيليا", "البيدوفيليا (استغلال الأطفال)"),
-        ("والInstinctive", "والفطري"), ("الInstinctive", "الفطري"), ("Instinctive", "فطري"),
-        ("Instinct", "فطرة"), ("Reduced", "مختزلاً"), ("reduced", "مختزل"),
-        ("condemn", "يُدين"),
-        ("والincest", "وزنا المحارم"),
-        ("الincest", "زنا المحارم"),
-        ("incest", "زنا المحارم"),
-        ("two natures and two wills", "طبيعتين وإرادتين"),
-        ("two natures", "طبيعتين"),
-        ("two wills", "إرادتين"),
-        ("bikinis", "لباس البحر الفاضح"),
-        ("والpedophilia", "والبيدوفيليا (استغلال الأطفال)"),
-        ("الpedophilia", "البيدوفيليا (استغلال الأطفال)"),
-        ("pedophilia", "البيدوفيليا (استغلال الأطفال)"),
-        ("Hermeneutics", "علم التأويل"), ("Hagia Sophia", "آيا صوفيا"),
-        ("Muawiyah", "معاوية"), ("Hassan", "الحسن"), ("omnipresent", "محيط بكل مكان"),
-        ("SUBJX", "الفاعل"), ("rijal", "علم الرجال"),
-        ("。，？，。", "؟"),
-        ("。", "."),
-        ("，", "،"),
-        ("？", "؟"),
-        ("！", "!"),
-    ]
+    """Purges foreign scripts, Latin splices, and domain translation drift via canonical db.database cleaner."""
+    if not isinstance(item, dict):
+        return item
+    if sanitize_arabic_unit_fields is not None:
+        return sanitize_arabic_unit_fields(item)
+
+    _fallback_re = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+")
 
     def _clean_str(val: str) -> str:
         if sanitize_text_field is not None:
-            return sanitize_text_field(val, is_arabic=True)
-        for old_s, new_s in replacements:
-            if old_s in val:
-                val = val.replace(old_s, new_s)
-        # Strip remaining Cyrillic, CJK ideographs, Hangul, and CJK punctuation
-        val = re.sub(r"[\u0400-\u04ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+", "", val)
-        return val.strip()
+            val = sanitize_text_field(val, is_arabic=True)
+        return _fallback_re.sub("", val).strip()
 
-    for k in [
+    for k in (
         "question_ar",
         "core_answer_summary_ar",
         "fallacy_or_misconception_exposed_ar",
@@ -200,21 +184,18 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         "socratic_question_ar",
         "interlocutor_verbatim_quote_ar",
         "verbatim_quote_ar",
-    ]:
+    ):
         if isinstance(item.get(k), str) and item[k]:
             item[k] = _clean_str(item[k])
 
-    if isinstance(item.get("logical_premises_ar"), list):
-        item["logical_premises_ar"] = [_clean_str(str(p)) for p in item["logical_premises_ar"] if str(p).strip()]
+    for list_key in ("logical_premises_ar", "analogies_ar"):
+        if isinstance(item.get(list_key), list):
+            item[list_key] = [_clean_str(str(p)) for p in item[list_key] if _clean_str(str(p))]
 
     if isinstance(item.get("dialogue_exchange"), list):
-        cleaned_ex = []
         for ex in item["dialogue_exchange"]:
-            if isinstance(ex, dict):
-                if isinstance(ex.get("text_ar"), str):
-                    ex["text_ar"] = _clean_str(ex["text_ar"])
-                cleaned_ex.append(ex)
-        item["dialogue_exchange"] = cleaned_ex
+            if isinstance(ex, dict) and isinstance(ex.get("text_ar"), str) and ex["text_ar"]:
+                ex["text_ar"] = _clean_str(ex["text_ar"])
 
     return item
 
@@ -277,29 +258,246 @@ def canonicalize_topic_category(raw_category: str) -> str:
     return cat_clean
 
 
+CONFESSIONAL_EN_PATTERNS = [
+    (re.compile(r"^\s*why\s+do\s+i\s+oppose\s+islam\s+(?:if|when|though)\s+i\s+(?:haven't|have\s+not)\s+read\s+the\s+quran(?:\s+and\s+(?:only\s+)?have\s+a\s+superficial\s+understanding(?:\s+of\s+it)?)?[?.!]*$", re.I),
+     "Can one validly critique or oppose Islam without having examined the Quran beyond a superficial understanding?"),
+    (re.compile(r"^\s*why\s+do\s+i\s+hold\s+anti[- ]islamic\s+views\s+(?:if|when|though)\s+i\s+(?:haven't|have\s+not)\s+read\s+islamic\s+sources.*$", re.I),
+     "Is it intellectually justified to form anti-Islamic views based on indirect impressions without examining primary Islamic sources?"),
+    (re.compile(r"^\s*why\s+do\s+i\s+hold\s+anti[- ]islamic\s+views[?.!]*$", re.I),
+     "Is it intellectually justified to form anti-Islamic views without examining primary Islamic sources?"),
+    (re.compile(r"^\s*why\s+do\s+i\s+(?:oppose|hate|reject|criticize|critique)\s+islam\s+(?:if|when|without)\b.*$", re.I),
+     "Can one reasonably critique or reject Islam without direct knowledge of its primary sources?"),
+    (re.compile(r"^\s*why\s+do\s+i\s+oppose\s+islam[?.!]*$", re.I),
+     "What are the rational grounds on which critics challenge Islam?"),
+    (re.compile(r"^\s*why\s+do\s+i\s+", re.I),
+     "Why would someone "),
+    (re.compile(r"^\s*why\s+am\s+i\s+", re.I),
+     "Why would a seeker be "),
+    (re.compile(r"^\s*why\s+did\s+i\s+", re.I),
+     "Why would one "),
+    (re.compile(r"^\s*how\s+can\s+i\s+believe\s+if\s+i\s+", re.I),
+     "How can a seeker believe if they "),
+]
+
+CONFESSIONAL_AR_PATTERNS = [
+    (re.compile(r"^\s*لماذا\s+أعارض\s+الإسلام\s+(?:وأنا\s+لم|دون\s+أن|إذا\s+لم)\s+(?:أقرأ|أطلع\s+على)\s+القرآن(?:\s+وأملك\s+فهمًا\s+سطحيًا\s+له)?[؟?!.]*$"),
+     "هل يصح للمرء أن يعارض الإسلام دون الاطلاع على القرآن الكريم والاكتفاء بفهم سطحي له؟"),
+    (re.compile(r"^\s*لماذا\s+أحمل\s+(?:مشاعر|رؤية)\s+معادية\s+للإسلام\s+(?:رغم\s+أنني|وأنا)\s+لم\s+أقرأ\s+المصادر\s+الإسلامية.*$"),
+     "هل من العدل والإنصاف تبني رؤية معادية للإسلام استنادًا إلى انطباعات غير مباشرة دون قراءة مصادره الأصلية؟"),
+    (re.compile(r"^\s*لماذا\s+أحمل\s+(?:مشاعر|رؤية)\s+معادية\s+للإسلام[؟?!.]*$"),
+     "هل من العدل والإنصاف تكوين أحكام مسبقة عن الإسلام دون الرجوع إلى تعاليمه الصحيحة؟"),
+    (re.compile(r"^\s*لماذا\s+أعارض\s+الإسلام[؟?!.]*$"),
+     "ما هي المنطلقات التي يبني عليها المنتقدون اعتراضاتهم على الإسلام؟"),
+    (re.compile(r"^\s*لماذا\s+أعارض\s+"),
+     "هل يصح الاعتراض على "),
+    (re.compile(r"^\s*لماذا\s+أرفض\s+"),
+     "هل يسوغ رفض "),
+    (re.compile(r"^\s*لماذا\s+أحمل\s+"),
+     "هل من الإنصاف تبني "),
+]
+
+CONFESSIONAL_RESIDUAL_REGEX = re.compile(
+    r"(\b(?:why do i|why did i|why am i|how can i believe if i|if i haven't read|i only have a superficial)\b"
+    r"|لماذا\s+أعارض|لماذا\s+أحمل\s+(?:مشاعر|رؤية)|لماذا\s+أكره|رغم\s+أنني|بل\s+استندت|وأملك\s+فهمًا|وأنا\s+لم\s+أقرأ)",
+    re.IGNORECASE,
+)
+
+_EN_INTERROGATIVE_STARTERS = re.compile(
+    r"^(?:who|what|where|when|why|how|which|whose|whom|is|are|am|was|were|do|does|did|"
+    r"can|could|will|would|shall|should|may|might|has|have|had|if|isn't|aren't|wasn't|weren't|"
+    r"doesn't|don't|didn't|can't|couldn't|wouldn't|shouldn't|won't|haven't|hasn't|suppose|assuming)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_broken_interrogative_fragment(en: str, ar: str) -> bool:
+    if "..." in en or "…" in en or "..." in ar or "…" in ar:
+        return True
+    if re.search(r"\?\s+[a-z]", en) or re.search(r"؟\s+وأ[ا-ي]", ar):
+        return True
+    return False
+
+
+def normalize_question_syntax_and_perspective(q_en: str, q_ar: str = "") -> Tuple[str, str, bool]:
+    """
+    1st-Person Confessional Inversion & Syntax Validation Gatekeeper:
+    1. Converts awkward 1st-person confessions (e.g. 'Why do I oppose Islam...') into objective seeker inquiries.
+    2. Rejects truncated ellipsis fragments, un-rewritable confessional syntax, or pure raw statements lacking question form.
+    3. Enforces strict interrogative syntax: '?' for English and '؟' for Arabic.
+    4. Returns (normalized_q_en, normalized_q_ar, is_valid).
+    """
+    en = (q_en or "").strip()
+    ar = (q_ar or "").strip()
+
+    if not en and not ar:
+        return "", "", False
+
+    if _has_broken_interrogative_fragment(en, ar):
+        return en, ar, False
+
+    if en and "?" not in en and not _EN_INTERROGATIVE_STARTERS.match(en):
+        return en, ar, False
+
+    # 1. Normalize English confessional patterns
+    for pat, repl in CONFESSIONAL_EN_PATTERNS:
+        if pat.search(en):
+            en = pat.sub(repl, en).strip()
+            break
+
+    # 2. Normalize Arabic confessional patterns
+    for pat, repl in CONFESSIONAL_AR_PATTERNS:
+        if pat.search(ar):
+            ar = pat.sub(repl, ar).strip()
+            break
+
+    # 3. Check for any remaining confessional inversion or broken mid-sentence punctuation
+    if (
+        CONFESSIONAL_RESIDUAL_REGEX.search(en)
+        or CONFESSIONAL_RESIDUAL_REGEX.search(ar)
+        or _has_broken_interrogative_fragment(en, ar)
+    ):
+        return en, ar, False
+
+    # 4. Mandatory Interrogative Syntax Enforcement
+    if en:
+        en = re.sub(r'[\s.,:;!?؟]+$', '', en).strip()
+        if en:
+            en = f"{en}?"
+
+    if ar:
+        ar = re.sub(r'[\s.,:;!?؟]+$', '', ar).strip()
+        if ar:
+            ar = f"{ar}؟"
+
+    return en, ar, True
+
+
+def is_substantive_apologetics_window(
+    win_turns: List[Dict[str, Any]],
+    window_index: int,
+    total_windows: int,
+) -> Tuple[bool, str]:
+    """
+    Apologetic Semantic Pre-Filtering Gatekeeper:
+    Screens episode windows BEFORE LLM extraction to discard:
+      1. YouTube video outro promotional appeals & donation pitches (Card 44).
+      2. Street security incidents, police encounters & police dog petting (Cards 31, 35).
+      3. Casual street greetings / logistics without theological substance (Card 9).
+    Returns (is_substantive: bool, reason: str).
+    """
+    if not win_turns:
+        return False, "Empty turn list"
+
+    combined_text = " ".join((t.get("text_original") or "").lower() for t in win_turns)
+    total_words = len(combined_text.split())
+
+    if total_words < 25:
+        return False, f"Too short for dialectical exchange ({total_words} words)"
+
+    theological_markers = [
+        "god", "allah", "jesus", "christ", "bible", "quran", "prophet", "muhammad",
+        "trinity", "atheis", "creator", "creation", "first cause", "causality",
+        "sin", "atonement", "salvation", "afterlife", "resurrection", "evil",
+        "suffering", "morality", "objective moral", "proof", "miracle", "gospel",
+        "islam", "christian", "jewish", "faith", "belief", "testament", "scriptur",
+        "الله", "القرآن", "النبي", "المسيح", "عيسى", "الإسلام", "الإلحاد", "الخالق",
+        "السببية", "الثالوث", "الصلب", "الفداء", "الشر", "المعاناة", "الوحي", "النبوة"
+    ]
+    has_theological_context = any(m in combined_text for m in theological_markers)
+
+    # 1. Outro Promotional / Fundraising Screening
+    promo_keywords = [
+        "donate", "donation", "fundrais", "support our work", "support the dawah",
+        "islamnet", "link in the description", "subscribe to the channel",
+        "hit the bell", "patreon", "paypal", "gofundme", "merch", "leave a comment below"
+    ]
+    found_promo = [pk for pk in promo_keywords if pk in combined_text]
+    is_last_window = (window_index >= max(1, total_windows - 1))
+    strong_fundraising_markers = ("donate", "donation", "fundrais", "islamnet", "patreon", "paypal", "gofundme", "subscribe to the channel")
+    has_strong_fundraising = any(m in combined_text for m in strong_fundraising_markers)
+    deep_debate_markers = ("trinity", "crucif", "resurrection", "atheis", "first cause", "causality", "contradict", "manuscript", "historical")
+    has_deep_debate = any(m in combined_text for m in deep_debate_markers)
+    if len(found_promo) >= 2 or (is_last_window and len(found_promo) >= 1):
+        if not has_theological_context or (total_words < 120 and len(found_promo) >= 1) or (has_strong_fundraising and not has_deep_debate):
+            return False, f"Video outro promotional / fundraising appeal (matched: {', '.join(found_promo)})"
+
+    # 2. Police Encounter / Street Security Incident Screening
+    police_security_keywords = [
+        "call the police", "police officer", "officer", "constable", "patrol car",
+        "pet him", "what kind of a dog", "pet the dog", "good dog",
+        "brandish", "brandished", "firearm", "police come", "911 call",
+        "verbal dispute", "handcuff", "arrest", "security guard", "stay back"
+    ]
+    found_police = [pk for pk in police_security_keywords if pk in combined_text]
+    if len(found_police) >= 2 or any(k in combined_text for k in ["what kind of a dog", "pet him", "brandish", "911 call"]):
+        if not has_theological_context:
+            return False, f"Street security / police incident (matched: {', '.join(found_police)})"
+
+    # 3. Casual Street Banter Screening (Greetings / Photo requests only)
+    banter_phrases = [
+        "how are you doing", "what are you doing here", "nice to meet you",
+        "can i take a picture", "take a photo", "take a selfie", "nice weather",
+        "where are you from", "where do you live", "what is your name", "see you later"
+    ]
+    found_banter = [bp for bp in banter_phrases if bp in combined_text]
+    if len(found_banter) >= 2 and not has_theological_context:
+        return False, f"Casual street greeting / small talk without apologetics (matched: {', '.join(found_banter)})"
+
+    return True, "Substantive debate dialogue"
+
+
 def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
     """
     Enforces quality threshold: discards conversational noise, rhetorical filler,
     personal street interview chit-chat, situational street drama/police incidents,
-    or truncated sentence fragments.
+    video outro fundraising, or truncated sentence fragments.
     Allows concise, foundational theological questions (e.g. 'Is Jesus God?', 'Who created God?').
     """
-    q_en_clean = (q_en or "").strip().lower().rstrip("?").strip()
+    if not q_en and not q_ar:
+        return False
+
+    q_en_raw = (q_en or "").strip()
+    if _has_broken_interrogative_fragment(q_en_raw, q_ar or ""):
+        return False
+
+    if q_en_raw and "?" not in q_en_raw and not _EN_INTERROGATIVE_STARTERS.match(q_en_raw):
+        return False
+
+    q_en_clean = q_en_raw.lower().rstrip("?").strip()
     words_en = q_en_clean.split()
     if len(words_en) < 3:
         return False
 
+    # Reject Da'ee's own polemical cross-examination challenge phrased as the main question (role inversion)
+    if re.search(
+        r"\bshould\s+(?:god|he)\s+(?:love|approve(?:\s+of)?|reward)\s+a\s+(?:rapist|murderer|killer|liar|oppressor|hitler)\b",
+        q_en_clean,
+        re.IGNORECASE,
+    ):
+        return False
+
     # Discard non-theological situational street drama / police / security chatter
     street_drama_patterns = [
-        r"\bpolice\b", r"\bfirearm\b", r"\bweapon\b", r"\bbrandish\b", r"\bbrandishing\b",
-        r"\bto the t\b", r"\bpet him\b", r"\barrest\b", r"\bsecurity guard\b",
-        r"\bhandcuff\b", r"\bdispatch\b", r"\bpatrol car\b", r"\b911\b"
+        r"\bpolice\b", r"\bconstable\b", r"\bofficer\b", r"\bfirearm\b", r"\bweapon\b",
+        r"\bbrandish\b", r"\bbrandishing\b", r"\bto the t\b", r"\bpet him\b",
+        r"\bwhat kind of (a )?dog\b", r"\bpet the dog\b", r"\barrest\b",
+        r"\bsecurity guard\b", r"\bhandcuff\b", r"\bdispatch\b", r"\bpatrol car\b",
+        r"\b911\b", r"\bcall 911\b", r"\bverbal dispute\b"
     ]
     if any(re.search(pat, q_en_clean, re.I) for pat in street_drama_patterns):
         return False
 
-    # Discard awkward 1st-person confessional inversions (e.g., 'why do i oppose islam...')
-    if q_en_clean.startswith("why do i ") or q_en_clean.startswith("why am i "):
+    # Discard YouTube outro promotional / fundraising appeals
+    outro_patterns = [
+        r"\bdonate\b", r"\bdonation\b", r"\bfundrais\b", r"\bpatreon\b", r"\bpaypal\b",
+        r"\bgofundme\b", r"\bislamnet\b", r"\bsubscribe\b", r"\bchannel\b",
+        r"\blink in the description\b", r"\bsupport our (work|dawah)\b"
+    ]
+    if any(re.search(pat, q_en_clean, re.I) for pat in outro_patterns):
+        return False
+
+    # Discard unnormalized 1st-person confessional inversions
+    if CONFESSIONAL_RESIDUAL_REGEX.search(q_en) or CONFESSIONAL_RESIDUAL_REGEX.search(q_ar or ""):
         return False
 
     q_ar_clean = (q_ar or "").strip().rstrip("؟").strip()
@@ -313,7 +511,8 @@ def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
         "repeat that", "are you listening", "hello", "hi there", "is that so",
         "pardon me", "listen to me", "did you hear", "where were you shot",
         "how old are you", "where do you live", "can i take a picture",
-        "nice to meet you",
+        "nice to meet you", "take a photo", "take a picture", "take a selfie",
+        "pet the dog", "pet him", "good dog", "call 911", "call the police",
     }
     for tp in trivial_phrases_en:
         if q_en_clean.startswith(tp) or q_en_clean == tp:
@@ -322,7 +521,8 @@ def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
     trivial_phrases_ar = [
         "أين أصبت", "كم عمرك", "ما اسمك", "من أنت", "هل تسمعني",
         "ماذا قلت", "عفوا", "معذرة", "أهلا", "مرحبا", "أين تسكن",
-        "هل يمكن التقاط صورة", "تشرفنا", "الشرطة", "سلاح ناري"
+        "هل يمكن التقاط صورة", "تشرفنا", "الشرطة", "سلاح ناري",
+        "التبرع", "تبرع الآن", "اشترك في القناة", "رابط الوصف"
     ]
     for tp in trivial_phrases_ar:
         if q_ar_clean.startswith(tp) or q_ar_clean == tp:
@@ -470,6 +670,7 @@ def _pack_episode_window(win_num: int, ep_idx: int, win_turns: List[Dict[str, An
         "turn_count": len(win_turns),
         "word_count": sum(len((x.get("text_original") or "").split()) for x in win_turns),
         "formatted_transcript": "\n".join(lines),
+        "turns": win_turns,
     }
 
 
@@ -582,11 +783,21 @@ def anchor_and_enrich_extracted_unit(
     """
     Anchors LLM-extracted turn IDs and speaker identities directly against ground-truth
     cohesive turns and diarized Speaker records.
-    Returns None if the unit fails theological validation or attributes opponent bias.
+    Returns None if the unit fails theological validation, perspective integrity, or attributes opponent bias.
     """
     item = sanitize_arabic_fields(dict(raw_unit))
     vid = scenario["video_id"]
     yt_url = scenario.get("youtube_url") or f"https://www.youtube.com/watch?v={vid}"
+
+    # 1. Question Syntax & 1st-Person Confessional Normalization
+    raw_q_en = str(item.get("question_en") or "").strip()
+    raw_q_ar = str(item.get("question_ar") or "").strip()
+    norm_q_en, norm_q_ar, is_valid_perspective = normalize_question_syntax_and_perspective(raw_q_en, raw_q_ar)
+    if not is_valid_perspective or not is_valid_dialectical_question(norm_q_en, norm_q_ar):
+        return None
+    item["question_en"] = norm_q_en
+    if norm_q_ar:
+        item["question_ar"] = norm_q_ar
 
     if cohesive_turns is None:
         cohesive_turns = merge_consecutive_speaker_turns(scenario.get("turns", []))
@@ -658,6 +869,20 @@ def anchor_and_enrich_extracted_unit(
     ans_sec = int(a_turn["start_ms"] // 1000)
     daee_spk_id = a_turn.get("speaker_id", main_daee["speaker_id"] if main_daee else "")
 
+    # Speaker Role Integrity Guard: daee_speaker_id and interlocutor_speaker_id CANNOT be identical!
+    if daee_spk_id and inter_spk_id and daee_spk_id == inter_spk_id:
+        if q_turn and q_turn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+            inter_spk_id = ""
+        else:
+            distinct_inter = next(
+                (s["speaker_id"] for s in speakers
+                 if s["speaker_id"] != daee_spk_id and s.get("role") == "INTERLOCUTOR"),
+                ""
+            )
+            inter_spk_id = distinct_inter
+    if daee_spk_id and inter_spk_id and daee_spk_id == inter_spk_id:
+        inter_spk_id = ""
+
     matched_daee = next(
         (s for s in speakers if s["speaker_id"] == daee_spk_id and s.get("role") in ("MAIN_DAEE", "CO_DAEE")),
         main_daee
@@ -688,7 +913,6 @@ def anchor_and_enrich_extracted_unit(
     if not isinstance(raw_exchange, list):
         raw_exchange = []
 
-    # Collect ordered source turn IDs referenced in dialogue_exchange + q_tid + a_tid
     src_tids: List[str] = []
     for cand_id in [q_tid, a_tid] + [
         str(ex.get("turn_id") or "").strip()
@@ -705,22 +929,40 @@ def anchor_and_enrich_extracted_unit(
         etid = str(ex.get("turn_id") or "").strip()
         eturn = cohesive_turns_by_id.get(etid) or raw_turns_by_id.get(etid)
         role = ex.get("role") or (eturn.get("speaker_role") if eturn else "MAIN_DAEE")
-        is_daee = role in ("MAIN_DAEE", "CO_DAEE")
-        
-        fallback_spk_ar = daee_name_ar if is_daee else "المحاور"
-        fallback_spk_en = daee_name_en if is_daee else "Interlocutor"
+        if resolve_turn_speaker_labels is not None:
+            spk_label_en, spk_label_ar = resolve_turn_speaker_labels(role, eturn, daee_name_en, daee_name_ar)
+        else:
+            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+            turn_matches = (eturn is not None and (eturn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE")) == is_daee)
+            spk_label_en = ((eturn.get("speaker_label_en") if turn_matches else None) or (daee_name_en if is_daee else "Interlocutor"))
+            spk_label_ar = ((eturn.get("speaker_label_ar") if turn_matches else None) or (daee_name_ar if is_daee else "المحاور"))
 
         enriched_exchange.append({
             "turn_id": etid,
             "role": role,
-            "speaker_label_en": (eturn.get("speaker_label_en") if eturn else None) or fallback_spk_en,
-            "speaker_label_ar": (eturn.get("speaker_label_ar") if eturn else None) or fallback_spk_ar,
+            "speaker_label_en": spk_label_en,
+            "speaker_label_ar": spk_label_ar,
             "timestamp_seconds": int(eturn["start_ms"] // 1000) if eturn else ts_sec,
             "timestamp_formatted": eturn["start_fmt"] if eturn else ms_to_fmt(ts_sec * 1000),
             "move_type": ex.get("move_type", "Turn"),
             "text_en": ex.get("text_en") or (eturn.get("text_original") if eturn else ""),
             "text_ar": ex.get("text_ar") or (eturn.get("text_ar") if eturn else ""),
         })
+
+    # Dialogue Trajectory Role Integrity: Require distinct roles in multi-turn debate
+    if len(enriched_exchange) >= 2:
+        roles_in_ex = {ex.get("role") for ex in enriched_exchange if ex.get("role")}
+        if len(roles_in_ex) < 2 and inter_spk_id:
+            for ex in enriched_exchange:
+                mv = str(ex.get("move_type") or "").lower()
+                if any(k in mv for k in ["objection", "reaction", "clarification", "inquiry"]):
+                    ex["role"] = "INTERLOCUTOR"
+                    ex["speaker_label_en"] = "Interlocutor"
+                    ex["speaker_label_ar"] = "المحاور"
+                else:
+                    ex["role"] = "MAIN_DAEE"
+                    ex["speaker_label_en"] = daee_name_en
+                    ex["speaker_label_ar"] = daee_name_ar
 
     # Analogies: support multiple analogies list + single analogy field
     raw_an = item.get("analogies")
@@ -755,9 +997,59 @@ def anchor_and_enrich_extracted_unit(
     item["topic_category"] = canonical_cat
 
     # Architectural Acoustic Merge Wiring for Verbatim Quotes:
-    # Read from cohesive_turns instead of raw micro-turns, ensuring >= 8 words and no dangling prepositions.
     all_transcript = " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns])
+    all_transcript_lower = all_transcript.lower()
 
+    # Anti-Leakage Gate: Discard any card with prompt demonstration signatures not in transcript
+    prompt_leak_signatures = [
+        "whatever begins to exist has a cause", "train of freight carriages",
+        "train cannot move on its own", "train engine without wheels",
+        "soldier cannot fire his rifle", "soldier cannot pull the trigger",
+        "child being held down by doctors", "surgeon operating on an unknowing child",
+        "he is god in flesh. is he god or no", "lamp drawing current from a power plant",
+        "lamp drawing electric current", "power plant itself",
+        "surah at-tur 52:35-36", "mark 13:32",
+    ]
+    citation_text_parts = []
+    for c in clean_citations:
+        if isinstance(c, dict):
+            citation_text_parts.append(str(c.get("reference") or ""))
+            citation_text_parts.append(str(c.get("significance") or ""))
+    card_all_text = " ".join([
+        item.get("question_en", ""), item.get("core_answer_summary_en", ""),
+        item.get("analogy_or_metaphor", ""), item.get("socratic_question", ""),
+        item.get("verbatim_quote", ""), item.get("interlocutor_verbatim_quote", ""),
+        " ".join(str(x) for x in clean_analogies),
+        " ".join(str(x) for x in (item.get("logical_premises") or [])),
+        " ".join(citation_text_parts),
+    ]).lower()
+    for sig in prompt_leak_signatures:
+        if sig in card_all_text and sig not in all_transcript_lower:
+            return None
+
+    # Anti-Noise Gate: Discard cards referencing street incidents, dog petting, or promotional outro pitches
+    unconditional_noise_signatures = [
+        "pet him", "what kind of a dog", "pet the dog", "911 call",
+        "verbal dispute", "islamnet", "donate now", "link in the description",
+        "fundraising", "subscribe to the channel",
+    ]
+    for nsig in unconditional_noise_signatures:
+        if nsig in card_all_text:
+            return None
+
+    # Police/weapon chatter must not trigger on rhetorical theological analogies in core_answer_summary/analogies
+    spoken_and_q_text = " ".join([
+        item.get("question_en", ""),
+        item.get("verbatim_quote", ""),
+        item.get("interlocutor_verbatim_quote", ""),
+        " ".join(str(ex.get("text_en") or "") for ex in enriched_exchange),
+    ]).lower()
+    for nsig in ("call the police", "police officer", "brandish", "brandished", "firearm", "police come"):
+        if nsig in spoken_and_q_text:
+            return None
+
+    # Architectural Acoustic Merge Wiring for Verbatim Quotes:
+    # Read from cohesive_turns instead of raw micro-turns, ensuring >= 8 words and no dangling prepositions.
     raw_vq = (item.get("verbatim_quote") or "").strip()
     vq_words = [w for w in re.split(r'\s+', raw_vq) if w]
     has_dangling_vq = bool(vq_words and vq_words[-1].lower().rstrip(".,!?:;\"'؟،") in DANGLING_PREPOSITIONS_EN)
@@ -794,6 +1086,17 @@ def anchor_and_enrich_extracted_unit(
     elif raw_vq:
         item["verbatim_quote"] = clean_dangling_quote(raw_vq)
 
+    if not item.get("verbatim_quote_ar"):
+        for ex in enriched_exchange:
+            if str(ex.get("turn_id") or "") == str(a_tid) and ex.get("text_ar"):
+                item["verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
+                break
+        if not item.get("verbatim_quote_ar"):
+            for ex in enriched_exchange:
+                if ex.get("role") in ("MAIN_DAEE", "CO_DAEE") and ex.get("text_ar"):
+                    item["verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
+                    break
+
     raw_ivq = (item.get("interlocutor_verbatim_quote") or "").strip()
     ivq_words = [w for w in re.split(r'\s+', raw_ivq) if w]
     has_dangling_ivq = bool(ivq_words and ivq_words[-1].lower().rstrip(".,!?:;\"'؟،") in DANGLING_PREPOSITIONS_EN)
@@ -818,6 +1121,36 @@ def anchor_and_enrich_extracted_unit(
             item["interlocutor_verbatim_quote"] = clean_dangling_quote(raw_ivq)
     elif raw_ivq:
         item["interlocutor_verbatim_quote"] = clean_dangling_quote(raw_ivq)
+
+    if not item.get("interlocutor_verbatim_quote_ar"):
+        for ex in enriched_exchange:
+            if str(ex.get("turn_id") or "") == str(q_tid) and ex.get("text_ar"):
+                item["interlocutor_verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
+                break
+        if not item.get("interlocutor_verbatim_quote_ar"):
+            for ex in enriched_exchange:
+                if ex.get("role") == "INTERLOCUTOR" and ex.get("text_ar"):
+                    item["interlocutor_verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
+                    break
+
+    # Topical Grounding Guard: reject fleeting <=5-word remarks whose topic was never actually answered by the Da'ee
+    final_ivq_words = (item.get("interlocutor_verbatim_quote") or "").split()
+    if len(final_ivq_words) <= 5:
+        topic_stopwords = {
+            "what", "when", "where", "which", "that", "this", "with", "from", "about",
+            "does", "have", "their", "they", "would", "could", "should", "muslims",
+            "muslim", "islam", "islamic", "christian", "christians", "christianity",
+            "bible", "biblical", "quran", "allah", "god", "jesus", "prophet", "people",
+        }
+        q_content_tokens = set(re.findall(r"[a-z]{5,}", (item.get("question_en") or "").lower())) - topic_stopwords
+        if len(q_content_tokens) >= 2:
+            daee_spoken = " ".join(
+                [item.get("verbatim_quote", ""), str(a_turn.get("text_original") or "")]
+                + [str(ex.get("text_en") or "") for ex in enriched_exchange if ex.get("role") in ("MAIN_DAEE", "CO_DAEE")]
+            ).lower()
+            daee_tokens = set(re.findall(r"[a-z]{5,}", daee_spoken))
+            if not (q_content_tokens & daee_tokens):
+                return None
 
     item.update({
         "id": f"{vid}_{unit_seq_num:03d}",
@@ -1035,14 +1368,63 @@ def merge_round1_and_round2_units(
 
 
 def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
-    """Verifies that a Q&A dossier contains genuine Classical Arabic in question_ar and core_answer_summary_ar."""
+    """
+    Strict Transactional Barrier: Verifies that a Q&A dossier contains genuine Classical Arabic
+    in its core fields (question_ar, core_answer_summary_ar) and across all populated Arabic fields.
+    Rejects half-baked English-only cards where Round 2 failed, timed out, or produced empty Arabic fields.
+    """
     if not isinstance(unit, dict):
         return False
+
+    arabic_regex = re.compile(r"[\u0600-\u06ff]")
+    foreign_script_regex = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]")
+
+    def _is_clean_ar_str(val: str) -> bool:
+        return bool(val and arabic_regex.search(val) and not foreign_script_regex.search(val))
+
+    # 1. Core mandatory theological fields that MUST be present, contain Arabic script, and be free of foreign script
     q_ar = str(unit.get("question_ar") or "").strip()
     ans_ar = str(unit.get("core_answer_summary_ar") or "").strip()
-    if not q_ar or not ans_ar:
+    if not _is_clean_ar_str(q_ar) or not _is_clean_ar_str(ans_ar):
         return False
-    return bool(re.search(r"[\u0600-\u06ff]", q_ar) and re.search(r"[\u0600-\u06ff]", ans_ar))
+
+    # 2. Any populated Arabic scalar field must contain authentic Arabic script and no foreign script
+    for f in [
+        "fallacy_or_misconception_exposed_ar",
+        "analogy_or_metaphor_ar",
+        "socratic_question_ar",
+        "verbatim_quote_ar",
+        "interlocutor_verbatim_quote_ar",
+    ]:
+        val = str(unit.get(f) or "").strip()
+        if val and not _is_clean_ar_str(val):
+            return False
+
+    # 3. Populated Arabic premises / analogies must contain clean Arabic script
+    for list_field in ("logical_premises_ar", "analogies_ar"):
+        vals = unit.get(list_field)
+        if isinstance(vals, str):
+            try:
+                vals = json.loads(vals)
+            except Exception:
+                vals = [vals] if vals.strip() else []
+        if isinstance(vals, list) and vals:
+            if not all(isinstance(p, str) and _is_clean_ar_str(p) for p in vals):
+                return False
+
+    # 4. Populated Arabic text in scriptural_citations & dialogue_exchange must be free of foreign scripts
+    for cit in (unit.get("scriptural_citations") or []):
+        if isinstance(cit, dict):
+            sig_ar = str(cit.get("significance_ar") or "").strip()
+            if sig_ar and not _is_clean_ar_str(sig_ar):
+                return False
+    for ex in (unit.get("dialogue_exchange") or unit.get("dialogue_trajectory") or []):
+        if isinstance(ex, dict):
+            txt_ar = str(ex.get("text_ar") or "").strip()
+            if txt_ar and not _is_clean_ar_str(txt_ar):
+                return False
+
+    return True
 
 
 def _build_round2_transcript_excerpt(
@@ -1185,12 +1567,35 @@ class Stage2ScenarioExtractor:
             partial_file = self.workspace.partial_extractions_dir / f"{video_id}_win{w_idx:03d}.json"
             partial_en_file = self.workspace.partial_extractions_dir / f"{video_id}_win{w_idx:03d}.en.json"
 
+            # Pre-Extraction Gatekeeper: Screen window turns for substantive apologetics
+            win_turns = w.get("turns") or []
+            is_substantive, gate_reason = is_substantive_apologetics_window(
+                win_turns=win_turns,
+                window_index=w_idx,
+                total_windows=len(windows),
+            )
+            if not is_substantive:
+                if verbose:
+                    print(f"      [Gatekeeper Window {w_idx}] Skipping non-apologetic window: {gate_reason}", flush=True)
+                self.workspace.atomic_write_json(partial_file, [])
+                if partial_en_file.exists():
+                    try:
+                        partial_en_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                completed_win_ids.append(w_idx)
+                continue
+
             # 1. Micro-Step Resume: load already-completed episode window from Drive!
             stale_partial_en_units = None
             if partial_file.exists():
                 cached_win_units = self.workspace.read_json(partial_file, default=None)
                 if isinstance(cached_win_units, list):
-                    if not cached_win_units or all(has_valid_arabic_localization(cu) for cu in cached_win_units):
+                    if not cached_win_units:
+                        # Empty list means legitimately skipped window (e.g. noise or no questions)
+                        completed_win_ids.append(w_idx)
+                        continue
+                    elif all(has_valid_arabic_localization(cu) for cu in cached_win_units):
                         for cu in cached_win_units:
                             if not _is_duplicate_qa(cu, all_units):
                                 cu["id"] = f"{video_id}_{len(all_units) + 1:03d}"
@@ -1198,8 +1603,9 @@ class Stage2ScenarioExtractor:
                         completed_win_ids.append(w_idx)
                         continue
                     else:
-                        # Self-heal stale English-only partial window by treating it as Round 1 units for Round 2 Arabic localization!
+                        # Stale English-only partial window - purge corrupted partial file and treat as Round 1 units for Round 2 Arabic localization!
                         stale_partial_en_units = cached_win_units
+                        partial_file.unlink(missing_ok=True)
                         if verbose:
                             print(f"      [Window {w_idx}] Self-healing missing Arabic in cached partial window ({len(cached_win_units)} units)...", flush=True)
 
@@ -1345,27 +1751,50 @@ class Stage2ScenarioExtractor:
                     transcript_text=single_excerpt,
                     english_units_json=single_json_str,
                 )
-                t0_retry = time.time()
-                try:
-                    raw_retry = self.client.extract(single_prompt_r2, system_prompt=COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
-                except TypeError:
-                    if hasattr(self.client, "extract_round2_arabic"):
-                        raw_retry = self.client.extract_round2_arabic(single_json_str, single_prompt_r2)
-                    else:
-                        raw_retry = self.client.extract(single_prompt_r2)
-                elapsed_r2 = round(elapsed_r2 + (time.time() - t0_retry), 1)
-                parsed_retry = clean_llm_json_array(raw_retry)
-                if parsed_retry:
-                    merged_single = merge_round1_and_round2_units([merged_u], parsed_retry)[0]
-                    repaired_units.append(merged_single)
+
+                cur_candidate = merged_u
+                for retry_attempt in range(1, 4):
+                    t0_retry = time.time()
+                    try:
+                        if hasattr(self.client, "extract"):
+                            raw_retry = self.client.extract(single_prompt_r2, system_prompt=COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
+                        elif hasattr(self.client, "extract_round2_arabic"):
+                            raw_retry = self.client.extract_round2_arabic(single_json_str, single_prompt_r2)
+                        else:
+                            raw_retry = "[]"
+                    except TypeError:
+                        if hasattr(self.client, "extract_round2_arabic"):
+                            raw_retry = self.client.extract_round2_arabic(single_json_str, single_prompt_r2)
+                        elif hasattr(self.client, "extract"):
+                            raw_retry = self.client.extract(single_prompt_r2)
+                        else:
+                            raw_retry = "[]"
+                    except Exception:
+                        raw_retry = "[]"
+                    elapsed_r2 = round(elapsed_r2 + (time.time() - t0_retry), 1)
+                    parsed_retry = clean_llm_json_array(raw_retry)
+                    if parsed_retry:
+                        cur_candidate = merge_round1_and_round2_units([cur_candidate], parsed_retry)[0]
+                        if has_valid_arabic_localization(cur_candidate):
+                            break
+                    if verbose:
+                        print(f"      [Window {w_idx} Unit {idx_u+1}] Round 2 Arabic retry attempt {retry_attempt}/3...", flush=True)
+
+                if has_valid_arabic_localization(cur_candidate):
+                    repaired_units.append(cur_candidate)
                 else:
-                    repaired_units.append(merged_u)
+                    logger.warning(
+                        "Window %d unit %d dropped: failed complete Arabic localization after 3 attempts.",
+                        w_idx, idx_u + 1
+                    )
 
             final_raw_units = repaired_units
             elapsed = round(elapsed_r1 + elapsed_r2, 1)
 
             win_enriched: List[Dict[str, Any]] = []
             for raw_item in final_raw_units:
+                if not has_valid_arabic_localization(raw_item):
+                    continue
                 if not is_valid_dialectical_question(raw_item.get("question_en", ""), raw_item.get("question_ar", "")):
                     continue
                 enriched = anchor_and_enrich_extracted_unit(
@@ -1377,6 +1806,8 @@ class Stage2ScenarioExtractor:
                     cohesive_turns=cohesive_turns,
                 )
                 if enriched is None:
+                    continue
+                if not has_valid_arabic_localization(enriched):
                     continue
                 if not _is_duplicate_qa(enriched, all_units + win_enriched):
                     win_enriched.append(enriched)
@@ -1418,12 +1849,12 @@ class Stage2ScenarioExtractor:
         unlocalized = [u for u in all_units if not has_valid_arabic_localization(u)]
         if unlocalized:
             logger.error(
-                "Video %s cannot advance to M6_LLM_EXTRACTED: %d of %d cards lack valid Arabic localization!",
+                "Video %s transactional barrier breach: %d of %d cards lack complete Arabic localization! Aborting M6 commit.",
                 video_id, len(unlocalized), len(all_units)
             )
             if verbose:
-                print(f"\n   [ERROR] Video {video_id} has {len(unlocalized)}/{len(all_units)} unlocalized cards! Halting M6 commit.")
-            return []
+                print(f"\n   [TRANSACTIONAL BARRIER] Video {video_id} has {len(unlocalized)}/{len(all_units)} unlocalized cards! Halting M6 commit.")
+            return None
 
         # Re-number sequential IDs cleanly and write final immutable shard
         for idx, u in enumerate(all_units, start=1):
