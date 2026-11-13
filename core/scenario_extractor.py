@@ -19,6 +19,7 @@ Key V2 Advantages over V1 Subtitle Chunking:
 import os
 import re
 import json
+import math
 import time
 import shutil
 import logging
@@ -309,6 +310,67 @@ _EN_INTERROGATIVE_STARTERS = re.compile(
     re.IGNORECASE,
 )
 
+# Da'ee defensive rejoinder clauses (e.g. "If X, what is the problem with that?" / "فما هو المشكل في ذلك؟")
+_DAEE_DEFENSIVE_CLAUSE_EN = (
+    r"(?:"
+    r"what(?:'s|\s+is|\s+would\s+be)\s+(?:the\s+)?(?:problem|issue|harm|wrong|matter)\s+(?:with|about)\s+(?:that|this|it|doing\s+(?:so|that))"
+    r"|what(?:'s|\s+is)\s+wrong\s+with\s+(?:that|this|it|doing\s+(?:so|that))"
+    r"|why\s+(?:is|would)\s+(?:that|this|it)\s+(?:be\s+)?(?:a\s+problem|an\s+issue|wrong|bad|unfair|immoral|evil)"
+    r"|how\s+(?:is|could)\s+(?:that|this|it)\s+(?:be\s+)?(?:a\s+problem|wrong|bad|unfair|immoral|evil)"
+    r"|is\s+there\s+(?:any|a)\s+(?:problem|issue|harm|wrong)\s+(?:with|in)\s+(?:that|this|it)"
+    r")"
+)
+_DAEE_DEFENSIVE_TAIL_EN_RE = re.compile(
+    rf"^(?P<premise>.+?)(?:,\s*(?:then\s+)?(?:and\s+)?|\s*;\s*|\s*[—–]\s*|\s+(?:and|so)\s+)"
+    rf"(?P<tail>{_DAEE_DEFENSIVE_CLAUSE_EN})\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+_BARE_DAEE_DEFENSIVE_EN_RE = re.compile(
+    rf"^\s*(?:(?:so|and|then|well|okay)[,\s]+)*{_DAEE_DEFENSIVE_CLAUSE_EN}\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+_DAEE_DEFENSIVE_CLAUSE_AR = (
+    r"(?:"
+    r"(?:ما|أي)\s+(?:هو\s+)?(?:المشكل|المشكلة|الإشكال|العيب|الضير|الخطأ|البأس|المشكله)\s+(?:في|من|ب)\s*(?:ذلك|هذا|هذا\s+الأمر)"
+    r"|ما(?:ذا)?\s+(?:يعيب|يضير)\s+(?:ذلك|هذا|هذا\s+الأمر)"
+    r"|(?:لماذا|لم)\s+(?:يعد|يُعد|يكون|يعتبر|يُعتبر)\s+(?:ذلك|هذا)\s+(?:مشكلة|مشكلًا|إشكالًا|أمرًا\s+سيئًا|عيبًا|خطأً)"
+    r"|هل\s+(?:يوجد|هناك|في\s+(?:ذلك|هذا))\s+(?:أي\s+)?(?:مشكلة|إشكال|عيب|ضير|بأس)"
+    r")"
+)
+_DAEE_DEFENSIVE_TAIL_AR_RE = re.compile(
+    rf"^(?P<premise>.+?)(?:[،,;—–]\s*(?:ف|و|إذن\s+ف?)?|\s+(?:ف|و))"
+    rf"(?P<tail>{_DAEE_DEFENSIVE_CLAUSE_AR})\s*[؟?!.]*\s*$"
+)
+_BARE_DAEE_DEFENSIVE_AR_RE = re.compile(
+    rf"^\s*(?:ف|و)?{_DAEE_DEFENSIVE_CLAUSE_AR}\s*[؟?!.]*\s*$"
+)
+
+
+def _rewrite_daee_defensive_question(en: str, ar: str) -> Tuple[str, str, bool]:
+    """Converts Da'ee defensive comeback endings into genuine seeker objection syntax, or rejects bare rejoinders."""
+    if en:
+        if _BARE_DAEE_DEFENSIVE_EN_RE.match(en):
+            return en, ar, False
+        m_en = _DAEE_DEFENSIVE_TAIL_EN_RE.match(en)
+        if m_en:
+            premise = m_en.group("premise").strip(" ,;:-—–")
+            if len(premise.split()) < 4:
+                return en, ar, False
+            en = f"{premise}, isn't that a bad thing?"
+
+    if ar:
+        if _BARE_DAEE_DEFENSIVE_AR_RE.match(ar):
+            return en, ar, False
+        m_ar = _DAEE_DEFENSIVE_TAIL_AR_RE.match(ar)
+        if m_ar:
+            premise_ar = m_ar.group("premise").strip(" ،,;:-—–")
+            if len(premise_ar.split()) < 4:
+                return en, ar, False
+            ar = f"{premise_ar}، أليس ذلك أمرًا سيئًا؟"
+
+    return en, ar, True
+
 
 def _has_broken_interrogative_fragment(en: str, ar: str) -> bool:
     if "..." in en or "…" in en or "..." in ar or "…" in ar:
@@ -320,11 +382,13 @@ def _has_broken_interrogative_fragment(en: str, ar: str) -> bool:
 
 def normalize_question_syntax_and_perspective(q_en: str, q_ar: str = "") -> Tuple[str, str, bool]:
     """
-    1st-Person Confessional Inversion & Syntax Validation Gatekeeper:
+    1st-Person Confessional / Da'ee Counter-Ask Perspective & Syntax Validation Gatekeeper:
     1. Converts awkward 1st-person confessions (e.g. 'Why do I oppose Islam...') into objective seeker inquiries.
-    2. Rejects truncated ellipsis fragments, un-rewritable confessional syntax, or pure raw statements lacking question form.
-    3. Enforces strict interrogative syntax: '?' for English and '؟' for Arabic.
-    4. Returns (normalized_q_en, normalized_q_ar, is_valid).
+    2. Rewrites premise-backed Da'ee defensive rejoinders (e.g. '...what is the problem with that?') into seeker objections,
+       and rejects bare un-rewritable defensive filler ('What is the problem with that?').
+    3. Rejects truncated ellipsis fragments, un-rewritable confessional syntax, or pure raw statements lacking question form.
+    4. Enforces strict interrogative syntax: '?' for English and '؟' for Arabic.
+    5. Returns (normalized_q_en, normalized_q_ar, is_valid).
     """
     en = (q_en or "").strip()
     ar = (q_ar or "").strip()
@@ -350,7 +414,12 @@ def normalize_question_syntax_and_perspective(q_en: str, q_ar: str = "") -> Tupl
             ar = pat.sub(repl, ar).strip()
             break
 
-    # 3. Check for any remaining confessional inversion or broken mid-sentence punctuation
+    # 3. Rewrite Da'ee defensive comeback tails or reject bare defensive filler
+    en, ar, ok_rejoinder = _rewrite_daee_defensive_question(en, ar)
+    if not ok_rejoinder:
+        return en, ar, False
+
+    # 4. Check for any remaining confessional inversion or broken mid-sentence punctuation
     if (
         CONFESSIONAL_RESIDUAL_REGEX.search(en)
         or CONFESSIONAL_RESIDUAL_REGEX.search(ar)
@@ -358,7 +427,7 @@ def normalize_question_syntax_and_perspective(q_en: str, q_ar: str = "") -> Tupl
     ):
         return en, ar, False
 
-    # 4. Mandatory Interrogative Syntax Enforcement
+    # 5. Mandatory Interrogative Syntax Enforcement
     if en:
         en = re.sub(r'[\s.,:;!?؟]+$', '', en).strip()
         if en:
@@ -474,6 +543,10 @@ def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
         q_en_clean,
         re.IGNORECASE,
     ):
+        return False
+
+    # Reject bare un-rewritable Da'ee defensive rejoinders ("What is the problem with that?" / "فما المشكل في ذلك؟")
+    if (q_en_raw and _BARE_DAEE_DEFENSIVE_EN_RE.match(q_en_raw)) or (q_ar and _BARE_DAEE_DEFENSIVE_AR_RE.match(q_ar.strip())):
         return False
 
     # Discard non-theological situational street drama / police / security chatter
@@ -594,45 +667,187 @@ def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int
     return merged
 
 
+def compute_window_budget_for_context(context_length: int) -> Tuple[int, int]:
+    """
+    Returns (max_words_per_window, max_chars_per_window) tuned for Qwen 14B prompt + 6K-8K output headroom.
+    At 32,768 ctx, up to 7,500 raw words / 72,000 formatted chars (~19,500 tokens) keeps ~8,800 output tokens free.
+    """
+    ctx = int(context_length or 20480)
+    if ctx >= 30000:
+        return 7500, 72000
+    if ctx >= 26000:
+        return 6500, 62000
+    if ctx >= 22000:
+        return 5200, 49000
+    if ctx >= 19000:
+        return 4000, 38000
+    return 3400, 30000
+
+
+def _format_transcript_line(t: Dict[str, Any]) -> str:
+    tid = t.get("turn_id", "")
+    s_fmt = t.get("start_fmt", "00:00")
+    e_fmt = t.get("end_fmt", "00:00")
+    role = t.get("speaker_role", "INTERLOCUTOR")
+    label = t.get("speaker_label_en") or t.get("speaker_id", "Speaker")
+    flags = []
+    if role in ("MAIN_DAEE", "CO_DAEE"):
+        header_role = f"{role} ({label})"
+    elif role == "PEDESTRIAN":
+        header_role = "PEDESTRIAN | INTERRUPTION"
+    else:
+        header_role = label.upper()
+    if t.get("is_overlap"):
+        flags.append("OVERLAP")
+    flag_str = f" | {' '.join(flags)}" if flags else ""
+    return f"[{tid}] [{s_fmt} -> {e_fmt}] [{header_role}{flag_str}]: {t.get('text_original', '')}"
+
+
+def _pick_balanced_split_index(
+    cohesive_turns: List[Dict[str, Any]],
+    start: int,
+    hard_end: int,
+    cum_words: List[int],
+    cum_chars: List[int],
+    target_words: int,
+    target_chars: Optional[int],
+) -> int:
+    """Selects a split index in (start, hard_end] preferring episode transitions, then Da'ee turn endings."""
+    base_w = cum_words[start]
+    base_c = cum_chars[start]
+    best_ep_k = None
+    best_ep_dist = None
+    best_daee_k = None
+    best_daee_dist = None
+    closest_k = hard_end
+    closest_dist = None
+
+    for k in range(start + 1, hard_end + 1):
+        w_span = cum_words[k] - base_w
+        c_span = cum_chars[k] - base_c
+        w_ratio = w_span / max(1, target_words)
+        c_ratio = (c_span / max(1, target_chars)) if target_chars else w_ratio
+        progress = max(w_ratio, c_ratio)
+        dist = abs(progress - 1.0)
+
+        if progress >= 0.70 and (closest_dist is None or dist < closest_dist):
+            closest_k = k
+            closest_dist = dist
+
+        if k < len(cohesive_turns):
+            prev_t = cohesive_turns[k - 1]
+            curr_t = cohesive_turns[k]
+            if int(curr_t.get("episode_index", 1)) != int(prev_t.get("episode_index", 1)):
+                if progress >= 0.55 and (best_ep_dist is None or dist < best_ep_dist):
+                    best_ep_k = k
+                    best_ep_dist = dist
+            elif prev_t.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+                if progress >= 0.70 and (best_daee_dist is None or dist < best_daee_dist):
+                    best_daee_k = k
+                    best_daee_dist = dist
+
+    return best_ep_k or best_daee_k or closest_k
+
+
 def build_episode_windows(
     turns: List[Dict[str, Any]],
     max_words_per_window: int = 3400,
     context_carry_turns: int = 4,
+    merge_episodes: bool = False,
+    max_chars_per_window: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Groups ScenarioTurns by `episode_index` (interlocutor encounter).
-    Pre-merges rapid consecutive turns to maintain coherent argumentation units.
-    If a single debate episode exceeds `max_words_per_window` (~20-25 minutes of continuous speech),
-    splits cleanly at a MAIN_DAEE turn completion and carries 4 context turns forward to preserve dialectical context.
+    Packs ScenarioTurns into LLM context windows after merging rapid same-speaker micro-turns.
+    - When `merge_episodes=False` (legacy default): groups strictly by `episode_index`.
+    - When `merge_episodes=True`: merges the full conversation across `episode_index` boundaries into
+      one unified window whenever it fits within `(max_words_per_window, max_chars_per_window)`, and
+      splits oversized transcripts into balanced windows preferring episode or MAIN_DAEE boundaries.
     """
     if not turns:
         return []
 
-    # Pre-merge rapid micro-turns by the same speaker
     cohesive_turns = merge_consecutive_speaker_turns(turns)
+    if not cohesive_turns:
+        return []
+
+    if merge_episodes:
+        n_turns = len(cohesive_turns)
+        cum_words = [0] * (n_turns + 1)
+        cum_chars = [0] * (n_turns + 1)
+        for i, ct in enumerate(cohesive_turns):
+            cum_words[i + 1] = cum_words[i] + len((ct.get("text_original") or "").split())
+            cum_chars[i + 1] = cum_chars[i] + len(_format_transcript_line(ct)) + 1
+
+        total_words = cum_words[n_turns]
+        total_chars = cum_chars[n_turns]
+        if total_words <= max_words_per_window and (max_chars_per_window is None or total_chars <= max_chars_per_window):
+            return [_pack_episode_window(1, int(cohesive_turns[0].get("episode_index", 1)), cohesive_turns)]
+
+        n_chunks_w = math.ceil(total_words / max(1, max_words_per_window))
+        n_chunks_c = math.ceil(total_chars / max(1, max_chars_per_window)) if max_chars_per_window else 1
+        n_chunks = max(2, n_chunks_w, n_chunks_c)
+        target_words = max(1, math.ceil(total_words / n_chunks))
+        target_chars = math.ceil(total_chars / n_chunks) if max_chars_per_window else None
+
+        windows: List[Dict[str, Any]] = []
+        start = 0
+        while start < n_turns:
+            hard_end = start + 1
+            while hard_end < n_turns:
+                next_w = cum_words[hard_end + 1] - cum_words[start]
+                next_c = cum_chars[hard_end + 1] - cum_chars[start]
+                if next_w > max_words_per_window:
+                    break
+                if max_chars_per_window is not None and next_c > max_chars_per_window:
+                    break
+                hard_end += 1
+
+            if hard_end >= n_turns:
+                batch = cohesive_turns[start:]
+                windows.append(_pack_episode_window(len(windows) + 1, int(batch[0].get("episode_index", 1)), batch))
+                break
+
+            split_idx = _pick_balanced_split_index(
+                cohesive_turns, start, hard_end, cum_words, cum_chars, target_words, target_chars
+            )
+            batch = cohesive_turns[start:split_idx]
+            windows.append(_pack_episode_window(len(windows) + 1, int(batch[0].get("episode_index", 1)), batch))
+
+            same_episode = int(cohesive_turns[split_idx].get("episode_index", 1)) == int(
+                cohesive_turns[split_idx - 1].get("episode_index", 1)
+            )
+            carry = min(context_carry_turns, len(batch) - 1) if (same_episode and context_carry_turns > 0) else 0
+            start = max(start + 1, split_idx - carry)
+
+        return windows
 
     by_ep: Dict[int, List[Dict[str, Any]]] = {}
     for t in cohesive_turns:
         ep = int(t.get("episode_index", 1))
         by_ep.setdefault(ep, []).append(t)
 
-    windows: List[Dict[str, Any]] = []
+    windows = []
     for ep_idx in sorted(by_ep.keys()):
         ep_turns = by_ep[ep_idx]
         cur_batch: List[Dict[str, Any]] = []
         cur_words = 0
+        cur_chars = 0
 
-        for i, t in enumerate(ep_turns):
+        for t in ep_turns:
             w_cnt = len((t.get("text_original") or "").split())
-            if cur_batch and (cur_words + w_cnt) > max_words_per_window:
-                # Prefer splitting right after a MAIN_DAEE turn finishes
+            c_cnt = len(_format_transcript_line(t)) + 1
+            exceeds_w = (cur_words + w_cnt) > max_words_per_window
+            exceeds_c = max_chars_per_window is not None and (cur_chars + c_cnt) > max_chars_per_window
+            if cur_batch and (exceeds_w or exceeds_c):
                 windows.append(_pack_episode_window(len(windows) + 1, ep_idx, cur_batch))
                 carry = cur_batch[-context_carry_turns:] if context_carry_turns > 0 else []
                 cur_batch = list(carry) + [t]
                 cur_words = sum(len((x.get("text_original") or "").split()) for x in cur_batch)
+                cur_chars = sum(len(_format_transcript_line(x)) + 1 for x in cur_batch)
             else:
                 cur_batch.append(t)
                 cur_words += w_cnt
+                cur_chars += c_cnt
 
         if cur_batch:
             windows.append(_pack_episode_window(len(windows) + 1, ep_idx, cur_batch))
@@ -641,24 +856,7 @@ def build_episode_windows(
 
 
 def _pack_episode_window(win_num: int, ep_idx: int, win_turns: List[Dict[str, Any]]) -> Dict[str, Any]:
-    lines = []
-    for t in win_turns:
-        tid = t.get("turn_id", "")
-        s_fmt = t.get("start_fmt", "00:00")
-        e_fmt = t.get("end_fmt", "00:00")
-        role = t.get("speaker_role", "INTERLOCUTOR")
-        label = t.get("speaker_label_en") or t.get("speaker_id", "Speaker")
-        flags = []
-        if role in ("MAIN_DAEE", "CO_DAEE"):
-            header_role = f"{role} ({label})"
-        elif role == "PEDESTRIAN":
-            header_role = "PEDESTRIAN | INTERRUPTION"
-        else:
-            header_role = label.upper()
-        if t.get("is_overlap"):
-            flags.append("OVERLAP")
-        flag_str = f" | {' '.join(flags)}" if flags else ""
-        lines.append(f"[{tid}] [{s_fmt} -> {e_fmt}] [{header_role}{flag_str}]: {t.get('text_original', '')}")
+    lines = [_format_transcript_line(t) for t in win_turns]
 
     return {
         "window_index": win_num,
@@ -1152,6 +1350,12 @@ def anchor_and_enrich_extracted_unit(
             if not (q_content_tokens & daee_tokens):
                 return None
 
+    resolved_episode_index = int(
+        (q_turn.get("episode_index") if q_turn else None)
+        or (a_turn.get("episode_index") if a_turn else None)
+        or episode_index
+    )
+
     item.update({
         "id": f"{vid}_{unit_seq_num:03d}",
         "video_id": vid,
@@ -1163,7 +1367,7 @@ def anchor_and_enrich_extracted_unit(
         "timestamp_url": f"{yt_url}&t={ts_sec}s",
         "answer_timestamp_seconds": ans_sec,
         "answer_timestamp_formatted": ms_to_fmt(ans_sec * 1000),
-        "episode_index": episode_index,
+        "episode_index": resolved_episode_index,
         "daee_speaker_id": daee_spk_id,
         "daee_profile_id": daee_profile_id,
         "daee_name_en": daee_name_en,
@@ -1533,19 +1737,17 @@ class Stage2ScenarioExtractor:
             return []
 
         cohesive_turns = merge_consecutive_speaker_turns(turns)
-        # Dynamically scale episode window capacity with active LLM context window:
-        # - At 32K ctx: up to 5,500 words (~35-45 min debates fit into 1 single window!)
-        # - At 28K ctx: up to 4,800 words (~30 min debates)
-        # - At 20K ctx: up to 3,800 words
-        # - At 14K ctx: 3,400 words
+        # Dynamically scale unified full-conversation window capacity with active LLM context length:
+        # At 32K ctx (7,500 words / 72,000 chars), >99% of full debates fit into 1 single context window.
         act_ctx = getattr(self.client, "context_length", getattr(self, "context_length", 20480))
-        if act_ctx >= 30000:
-            dyn_win_words = 5500
-        elif act_ctx >= 26000:
-            dyn_win_words = 4800
-        else:
-            dyn_win_words = 3400
-        windows = build_episode_windows(turns, max_words_per_window=dyn_win_words, context_carry_turns=4)
+        dyn_win_words, dyn_win_chars = compute_window_budget_for_context(act_ctx)
+        windows = build_episode_windows(
+            turns,
+            max_words_per_window=dyn_win_words,
+            context_carry_turns=4,
+            merge_episodes=True,
+            max_chars_per_window=dyn_win_chars,
+        )
         speakers_summary = ", ".join(
             f"{s['speaker_id']}={s['role']}({s['display_name_en']})"
             for s in scenario.get("speakers", [])
@@ -1695,10 +1897,19 @@ class Stage2ScenarioExtractor:
                 elapsed_r1 = round(time.time() - t0_r1, 1)
 
                 parsed_r1 = clean_llm_json_array(raw_out_r1)
-                r1_units = [
-                    u for u in parsed_r1
-                    if is_valid_dialectical_question(u.get("question_en", ""), u.get("question_ar", ""))
-                ]
+                r1_units = []
+                for u in parsed_r1:
+                    if not isinstance(u, dict):
+                        continue
+                    norm_en, norm_ar, ok_persp = normalize_question_syntax_and_perspective(
+                        u.get("question_en", ""), u.get("question_ar", "")
+                    )
+                    if ok_persp and is_valid_dialectical_question(norm_en, norm_ar):
+                        u_clean = dict(u)
+                        u_clean["question_en"] = norm_en
+                        if norm_ar:
+                            u_clean["question_ar"] = norm_ar
+                        r1_units.append(u_clean)
                 self.workspace.atomic_write_json(partial_en_file, r1_units)
 
             if not r1_units:
@@ -1707,28 +1918,34 @@ class Stage2ScenarioExtractor:
                 continue
 
             # 3. Round 2: Bilingual Theological Verification & Classical Arabic Translation
-            r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_units, max_words=1800)
-            r1_json_str = json.dumps(r1_units, ensure_ascii=False, indent=2)
-            prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
-                title_ar=scenario.get("title_ar", ""),
-                youtube_url=scenario.get("youtube_url", ""),
-                episode_index=w["episode_index"],
-                start_fmt=w["start_fmt"],
-                end_fmt=w["end_fmt"],
-                target_daee_name=target_name,
-                target_daee_id=target_id,
-                transcript_text=r2_excerpt,
-                english_units_json=r1_json_str,
-            )
-            t0_r2 = time.time()
-            if hasattr(self.client, "extract_round2_arabic"):
-                raw_out_r2 = self.client.extract_round2_arabic(r1_json_str, prompt_r2)
-            else:
-                raw_out_r2 = self.client.extract(prompt_r2, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
-            elapsed_r2 = round(time.time() - t0_r2, 1)
+            # Sub-batch groups of up to 3 units when a full-conversation window yields >3 cards to avoid output truncation.
+            r2_batch_size = 3
+            final_raw_units: List[Dict[str, Any]] = []
+            elapsed_r2 = 0.0
+            for b_start in range(0, len(r1_units), r2_batch_size):
+                r1_batch = r1_units[b_start:b_start + r2_batch_size]
+                r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_batch, max_words=1800)
+                r1_json_str = json.dumps(r1_batch, ensure_ascii=False, indent=2)
+                prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
+                    title_ar=scenario.get("title_ar", ""),
+                    youtube_url=scenario.get("youtube_url", ""),
+                    episode_index=w["episode_index"],
+                    start_fmt=w["start_fmt"],
+                    end_fmt=w["end_fmt"],
+                    target_daee_name=target_name,
+                    target_daee_id=target_id,
+                    transcript_text=r2_excerpt,
+                    english_units_json=r1_json_str,
+                )
+                t0_r2 = time.time()
+                if hasattr(self.client, "extract_round2_arabic"):
+                    raw_out_r2 = self.client.extract_round2_arabic(r1_json_str, prompt_r2)
+                else:
+                    raw_out_r2 = self.client.extract(prompt_r2, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
+                elapsed_r2 = round(elapsed_r2 + (time.time() - t0_r2), 1)
 
-            parsed_r2 = clean_llm_json_array(raw_out_r2)
-            final_raw_units = merge_round1_and_round2_units(r1_units, parsed_r2)
+                parsed_r2 = clean_llm_json_array(raw_out_r2)
+                final_raw_units.extend(merge_round1_and_round2_units(r1_batch, parsed_r2))
 
             # 3B. Per-Unit Targeted Arabic Retry if batch Round 2 truncated or missed any unit's Arabic fields
             repaired_units: List[Dict[str, Any]] = []

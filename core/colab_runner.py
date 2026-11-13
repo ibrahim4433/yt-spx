@@ -805,8 +805,9 @@ class LocalGPUClient:
                 ]
                 avail = max(1024, self.context_length - int(len(user_content.split()) * 2.2) - safety_margin)
 
-            # Ensure effective_max_tokens respects the remaining context without trimming critical metadata
-            effective_max_tokens = max(512, min(self.max_new_tokens, avail))
+            # Ensure effective_max_tokens scales up cleanly on 32K context while respecting remaining headroom
+            max_gen_cap = max(self.max_new_tokens, 8192) if self.context_length >= 28000 else self.max_new_tokens
+            effective_max_tokens = max(512, min(max_gen_cap, avail))
 
             try:
                 res = self.llm.create_chat_completion(

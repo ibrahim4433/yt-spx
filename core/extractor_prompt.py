@@ -31,6 +31,10 @@ When a person enters the website with a doubt or misconception, they will search
 CRITICAL RULE 1: PERSPECTIVE OF THE QUESTION (صياغة السؤال من وجهة نظر السائل أو صاحب الشبهة)
 - The question ("question_en", "question_ar") MUST ALWAYS be formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
 - It represents the FALSE CLAIM, OBJECTION, QUESTION or MISCONCEPTION they bring to the table (e.g. "Isn't Jesus God in the flesh according to the Bible?", "Why does God allow innocent children to suffer?", "If everything needs a creator, who created God?").
+- SEEKER-INTENT POLARITY CHECK (اختبار صدور السؤال عن مستشكل حقيقي لا عن الداعية):
+  * Before finalizing "question_en"/"question_ar", ask yourself: "Would a non-Muslim skeptic or sincere seeker genuinely ask THIS exact sentence to challenge or inquire about Islam?"
+  * STRICT BAN ON DA'EE DEFENSIVE REJOINDERS: NEVER copy or splice the Da'ee's defensive comeback (e.g. "... what is the problem with that?", "... what's wrong with that?", "... why would that be an issue?", "فما المشكل في ذلك؟") onto a claim as "question_en"/"question_ar"! That is the Da'ee defending Islam, NOT the seeker objecting! Invert it to the skeptic's actual objection (e.g. "If [Premise X], isn't that a bad thing / unfair / problematic?", "، أليس ذلك أمرًا سيئًا أو إشكالًا؟").
+  * STRICT BAN ON DA'EE OFFENSIVE CROSS-EXAMINATIONS IN "question_en": Do NOT put the Da'ee's attacking questions against the opponent's scripture or worldview into "question_en" (move them to "socratic_question"). Express the opponent's underlying belief or defense as "question_en".
 - STRICT PROHIBITION ON 1ST-PERSON CONFESSIONAL INVERSIONS (حظر صياغة الاعترافات الشخصية بضمير المتكلم):
   * NEVER formulate the question as an awkward 1st-person confession or debate concession!
   * (e.g., NEVER write: "Why do I hold anti-Islamic views if I haven't read the Quran?" or "Why do I oppose Islam?").
@@ -74,10 +78,13 @@ CRITICAL RULE 6: ZERO FOREIGN SCRIPT LEAKAGE (حظر تسرب الحروف ال�
 - NEVER output Russian Cyrillic words (e.g. "педوفيليا") or Chinese CJK punctuation (e.g. "。，？") in Arabic fields under any circumstance! Always use authentic Arabic equivalents (e.g. "البيدوفيليا / استغلال الأطفال").
 - NEVER leak English or Latin words (e.g. "Instinctive", "condemn", "Cause", "First Cause", "nature", "natures", "will", "wills", "two", "dependence", "existence") inside Arabic text. Always translate them into proper Classical Arabic ("فطري", "يُدين", "سبب أول / علة أولى", "طبيعة", "طبائع", "إرادة", "إرادات", "اثنين / طبيعتين", "افتقار واحتياج", "وجود").
 
-CRITICAL RULE 7: SOCRATIC CROSS-EXAMINATIONS & STRICT DA'EE ATTRIBUTION (حظر الخلط عند هجوم الداعية بالسؤال السقراطي)
-- In street debates, the Muslim Da'ee often takes the intellectual offensive by asking the interlocutor probing Socratic questions (e.g., "Who is the lamb of God?", "Can God die?", "Who died on the cross?").
-- DO NOT CONFUSE THE DA'EE'S COUNTER-QUESTION WITH THE SKEPTIC'S OBJECTION!
-- The card's question MUST reflect the false dogma or doubt being refuted (e.g., "Isn't Jesus the sacrifice and the lamb of God sitting on the throne in Revelation?", "Did God die on the cross for our sins?").
+CRITICAL RULE 7: SOCRATIC CROSS-EXAMINATIONS, DEFENSIVE REJOINDERS & STRICT DA'EE ATTRIBUTION (حظر الخلط بين سؤال الداعية وشبهة المستشكل)
+- In street debates, the Muslim Da'ee both:
+  (a) Plays defense by answering a skeptic's premise with a defensive rejoinder (e.g. "So if [X], what is the problem with that?" / "What's wrong with that?" / "Why is that bad?"), AND
+  (b) Plays offense by asking the interlocutor probing Socratic questions against the opponent's worldview (e.g., "Who is the lamb of God?", "Can God die?", "If [Figure X] is subordinate to God, can he still be God?").
+- DO NOT PUT EITHER TYPE OF DA'EE QUESTION INTO "question_en" / "question_ar"!
+  * Defensive rejoinder: A seeker asks WHY it IS a bad thing/problem ("If [Claim X], isn't that problematic / unfair / a bad thing?"), NEVER "what is the problem with that?". Put any Da'ee comeback in "socratic_question" or "core_answer_summary", NEVER in "question_en".
+  * Offensive cross-examination: The card's question MUST reflect the false dogma or doubt being refuted (e.g., "Isn't Jesus the sacrifice and the lamb of God sitting on the throne in Revelation?", "Isn't Jesus still fully God despite statements of subordination?", "Did God die on the cross for our sins?"). Put the Da'ee's counter-question in "socratic_question".
 - `answer_turn_id` MUST ALWAYS be a turn spoken by the Muslim Da'ee ([MAIN_DAEE] or [CO_DAEE]), NEVER by an interlocutor!
 - The interlocutor is the debate opponent and CAN NEVER be assigned as the Da'ee (`daee_speaker_id`).
 - When the Da'ee asks a Socratic question and the interlocutor reacts or answers with their dogma, the interlocutor's reaction is NOT the answer! The answer MUST be the Da'ee's Islamic proof and refutation.
@@ -310,11 +317,16 @@ TRANSCRIPT STRUCTURE:
 - [MONOLOGUE / INTRO / AUDIENCE Q&A]: Turns where the Da'ee speaks solo—introducing a topic, explaining theological proofs, addressing live comments/chat questions, or anticipating objections.
 
 CRITICAL RULES FOR ROUND 1:
-1. SEEKER / INTERLOCUTOR PERSPECTIVE & SYNTAX FOR QUESTION:
-   - "question_en" MUST ALWAYS be a complete, grammatical interrogative (ending with '?') formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC!
+1. SEEKER / INTERLOCUTOR PERSPECTIVE & POLARITY CHECK FOR QUESTION (STRICT):
+   - "question_en" MUST ALWAYS be a complete, grammatical interrogative (ending with '?') formulated from the perspective of the INTERLOCUTOR / SEEKER / SKEPTIC challenging or inquiring about Islam!
    - It represents the objection, misconception, or philosophical doubt they raise (e.g. "If God is all-powerful, why does suffering exist?", "How do Muslims view the divinity of Jesus?", "Why does the universe require a creator?").
+   - APPLY THE SEEKER-INTENT POLARITY TEST: Ask "Would a non-Muslim critic or sincere seeker actually ask this exact question?"
+     * STRICT BAN ON DA'EE DEFENSIVE REJOINDERS: In debates, when a skeptic implies [Premise X] is objectionable and the Da'ee replies "What is the problem with that?" or "What's wrong with that?", NEVER splice the Da'ee's defensive comeback into "question_en"!
+       - BAD (Da'ee counter-ask): "If [Islamic Premise X] holds, what is the problem with that?" / "... what's wrong with that?" / "... why would that be bad?"
+       - GOOD (Seeker objection): "If [Islamic Premise X] holds, isn't that a bad thing / unfair / problematic?" or "Why does Islam allow [Premise X]?"
+     * STRICT BAN ON DA'EE OFFENSIVE CROSS-EXAMINATIONS IN "question_en": When the Da'ee attacks the opponent's worldview (e.g. "If [Figure X] is subordinate to the Father, can he still be God?" or "Should God love a rapist...?"), NEVER put the Da'ee's challenge in "question_en" — put it in "socratic_question", and formulate "question_en" around the interlocutor's claim or doubt (e.g. "Can [Figure X] still be fully divine even while praying or submitting to the Father?").
    - NEVER formulate "question_en" as a 1st-person self-incriminating confession ("Why do I oppose Islam if I haven't read the Quran?", "Why do I hold anti-Islamic views..."). Reframe it into objective inquiry ("Can someone validly critique Islam without reading its primary texts?").
-   - NEVER copy raw declarative ASR sentences ("You believe that..."), incomplete ellipses ("..."), or the Da'ee's own polemical challenge questions ("Should God love a rapist...?" — those belong in "socratic_question", never in "question_en").
+   - NEVER copy raw declarative ASR sentences ("You believe that..."), incomplete ellipses ("..."), or fragmented mid-sentence chatter.
    - NEVER extract a fleeting greeting or passing remark (<6 words) unless the Da'ee explicitly debates and answers that exact point in the immediately following turns.
 
 2. DIRECT, DEEP INTELLECTUAL TRUTH (150-250 WORDS):
@@ -501,7 +513,7 @@ Target Da'ee: {target_daee_name} ({target_daee_id}) — All answer fields MUST r
 DIARIZED SCENARIO TRANSCRIPT:
 {transcript_text}
 
-Extract every substantive objection, misconception, seeker inquiry, or anticipated question into authoritative Pure-English Apologetics Dossiers adhering strictly to the Round 1 schema (including deep answer 150-250 words, logical premises, analogies, scriptural citations, and 6-12 turn dialogue exchange). Output strictly a valid JSON array: [ {{ ... }} ]
+Extract every substantive objection, misconception, seeker inquiry, or anticipated question into authoritative Pure-English Apologetics Dossiers adhering strictly to the Round 1 schema (including deep answer 150-250 words, logical premises, analogies, scriptural citations, and 6-12 turn dialogue exchange). Ensure "question_en" always reflects the seeker's genuine objection or doubt (never the Da'ee's defensive "what is the problem with that?" or Socratic counter-attack). Do NOT emit <think> blocks. Output strictly a valid JSON array: [ {{ ... }} ] /no_think
 """
 
 
@@ -526,7 +538,7 @@ CORE TASKS:
 
 2. CLASSICAL ARABIC LOCALIZATION (فصحى أصيلة جليلة):
    - Translate all fields into pure, eloquent, grammatically authoritative Classical Arabic:
-     * "question_ar": Formulated from the perspective of the seeker/interlocutor in clear Arabic ending with '؟'.
+     * "question_ar": Formulated STRICTLY from the perspective of the seeker/skeptic raising the objection or doubt in clear Classical Arabic ending with '؟'. NEVER phrase "question_ar" as a defensive Da'ee rejoinder (NEVER end with "فما المشكل في ذلك؟" or "ما العيب في ذلك؟" or "لماذا يعد ذلك مشكلة؟" — if the English question slipped into Da'ee rejoinder framing, invert "question_ar" into the skeptic's objection such as "، أليس في ذلك إشكال؟" or "، أليس ذلك أمرًا سيئًا؟") and NEVER phrase it as the Da'ee's attacking question against the opponent's scripture.
      * "topic_category_ar": The standard Classical Arabic title for the domain.
      * "core_answer_summary_ar": A decisive, eloquent Islamic refutation and explanation (NO 3rd-person meta-narrative like "يرد الداعية بكذا").
      * "logical_premises_ar": Array of three deductive steps (المقدمة الأولى، المقدمة الثانية، النتيجة).
@@ -647,8 +659,8 @@ MANDATORY GLOSSARY:
 - "Taoism" -> "الطاوية" (NEVER translate as الطائفة!).
 - Biblical names: Paul -> "بولس" (NEVER بول!), Matthew -> "متى" (NEVER ماتيو!), Mark -> "مرقس", Luke -> "لوقا", John -> "يوحنا", Peter -> "بطرس", James -> "يعقوب".
 - "Jews" -> "اليهود" (NEVER Hebrew characters!).
-For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating ALL 8 Arabic fields:
-- `question_ar` (ending with '؟'), `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
+For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating ALL Arabic fields:
+- `question_ar` (from seeker/skeptic perspective ending with '؟' — NEVER a Da'ee defensive comeback like "فما المشكل في ذلك؟"), `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
 - `logical_premises_ar` (array of exactly 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
 - `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar` (ending with '؟')
 - `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`
