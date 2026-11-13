@@ -771,6 +771,91 @@ class TestTwoRoundZipperMergeAndRobustness(unittest.TestCase):
         self.assertEqual(plain.calls[1][1], ROUND2_ARABIC_VERIFICATION_PROMPT)
 
 
+class TestTwoRoundThinkingBudgetAndLimits(unittest.TestCase):
+    def test_phase1_uses_no_think_and_phase2_uses_bounded_thinking(self):
+        """
+        Verifies LocalGPUClient disables thinking in Phase 1 (/no_think) while enabling bounded
+        thinking in Phase 2 (/think) with hard streaming cutoff recovery if thinking exceeds max_thinking_tokens.
+        """
+        from unittest.mock import patch
+        from core.colab_runner import LocalGPUClient
+
+        recorded_calls = []
+        client = object.__new__(LocalGPUClient)
+        client.backend = "gguf"
+        client.context_length = 32768
+        client.max_new_tokens = 6144
+
+        class FakeLlama:
+            def tokenize(self, b):
+                return [1] * 200
+
+            def create_chat_completion(self, messages, max_tokens=512, temperature=0.12, top_p=0.9, stream=False):
+                recorded_calls.append({
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": stream,
+                })
+                if not stream:
+                    # Handle either R1 normal call or R2 thinking-budget follow-up
+                    if "VERIFICATION NOTES" in messages[-1]["content"]:
+                        return {"choices": [{"message": {"content": '[{"question_ar": "سؤال؟", "core_answer_summary_ar": "جواب."}]'}}]}
+                    return {"choices": [{"message": {"content": '[{"question_en": "Does God exist?"}]'}}]}
+
+                # Streaming Phase 2 response exceeding max_thinking_tokens=6 before closing </think>
+                def _gen():
+                    for tok in ["<think>", "step1 ", "step2 ", "step3 ", "step4 ", "step5 ", "step6 ", "step7 ", "</think>"]:
+                        yield {"choices": [{"delta": {"content": tok}}]}
+
+                return _gen()
+
+        client.llm = FakeLlama()
+
+        # Phase 1: must keep /no_think & non-streaming fast call
+        out_r1 = client.extract_round1_english("Extract English cards from transcript.")
+        self.assertIn("Does God exist?", out_r1)
+        self.assertTrue(recorded_calls[0]["messages"][-1]["content"].endswith("/no_think"))
+        self.assertFalse(recorded_calls[0]["stream"])
+        self.assertAlmostEqual(recorded_calls[0]["temperature"], 0.12)
+
+        # Phase 2: must enable /think, stream, hit thinking budget at max_thinking_tokens=6 (clamped to min 256 in prod -> override via direct helper test below)
+        out_r2 = client.extract_round2_arabic('[{"question_en": "Q?"}]', "Verify Q?", enable_thinking=True, max_thinking_tokens=1024)
+        self.assertEqual(recorded_calls[1]["messages"][-1]["content"].rstrip().endswith("/think"), True)
+        self.assertTrue(recorded_calls[1]["stream"])
+        self.assertAlmostEqual(recorded_calls[1]["temperature"], 0.3)
+
+        # Also test direct _run_gguf_with_thinking_limit cutoff at tiny budget -> triggers /no_think continuation
+        recorded_calls.clear()
+        with patch.object(LocalGPUClient, "_run_gguf_with_thinking_limit", wraps=client._run_gguf_with_thinking_limit):
+            # Emulate 300 streamed <think> tokens hitting 256 limit
+            class RunawayLlama(FakeLlama):
+                def create_chat_completion(self, messages, max_tokens=512, temperature=0.12, top_p=0.9, stream=False):
+                    if not stream:
+                        recorded_calls.append({"followup_user": messages[-1]["content"]})
+                        return {"choices": [{"message": {"content": '[{"question_ar": "تم التصحيح؟"}]'}}]}
+                    def _long_gen():
+                        yield {"choices": [{"delta": {"content": "<think>"}}]}
+                        for i in range(300):
+                            yield {"choices": [{"delta": {"content": f"t{i} "}}]}
+                        yield {"choices": [{"delta": {"content": "</think>[]"}}]}
+                    return _long_gen()
+
+            client.llm = RunawayLlama()
+            res_capped = client._run_gguf_with_thinking_limit(
+                active_messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "check\n/think"}],
+                active_sys="sys",
+                base_user_content="check",
+                effective_max_tokens=4096,
+                avail=10000,
+                enable_thinking=True,
+                max_thinking_tokens=256,
+            )
+            self.assertIn("تم التصحيح؟", res_capped)
+            self.assertEqual(len(recorded_calls), 1)
+            self.assertTrue(recorded_calls[0]["followup_user"].endswith("/no_think"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

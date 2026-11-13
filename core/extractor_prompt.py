@@ -527,6 +527,15 @@ You receive:
 Your mission is to perform THEOLOGICAL AUDIT & VERIFICATION and CLASSICAL ARABIC LOCALIZATION (التحقيق العقدي والتعريب الفصيح الرصين) to produce the completed bilingual dossier schema.
 
 CORE TASKS:
+0. THINKING BUDGET & RUBRIC-GUIDED AUDIT (WITH CONDITIONAL ENGLISH REPAIR ONLY IF NEEDED):
+   - You MAY use a CONCISE `<think>...</think>` block strictly under ~400 words / ~1,000 tokens total for this batch to audit every Round 1 card against the 5-Dimension Card Rating Rubric & any Pre-Round-2 Diagnostics:
+     * Hard-Fail Gates: [GATE-PERSPECTIVE] seeker/skeptic framing ending with '?' (never Da'ee rejoinders like "...what is the problem with that?" or Socratic attacks or 1st-person confessions), [GATE-LEAK] zero prompt demonstration copying, [GATE-NOISE] no street banter/policing/outros, [GATE-ROLE] `answer_turn_id` strictly spoken by MAIN_DAEE/CO_DAEE.
+     * Dialectical & Grounding Quality: Direct non-meta-narrative truth in `core_answer_summary_en` (no "The Da'ee explains..."), 3 formal deductive steps in `logical_premises` (Major, Minor, Conclusion), non-empty distinct `socratic_question`, and transcript-grounded quotes.
+   - NON-FORCED ENGLISH POLICY (CRITICAL):
+     * If a Round 1 English card passes all rubric gates and needs no substantive fix, set `"rubric_audit": {"score": <0-100>, "hard_fail": null, "english_edits_needed": false, "issues_fixed": [], "drop_card": false}` and LEAVE ALL ROUND 1 ENGLISH FIELDS UNCHANGED (do NOT rewrite or paraphrase strong English prose needlessly).
+     * ONLY IF a genuine rubric defect is present (flagged in Pre-Round-2 Diagnostics or found during your `<think>` check against the transcript), set `"english_edits_needed": true`, list brief fix notes in `"issues_fixed"`, and output ONLY the repaired English field(s) alongside the Arabic localization.
+     * ONLY IF a card is pure non-theological noise or completely fabricated/ungrounded leakage that cannot be repaired from the transcript, set `"drop_card": true` in `"rubric_audit"`.
+
 1. ORTHODOX THEOLOGICAL VERIFICATION & ATTRIBUTION GUARD:
    - Audit every claim against orthodox Islamic theology (عقيدة أهل السنة والجماعة):
      * Absolute transcendence of God (تنـزيه الله تعالى عن المشابهة والحدوث والعجز والجهل والحلول والتركيب).
@@ -604,7 +613,7 @@ CORE TASKS:
      8. `verbatim_quote_ar`
    - In `dialogue_exchange`, every single turn MUST include `text_ar`.
    - Never output empty strings ("") or null for any of the 8 Arabic fields.
-   - Do NOT emit `<think>...</think>` blocks or chain-of-thought commentary; output ONLY the valid JSON array `[ { ... } ]`. /no_think
+   - Keep `<think>...</think>` disciplined and concise (strictly <= ~1,000 tokens total), then output ONLY the valid JSON array `[ { ... } ]`.
 
 EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
 [
@@ -612,6 +621,13 @@ EXACT JSON SCHEMA FOR ROUND 2 (Output Array of Objects):
     "question_turn_id": "...",
     "answer_turn_id": "...",
     "question_en": "...",
+    "rubric_audit": {
+      "score": 95,
+      "hard_fail": null,
+      "english_edits_needed": false,
+      "issues_fixed": [],
+      "drop_card": false
+    },
     "question_ar": "صياغة الشبهة أو السؤال من وجهة نظر السائل بالفصحى",
     "topic_category_ar": "الاسم الفصيح للباب الموضوعي",
     "core_answer_summary_ar": "بيان برهاني حاسم ومحرر بالعربية الفصحى (دون صياغات سردية ميتا)",
@@ -680,7 +696,7 @@ ORIGINAL DIARIZED TRANSCRIPT EXCERPT:
 ROUND 1 EXTRACTED ENGLISH DOSSIERS:
 {english_units_json}
 
-Perform Theological Verification and Classical Arabic Localization on the English dossiers. Translate all fields into pure Classical Arabic (فصحى رصينة), enrich every dialogue exchange turn with text_ar, purge all foreign tokens, and output strictly the completed JSON array without <think> blocks: [ {{ ... }} ] /no_think
+Perform a concise <think> Rubric Verification & Theological Audit (within thinking limit: keep reasoning concise under ~400 words/card), fix any flagged English defect ONLY IF NEEDED (`english_edits_needed: true`, else preserve original English untouched), and translate all fields into pure Classical Arabic (فصحى رصينة) with text_ar on every dialogue_exchange turn. Output strictly the completed JSON array after </think>: [ {{ ... }} ]
 """
 
 

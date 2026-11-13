@@ -44,8 +44,17 @@ from core.metadata_linker import build_manifest
 from core.yt_audio_fetcher import (
     AntiBanCircuitBreakerError,
     PermanentVideoUnavailableError,
+    YouTubeBotChallengeError,
     patch_youtube_oauth2_plugin,
 )
+
+
+def _normalize_error_signature(vid: str, exc: Exception) -> str:
+    """Normalizes exception strings across videos so repeated systemic errors match."""
+    msg = str(exc or "")
+    if vid:
+        msg = msg.replace(vid, "<vid>")
+    return f"{type(exc).__name__}: {msg[:140]}"
 
 
 def load_or_create_manifest(workspace: SharedWorkspace) -> List[Dict[str, Any]]:
@@ -184,11 +193,12 @@ def select_stage1_candidates(
         if not include_shorts and v.get("is_short"):
             continue
         vid = v["video_id"]
+        scen_path = workspace.scenarios_dir / f"{vid}.json"
+        if scen_path.exists() and scen_path.stat().st_size > 100:
+            continue
         st_path = workspace.state_path(vid)
         if st_path.exists():
             st = workspace.get_video_state(vid)
-        elif (workspace.scenarios_dir / f"{vid}.json").exists():
-            continue
         else:
             st = {"step_rank": 0, "permanent_unavailable": False, "error_count": 0}
 
@@ -307,19 +317,46 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     deadline = (t_session_start + (args.max_session_minutes * 60.0)) if args.max_session_minutes > 0 else None
     completed_count = 0
     consecutive_errors = 0
+    consecutive_bot_blocks = 0
     last_error_sig = ""
     allow_downloads = not args.offline_only
     exit_code = 0
 
-    # Auto-clear any stale circuit breaker lock from previous runs so fresh batch starts unblocked
-    workspace.clear_youtube_circuit_breaker()
+    # Clear any stale circuit breaker from a prior crashed session unless continuing inside an active wave loop
+    if not getattr(args, "_keep_circuit_breaker", False):
+        workspace.clear_youtube_circuit_breaker()
 
     # Auto-heal transient errors from previous environment bug iterations
     for cand in candidates:
         vid = cand["video_id"]
         st = workspace.get_video_state(vid)
         last_err = str(st.get("last_error") or "").lower()
-        if any(tok in last_err for tok in ("metadata_errors", "msdd_models", "float4_e2m1fn", "neuraldiarizer", "libcublas", "libcudnn", "cudnn", "sublibrary", "fts5", "invalid", "cookie", "circuit breaker", "out of memory", "invalid device", "cuda failed", "input_manifest.json")):
+        if any(
+            tok in last_err
+            for tok in (
+                "metadata_errors",
+                "msdd_models",
+                "float4_e2m1fn",
+                "neuraldiarizer",
+                "libcublas",
+                "libcudnn",
+                "cudnn",
+                "sublibrary",
+                "fts5",
+                "invalid",
+                "cookie",
+                "circuit breaker",
+                "challenged",
+                "not a bot",
+                "format_or_access_restricted",
+                "remotedisconnected",
+                "http error 403",
+                "out of memory",
+                "invalid device",
+                "cuda failed",
+                "input_manifest.json",
+            )
+        ):
             st["error_count"] = 0
             st["last_error"] = None
             workspace.atomic_write_json(workspace.state_path(vid), st)
@@ -336,11 +373,28 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         return False
 
     def _handle_video_error(vid: str, exc: Exception) -> None:
-        nonlocal consecutive_errors, last_error_sig, exit_code, allow_downloads
+        nonlocal consecutive_errors, consecutive_bot_blocks, last_error_sig, exit_code, allow_downloads
         if isinstance(exc, AntiBanCircuitBreakerError):
             print(f"\n[!] ANTI-BAN CIRCUIT BREAKER: {exc}", flush=True)
             print("    -> Switching Stage 1 to OFFLINE-ONLY mode (finishing M1..M4 files already on Drive)!", flush=True)
             allow_downloads = False
+            return
+        if isinstance(exc, YouTubeBotChallengeError):
+            consecutive_bot_blocks += 1
+            print(
+                f"    [AUTH/ANTI-BAN] Bot/rate-limit challenge on {vid} ({consecutive_bot_blocks}/3): {exc}",
+                flush=True,
+            )
+            if consecutive_bot_blocks >= 3:
+                workspace.trip_youtube_circuit_breaker(str(exc)[:160], cooldown_minutes=20)
+                allow_downloads = False
+                print(
+                    "\n[!] ANTI-BAN CIRCUIT BREAKER TRIPPED (3 consecutive download challenges).\n"
+                    "    -> Switching remaining batch work to OFFLINE-ONLY (M1..M4 already on Drive).\n"
+                    "    -> Action needed if no offline work remains: refresh expired cookies in Drive cookies/ "
+                    "or disconnect & reconnect Colab runtime for a clean IP.",
+                    flush=True,
+                )
             return
         if isinstance(exc, PermanentVideoUnavailableError):
             print(f"    [SKIP PERMANENT] {vid}: {exc}", flush=True)
@@ -351,7 +405,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
             )
             return
 
-        err_sig = f"{type(exc).__name__}: {str(exc)[:140]}"
+        err_sig = _normalize_error_signature(vid, exc)
         print(f"    [ERROR] Stage 1 error on {vid} ({type(exc).__name__}): {exc}", flush=True)
         if consecutive_errors == 0:
             print(traceback.format_exc(limit=5), flush=True)
@@ -494,7 +548,7 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         return ready_for_c
 
     def _run_phase_a_batch(batch_items: List[Dict[str, Any]], target_slots: int) -> List[Dict[str, Any]]:
-        nonlocal consecutive_errors, last_error_sig, user_interrupted, exit_code
+        nonlocal consecutive_errors, consecutive_bot_blocks, last_error_sig, user_interrupted, exit_code
         ready_for_b: List[Dict[str, Any]] = []
         if not batch_items or _should_stop() or target_slots <= 0:
             return ready_for_b
@@ -505,6 +559,8 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
         for cand in batch_items:
             if _should_stop() or len(ready_for_b) >= target_slots:
                 break
+            if not allow_downloads and cand.get("_step_rank", 0) < STEP_RANK["M1_DOWNLOADED"]:
+                continue
             vid = cand["video_id"]
             st = workspace.get_video_state(vid)
             if st["step_rank"] >= STEP_RANK["M2_VOCALS_CLEANED"]:
@@ -523,6 +579,8 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
                 )
                 if pipeline.run_phase_a_m1_m2(cand, allow_youtube_download=allow_downloads):
                     consecutive_errors = 0
+                    if st["step_rank"] < STEP_RANK["M1_DOWNLOADED"]:
+                        consecutive_bot_blocks = 0
                     last_error_sig = ""
                     ready_for_b.append(cand)
             except KeyboardInterrupt:
@@ -572,11 +630,17 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     if tier_m0_m1 and not _should_stop():
         m0_cursor = 0
         while m0_cursor < len(tier_m0_m1) and not _should_stop():
+            if not allow_downloads and not any(
+                c.get("_step_rank", 0) >= STEP_RANK["M1_DOWNLOADED"] for c in tier_m0_m1[m0_cursor:]
+            ):
+                break
             rem_slots = (args.batch_videos - completed_count) if args.batch_videos > 0 else wave_limit
             wave_target = min(wave_limit, max(0, rem_slots))
             if wave_target <= 0:
                 break
             a_done = _run_phase_a_batch(tier_m0_m1[m0_cursor:], target_slots=wave_target)
+            if not a_done:
+                break
             # Advance cursor past examined items so we never re-scan skipped/locked items in the same pass
             m0_cursor += max(len(a_done), wave_target)
             if a_done and not _should_stop():
@@ -1254,6 +1318,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         wave_size = args.batch_videos if (0 < args.batch_videos <= 4) else 4
         exit_code = 0
         ws = SharedWorkspace(worker_name=args.worker_id or None)
+        # Clear any leftover circuit breaker from a previous crashed/stopped session once at startup
+        ws.clear_youtube_circuit_breaker()
 
         try:
             while True:
@@ -1266,6 +1332,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cands = select_stage1_candidates(ws, manifest, include_shorts=not args.debates_only)
                 if not cands:
                     print("\n[Stage 1 Dedicated Worker] All candidate videos have completed Stage 1 processing! Stopping cleanly.", flush=True)
+                    break
+
+                allowed_yt, wait_yt, yt_reason = ws.check_youtube_download_slot(min_global_gap_sec=0.0)
+                has_offline = any(c.get("_step_rank", 0) >= STEP_RANK["M1_DOWNLOADED"] for c in cands)
+                if not allowed_yt and "Anti-ban cooldown" in yt_reason and not has_offline:
+                    print(
+                        f"\n[Stage 1 Dedicated Worker] YouTube anti-ban cooldown active ({int(wait_yt)}s remaining: {yt_reason}) "
+                        "and no offline M1..M4 videos remain.\n"
+                        "Stopping cleanly to avoid burning Colab GPU quota. Refresh cookies in Drive or reconnect runtime for a new IP.",
+                        flush=True,
+                    )
                     break
 
                 budget_txt = f"{round((deadline - time.time()) / 60.0, 1)}m remaining" if deadline is not None else "continuous until disconnect"
@@ -1281,6 +1358,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         **vars(args),
                         "batch_videos": wave_size,
                         "max_session_minutes": rem_min,
+                        "offline_only": bool(args.offline_only or (not allowed_yt and "Anti-ban cooldown" in yt_reason)),
+                        "_keep_circuit_breaker": True,
                     }
                 )
                 rc = run_stage1_worker(wave_args)

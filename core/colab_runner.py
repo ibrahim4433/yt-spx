@@ -755,16 +755,134 @@ class LocalGPUClient:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"[+] {model_name} loaded into GPU VRAM successfully!")
 
-    def extract(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def _run_gguf_with_thinking_limit(
+        self,
+        active_messages: List[Dict[str, str]],
+        active_sys: str,
+        base_user_content: str,
+        effective_max_tokens: int,
+        avail: int,
+        enable_thinking: bool,
+        max_thinking_tokens: int,
+    ) -> str:
+        """Executes GGUF chat completion with optional Qwen3 thinking capped at `max_thinking_tokens`."""
+        if not enable_thinking:
+            res = self.llm.create_chat_completion(
+                messages=active_messages,
+                max_tokens=effective_max_tokens,
+                temperature=0.12,
+                top_p=0.9,
+            )
+            return res["choices"][0]["message"]["content"] or "[]"
+
+        budget = max(256, int(max_thinking_tokens or 1024))
+        try:
+            res_iter = self.llm.create_chat_completion(
+                messages=active_messages,
+                max_tokens=effective_max_tokens,
+                temperature=0.3,
+                top_p=0.9,
+                stream=True,
+            )
+        except TypeError:
+            res = self.llm.create_chat_completion(
+                messages=active_messages,
+                max_tokens=effective_max_tokens,
+                temperature=0.3,
+                top_p=0.9,
+            )
+            return res["choices"][0]["message"]["content"] or "[]"
+
+        # Mock / non-iterable return guard
+        if isinstance(res_iter, dict):
+            return res_iter["choices"][0]["message"]["content"] or "[]"
+
+        parts: List[str] = []
+        think_closed = False
+        direct_json = False
+        token_count = 0
+        budget_exceeded = False
+        try:
+            for chunk in res_iter:
+                if not isinstance(chunk, dict):
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta")
+                if isinstance(delta, dict):
+                    piece = delta.get("content") or ""
+                else:
+                    msg = choices[0].get("message") or {}
+                    piece = msg.get("content") or ""
+                if not piece:
+                    continue
+                parts.append(piece)
+                token_count += 1
+                if not think_closed and not direct_json:
+                    so_far = "".join(parts)
+                    if "</think>" in so_far.lower():
+                        think_closed = True
+                    else:
+                        stripped = so_far.lstrip()
+                        if (
+                            "<think>" not in stripped.lower()
+                            and (stripped.startswith("[") or stripped.startswith("```"))
+                        ):
+                            direct_json = True
+                        elif token_count >= budget:
+                            budget_exceeded = True
+                            break
+        finally:
+            if hasattr(res_iter, "close"):
+                try:
+                    res_iter.close()
+                except Exception:
+                    pass
+
+        raw_out = "".join(parts)
+        if not budget_exceeded:
+            return raw_out or "[]"
+
+        # Thinking budget reached before </think>: close reasoning cleanly and emit JSON in /no_think follow-up
+        notes = re.sub(r"</?think>", "", raw_out, flags=re.IGNORECASE).strip()[-1200:]
+        clean_user = re.sub(r"\s*/(?:no_)?think\s*$", "", base_user_content or "").rstrip()
+        rem_tokens = max(512, min(4096, avail - token_count))
+        followup_messages = [
+            {"role": "system", "content": active_sys},
+            {
+                "role": "user",
+                "content": (
+                    f"{clean_user}\n\n"
+                    f"VERIFICATION NOTES (thinking budget reached — finalize output now):\n{notes}\n\n"
+                    "Output ONLY the completed valid JSON array now: [ { ... } ] /no_think"
+                ),
+            },
+        ]
+        res_follow = self.llm.create_chat_completion(
+            messages=followup_messages,
+            max_tokens=rem_tokens,
+            temperature=0.12,
+            top_p=0.9,
+        )
+        return res_follow["choices"][0]["message"]["content"] or "[]"
+
+    def extract(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        enable_thinking: bool = False,
+        max_thinking_tokens: int = 1024,
+    ) -> str:
         active_sys = system_prompt or EXTRACTION_SYSTEM_PROMPT
         is_round2_arabic = (
             "ROUND 2" in active_sys
             or "CLASSICAL ARABIC LOCALIZATION" in active_sys
             or "ROUND 1 EXTRACTED ENGLISH DOSSIERS" in (prompt or "")
         )
-        user_content = prompt or ""
-        if "/no_think" not in user_content:
-            user_content = f"{user_content.rstrip()}\n/no_think"
+        base_prompt = re.sub(r"\s*/(?:no_)?think\s*$", "", prompt or "").rstrip()
+        use_thinking = bool(enable_thinking)
+        user_content = f"{base_prompt}\n/think" if use_thinking else f"{base_prompt}\n/no_think"
 
         fallback_system = (
             COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
@@ -796,33 +914,40 @@ class LocalGPUClient:
             safety_margin = 64
             avail = self.context_length - prompt_tokens - safety_margin
 
-            # If available generation headroom is too tight (< 1200 tokens), switch to compact system prompt
+            # If available generation headroom is too tight (< 1200 tokens), switch to compact system prompt (no_think)
             active_messages = messages
+            active_thinking = use_thinking
             if avail < 1200:
+                active_thinking = False
+                user_content = f"{base_prompt}\n/no_think"
                 active_messages = [
                     {"role": "system", "content": fallback_system},
                     {"role": "user", "content": user_content},
                 ]
                 avail = max(1024, self.context_length - int(len(user_content.split()) * 2.2) - safety_margin)
 
-            # Ensure effective_max_tokens scales up cleanly on 32K context while respecting remaining headroom
+            # Ensure effective_max_tokens scales up cleanly on 32K context while capping thinking + JSON safely
             max_gen_cap = max(self.max_new_tokens, 8192) if self.context_length >= 28000 else self.max_new_tokens
+            if active_thinking:
+                max_gen_cap = min(max_gen_cap, max(512, int(max_thinking_tokens or 1024) + 4608))
             effective_max_tokens = max(512, min(max_gen_cap, avail))
 
             try:
-                res = self.llm.create_chat_completion(
-                    messages=active_messages,
-                    max_tokens=effective_max_tokens,
-                    temperature=0.12,
-                    top_p=0.9,
+                return self._run_gguf_with_thinking_limit(
+                    active_messages=active_messages,
+                    active_sys=active_sys,
+                    base_user_content=base_prompt,
+                    effective_max_tokens=effective_max_tokens,
+                    avail=avail,
+                    enable_thinking=active_thinking,
+                    max_thinking_tokens=max_thinking_tokens,
                 )
-                return res["choices"][0]["message"]["content"] or "[]"
             except ValueError as ve:
                 if "exceed context window" in str(ve).lower():
-                    # Emergency context recovery: compact system prompt and generate
+                    # Emergency context recovery: compact system prompt and generate without thinking
                     compact_messages = [
                         {"role": "system", "content": fallback_system},
-                        {"role": "user", "content": user_content},
+                        {"role": "user", "content": f"{base_prompt}\n/no_think"},
                     ]
                     try:
                         res = self.llm.create_chat_completion(
@@ -847,7 +972,7 @@ class LocalGPUClient:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=use_thinking,
             )
         except TypeError:
             text_input = self.tokenizer.apply_chat_template(
@@ -855,7 +980,11 @@ class LocalGPUClient:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        max_gen_tokens = min(self.max_new_tokens, 3200)
+        max_gen_tokens = (
+            min(self.max_new_tokens, max(512, int(max_thinking_tokens or 1024) + 3600))
+            if use_thinking
+            else min(self.max_new_tokens, 3200)
+        )
         max_prompt_len = min(16384, max(1024, self.context_length - max_gen_tokens - 64))
         inputs = self.tokenizer(
             [text_input],
@@ -875,7 +1004,7 @@ class LocalGPUClient:
                 generated_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=max_gen_tokens,
-                    temperature=0.12,
+                    temperature=0.3 if use_thinking else 0.12,
                     top_p=0.9,
                     do_sample=True,
                     eos_token_id=eos_ids,
@@ -886,7 +1015,11 @@ class LocalGPUClient:
                 output_ids[len(input_ids) :]
                 for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
             ]
-            return self.tokenizer.batch_decode(trimmed, skip_special_tokens=True)[0]
+            decoded = self.tokenizer.batch_decode(trimmed, skip_special_tokens=True)[0]
+            if use_thinking and "<think>" in decoded.lower() and "</think>" not in decoded.lower():
+                # Retry cleanly without thinking if output was consumed inside <think>
+                return self.extract(base_prompt, system_prompt=active_sys, enable_thinking=False)
+            return decoded
         except torch.OutOfMemoryError:
             print("[-] Transformers GPU OOM encountered; clearing cache and retrying with compact context...")
             del inputs
@@ -932,21 +1065,34 @@ class LocalGPUClient:
                 torch.cuda.empty_cache()
 
     def extract_round1_english(self, prompt: str) -> str:
-        """Executes Stage 2 Round 1: Pure English dialectical argument and syllogism extraction."""
-        return self.extract(prompt, system_prompt=ROUND1_ENGLISH_EXTRACTION_PROMPT)
+        """Executes Stage 2 Round 1: Fast /no_think pure-English dialectical extraction."""
+        return self.extract(prompt, system_prompt=ROUND1_ENGLISH_EXTRACTION_PROMPT, enable_thinking=False)
 
-    def extract_round2_arabic(self, english_units_json: str, transcript_prompt: str) -> str:
-        """Executes Stage 2 Round 2: Bilingual theological verification and Classical Arabic localization."""
+    def extract_round2_arabic(
+        self,
+        english_units_json: str,
+        transcript_prompt: str,
+        enable_thinking: bool = True,
+        max_thinking_tokens: int = 1024,
+    ) -> str:
+        """Executes Stage 2 Round 2: Bounded-thinking Rubric Verification, conditional EN repair, & Arabic localization."""
         if "ROUND 1 EXTRACTED ENGLISH DOSSIERS" in transcript_prompt:
             user_prompt = transcript_prompt
         else:
             user_prompt = (
                 f"ORIGINAL TRANSCRIPT CONTEXT:\n{transcript_prompt}\n\n"
                 f"ROUND 1 EXTRACTED ENGLISH DOSSIERS:\n{english_units_json}\n\n"
-                "Perform Theological Verification and Classical Arabic Localization on the English dossiers. "
-                "Translate all fields into pure Classical Arabic (فصحى رصينة), enrich every dialogue exchange turn with text_ar, purge all foreign tokens, and output strictly the completed bilingual JSON array: [ { ... } ]"
+                "Perform a concise <think> Rubric Verification & Theological Audit (within thinking limit), "
+                "fix any flagged English defect ONLY IF NEEDED (english_edits_needed: true), "
+                "and translate all fields into pure Classical Arabic (فصحى رصينة) with text_ar on every dialogue turn. "
+                "Output strictly the completed bilingual JSON array after </think>: [ { ... } ]"
             )
-        return self.extract(user_prompt, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
+        return self.extract(
+            user_prompt,
+            system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT,
+            enable_thinking=enable_thinking,
+            max_thinking_tokens=max_thinking_tokens,
+        )
 
 
 class ExtractionClient:

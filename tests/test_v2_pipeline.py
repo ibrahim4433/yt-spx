@@ -394,7 +394,10 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
                     "start_fmt": "00:28",
                     "end_fmt": "01:15",
                     "language": "en",
-                    "text_original": "Only things that begin to exist require a cause; God is the Necessary Uncaused Being.",
+                    "text_original": (
+                        "Only things that begin to exist require a cause; God is the Necessary Uncaused Being. "
+                        + " ".join(["Every contingent object depends on a prior metaphysical explanation."] * 220)
+                    ),
                     "text_ar": "",
                     "is_overlap": True,
                     "overlap_group_id": "OV_001",
@@ -436,7 +439,10 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
                     "start_fmt": "02:26",
                     "end_fmt": "03:15",
                     "language": "en",
-                    "text_original": "Empirical science describes what is, never what ought to be; bridging is-ought requires an transcendent moral lawgiver.",
+                    "text_original": (
+                        "Empirical science describes what is, never what ought to be; bridging is-ought requires an transcendent moral lawgiver. "
+                        + " ".join(["Objective moral duties demand an eternal transcendent source above subjective matter."] * 180)
+                    ),
                     "text_ar": "",
                     "is_overlap": False,
                     "overlap_group_id": "",
@@ -480,6 +486,7 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         class MockLLM:
             def __init__(self):
                 self.calls = 0
+                self.context_length = 16384
 
             def extract(self, prompt: str) -> str:
                 self.calls += 1
@@ -544,6 +551,303 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
 
         qa_hits = search_qa(query="من خلق الله", speaker="uthman_ibn_farooq", db_path=db_file)
         self.assertEqual(len(qa_hits), 1)
+
+    def test_unified_full_conversation_single_window_and_per_card_episode_index(self):
+        """
+        Proves multi-episode debates fitting within Stage 2 context (~3,400 words across 3 episodes,
+        modeled after rQLF0rA1la4) pack into ONE single unified window in Stage2ScenarioExtractor,
+        and each extracted card resolves its own true turn-level episode_index.
+        """
+        vid = "unified_ep_vid"
+        turns = []
+        # Create 3 episodes (~1,100 words each = ~3,300 words total -> fits cleanly in 1 unified window at 20K or 32K ctx)
+        filler_ep = " ".join(["theology prophecy revelation scripture reason evidence"] * 175)
+        specs = [
+            (1, "Does paradise promise believers physical delights after resurrection?",
+                f"In Islamic theology, paradise rewards righteous believers both spiritually and physically by divine wisdom. {filler_ep}"),
+            (2, "Why does Islam affirm bodily resurrection alongside spiritual bliss?",
+                f"Human identity unites soul and body so eternal recompense addresses the complete person. {filler_ep}"),
+            (3, "How should Quranic descriptions of the afterlife be understood in context?",
+                f"The Quran describes real transcendent bliss using accessible earthly concepts without reducing Creator to creature. {filler_ep}"),
+        ]
+        t_idx = 0
+        for ep, q_txt, a_txt in specs:
+            turns.append({
+                "turn_id": f"{vid}_T{t_idx+1:04d}",
+                "turn_index": t_idx,
+                "episode_index": ep,
+                "speaker_id": "speaker_1",
+                "speaker_role": "INTERLOCUTOR",
+                "speaker_label_en": "Interlocutor 1",
+                "speaker_label_ar": "المحاور 1",
+                "start_ms": t_idx * 30000,
+                "end_ms": t_idx * 30000 + 15000,
+                "start_fmt": f"{t_idx:02d}:00",
+                "end_fmt": f"{t_idx:02d}:15",
+                "language": "en",
+                "text_original": q_txt,
+                "text_ar": "",
+                "is_overlap": False,
+                "overlap_group_id": "",
+                "is_pedestrian_interruption": False,
+                "confidence": 0.96,
+                "words": [],
+            })
+            t_idx += 1
+            turns.append({
+                "turn_id": f"{vid}_T{t_idx+1:04d}",
+                "turn_index": t_idx,
+                "episode_index": ep,
+                "speaker_id": "speaker_0",
+                "speaker_role": "MAIN_DAEE",
+                "speaker_label_en": "Hashim",
+                "speaker_label_ar": "هاشم",
+                "start_ms": t_idx * 30000,
+                "end_ms": t_idx * 30000 + 25000,
+                "start_fmt": f"{t_idx:02d}:00",
+                "end_fmt": f"{t_idx:02d}:25",
+                "language": "en",
+                "text_original": a_txt,
+                "text_ar": "",
+                "is_overlap": False,
+                "overlap_group_id": "",
+                "is_pedestrian_interruption": False,
+                "confidence": 0.97,
+                "words": [],
+            })
+            t_idx += 1
+
+        self.ws.atomic_write_json(self.ws.scenarios_dir / f"{vid}.json", {
+            "video_id": vid,
+            "title_ar": "مناظرة موحدة متعددة المقاطع",
+            "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+            "channel": "SCDawah Arabic",
+            "speakers": [
+                {"speaker_id": "speaker_0", "role": "MAIN_DAEE", "profile_id": "hashim", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                {"speaker_id": "speaker_1", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Interlocutor 1", "display_name_ar": "المحاور 1"},
+            ],
+            "turns": turns,
+        })
+        self.ws.advance_micro_step(vid, "M5_SCENARIO_BUILT")
+
+        # Legacy default preserves 3 per-episode windows, while unified full-conversation packs into 1!
+        self.assertEqual(len(build_episode_windows(turns)), 3)
+        self.assertEqual(len(build_episode_windows(turns, max_words_per_window=7500, merge_episodes=True, max_chars_per_window=72000)), 1)
+
+        class UnifiedTwoRoundMockLLM:
+            def __init__(self):
+                self.context_length = 32768
+                self.r1_calls = 0
+                self.r2_calls = 0
+
+            def extract_round1_english(self, prompt: str) -> str:
+                self.r1_calls += 1
+                return json.dumps([
+                    {
+                        "question_turn_id": f"{vid}_T0001",
+                        "answer_turn_id": f"{vid}_T0002",
+                        "topic_category": "Eschatology & Free Will",
+                        "question_en": "If paradise includes physical pleasures, isn't that a bad thing?",
+                        "core_answer_summary_en": (
+                            "Islamic eschatology rejects purely materialistic caricatures while honoring complete human nature created by God, "
+                            "who fulfills both spiritual nearness and pure physical delight without defect or harm."
+                        ),
+                        "logical_premises": [
+                            "Premise 1: God created human beings with both spiritual and physical capacities.",
+                            "Premise 2: Eternal reward fulfills complete human flourishing.",
+                            "Conclusion: Therefore purified physical delight alongside spiritual vision is coherent.",
+                        ],
+                        "fallacy_or_misconception_exposed": "False Dichotomy between spiritual elevation and bodily creation.",
+                        "socratic_question": "Why assume the Creator who formed human senses cannot elevate them eternally?",
+                        "interlocutor_verbatim_quote": turns[0]["text_original"],
+                        "verbatim_quote": turns[1]["text_original"],
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0001", "role": "INTERLOCUTOR", "text_en": turns[0]["text_original"]},
+                            {"turn_id": f"{vid}_T0002", "role": "MAIN_DAEE", "text_en": turns[1]["text_original"]},
+                        ],
+                    },
+                    {
+                        "question_turn_id": f"{vid}_T0005",
+                        "answer_turn_id": f"{vid}_T0006",
+                        "topic_category": "Prophethood & Quran",
+                        "question_en": "How should Quranic afterlife descriptions be interpreted without anthropomorphism?",
+                        "core_answer_summary_en": (
+                            "The Quran uses intelligible terminology to point toward real unseen bliss in paradise while upholding absolute divine "
+                            "transcendence and purifying eternal rewards from worldly imperfection."
+                        ),
+                        "logical_premises": [
+                            "Premise 1: Revelation communicates unseen realities in human language.",
+                            "Premise 2: Afterlife realities transcend worldly defects while remaining concrete.",
+                            "Conclusion: Therefore Quranic imagery neither reduces paradise to base appetite nor denies reality.",
+                        ],
+                        "fallacy_or_misconception_exposed": "Literalist Reductionism.",
+                        "socratic_question": "How else could revelation describe unseen eternal bliss to earthly minds?",
+                        "interlocutor_verbatim_quote": turns[4]["text_original"],
+                        "verbatim_quote": turns[5]["text_original"],
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0005", "role": "INTERLOCUTOR", "text_en": turns[4]["text_original"]},
+                            {"turn_id": f"{vid}_T0006", "role": "MAIN_DAEE", "text_en": turns[5]["text_original"]},
+                        ],
+                    },
+                ])
+
+            def extract_round2_arabic(self, r1_json_str: str, prompt: str) -> str:
+                self.r2_calls += 1
+                return json.dumps([
+                    {
+                        "question_turn_id": f"{vid}_T0001",
+                        "rubric_audit": {"score": 94, "english_edits_needed": False, "drop_card": False},
+                        "question_ar": "إذا اشتملت الجنة على نعيم حسي، أليس ذلك أمرًا غير روحاني؟",
+                        "core_answer_summary_ar": "الإسلام يكرم النفس والبدن معًا في دار النعيم الأبدي المنزه عن كل نقص.",
+                        "logical_premises_ar": ["الإنسان مكون من روح وجسد.", "الجزاء التام يشمل الكمالين.", "فالنعيم المادي المنقى مع القرب الروحي متسق تمامًا."],
+                        "fallacy_or_misconception_exposed_ar": "ثنائية زائفة بين الروح والجسد",
+                        "analogy_or_metaphor_ar": "",
+                        "socratic_question_ar": "لماذا يُفترض أن خالق الحواس يعجز عن الارتقاء بها في الآخرة؟",
+                        "interlocutor_verbatim_quote_ar": "هل تعد الجنة بنعيم مادي؟",
+                        "verbatim_quote_ar": "الجنة تجمع بين الكمال الروحي والنعيم الحسي المنزه.",
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0001", "text_ar": "هل تعد الجنة بنعيم مادي؟"},
+                            {"turn_id": f"{vid}_T0002", "text_ar": "الجنة تجمع بين النعيم الروحي والحسي بحكمة الله."},
+                        ],
+                    },
+                    {
+                        "question_turn_id": f"{vid}_T0005",
+                        "rubric_audit": {"score": 95, "english_edits_needed": False, "drop_card": False},
+                        "question_ar": "كيف تُفهم أوصاف الآخرة القرآنية دون تجسيم؟",
+                        "core_answer_summary_ar": "القرآن يخاطب البشر بألفاظ مفهومة للدلالة على حقائق غيبية منزهة عن نقائص الدنيا.",
+                        "logical_premises_ar": ["الوحي يخاطب العقول بما تفهم.", "نعيم الآخرة حقيقة منزهة عن العلل.", "لذا ينتفي التجسيم والاختزال."],
+                        "fallacy_or_misconception_exposed_ar": "الاختزال الحرفي",
+                        "analogy_or_metaphor_ar": "",
+                        "socratic_question_ar": "كيف يخاطب الوحي البشر عن الغيب دون ألفاظ مفهومة؟",
+                        "interlocutor_verbatim_quote_ar": "كيف نفهم أوصاف الآخرة في القرآن؟",
+                        "verbatim_quote_ar": "الألفاظ القرآنية تشير إلى حقائق متعالية منزهة عن نقص الدنيا.",
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0005", "text_ar": "كيف نفهم أوصاف الآخرة؟"},
+                            {"turn_id": f"{vid}_T0006", "text_ar": "القرآن يدل على حقائق منزهة عن نقائص الدنيا."},
+                        ],
+                    },
+                ])
+
+        mock_llm = UnifiedTwoRoundMockLLM()
+        extractor = Stage2ScenarioExtractor(workspace=self.ws, llm_client=mock_llm)
+        units = extractor.extract_video_m6(vid, verbose=False)
+
+        self.assertEqual(mock_llm.r1_calls, 1, "All 3 episodes (~3.3K words) must fit into ONE full-conversation window")
+        self.assertEqual(mock_llm.r2_calls, 1)
+        self.assertEqual(len(units), 2)
+        self.assertEqual(units[0]["episode_index"], 1)
+        self.assertEqual(units[1]["episode_index"], 3, "Per-card episode_index must resolve from anchored turn T0005")
+
+    def test_oversized_transcript_balanced_split_at_32k_and_round2_subbatching(self):
+        """
+        Ensures transcripts exceeding 32K capacity split cleanly into balanced windows preferring episode boundaries,
+        and Round 2 sub-batches >=3 Round 1 units into chunks of <=2 cards for bounded thinking.
+        """
+        from core.scenario_extractor import compute_window_budget_for_context
+        w_cap, c_cap = compute_window_budget_for_context(32768)
+        self.assertEqual((w_cap, c_cap), (7500, 72000))
+
+        vid = "big_balanced_vid"
+        turns = []
+        chunk_words = " ".join(["rationality causation creation contingency proof logic"] * 350)  # ~2,100 words each
+        for ep in (1, 2, 3, 4):
+            idx = len(turns)
+            turns.append({
+                "turn_id": f"{vid}_T{idx+1:04d}",
+                "turn_index": idx,
+                "episode_index": ep,
+                "speaker_id": "speaker_1",
+                "speaker_role": "INTERLOCUTOR",
+                "speaker_label_en": "Interlocutor",
+                "start_ms": idx * 10000,
+                "end_ms": idx * 10000 + 5000,
+                "start_fmt": "00:00",
+                "end_fmt": "00:05",
+                "text_original": f"Episode {ep} objection about divine wisdom and existence?",
+            })
+            turns.append({
+                "turn_id": f"{vid}_T{idx+2:04d}",
+                "turn_index": idx + 1,
+                "episode_index": ep,
+                "speaker_id": "speaker_0",
+                "speaker_role": "MAIN_DAEE",
+                "speaker_label_en": "Hashim",
+                "start_ms": idx * 10000 + 6000,
+                "end_ms": idx * 10000 + 9000,
+                "start_fmt": "00:06",
+                "end_fmt": "00:09",
+                "text_original": f"Episode {ep} deductive answer: {chunk_words}",
+            })
+
+        wins = build_episode_windows(turns, max_words_per_window=w_cap, merge_episodes=True, max_chars_per_window=c_cap)
+        self.assertEqual(len(wins), 2)
+        self.assertLessEqual(wins[0]["word_count"], w_cap)
+        self.assertLessEqual(wins[1]["word_count"], w_cap)
+        self.assertGreater(wins[1]["word_count"], 3500, "Balanced split must avoid tiny tail windows")
+
+        # Verify Round 2 sub-batching splits 3 units into 2 calls (batch size 2)
+        vid_sub = "subbatch_vid"
+        sub_turns = turns[:6]
+        for t in sub_turns:
+            t["turn_id"] = t["turn_id"].replace(vid, vid_sub)
+        self.ws.atomic_write_json(self.ws.scenarios_dir / f"{vid_sub}.json", {
+            "video_id": vid_sub,
+            "title_ar": "حوارات متعددة",
+            "youtube_url": f"https://www.youtube.com/watch?v={vid_sub}",
+            "speakers": [
+                {"speaker_id": "speaker_0", "role": "MAIN_DAEE", "profile_id": "hashim", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                {"speaker_id": "speaker_1", "role": "INTERLOCUTOR", "display_name_en": "Interlocutor", "display_name_ar": "المحاور"},
+            ],
+            "turns": sub_turns,
+        })
+        self.ws.advance_micro_step(vid_sub, "M5_SCENARIO_BUILT")
+
+        class SubBatchMockLLM:
+            def __init__(self):
+                self.context_length = 32768
+                self.r2_batch_sizes = []
+                self.prompts = []
+
+            def extract_round1_english(self, prompt: str) -> str:
+                return json.dumps([
+                    {
+                        "question_turn_id": f"{vid_sub}_T000{k}",
+                        "answer_turn_id": f"{vid_sub}_T000{k+1}",
+                        "question_en": f"Why does objector question principle {k} about causality?",
+                        "core_answer_summary_en": "Dependent things require a Necessary Being by rational deduction.",
+                        "logical_premises": ["Contingent requires cause.", "Infinite regress is false.", "Necessary creator exists."],
+                        "fallacy_or_misconception_exposed": "Infinite regress fallacy.",
+                        "socratic_question": f"Can effect {k} cause itself?",
+                        "interlocutor_verbatim_quote": sub_turns[k - 1]["text_original"],
+                        "verbatim_quote": sub_turns[k]["text_original"],
+                    }
+                    for k in (1, 3, 5)
+                ])
+
+            def extract_round2_arabic(self, r1_json_str: str, prompt: str) -> str:
+                batch = json.loads(r1_json_str)
+                self.r2_batch_sizes.append(len(batch))
+                self.prompts.append(prompt)
+                return json.dumps([
+                    {
+                        "question_turn_id": u["question_turn_id"],
+                        "rubric_audit": {"score": 90, "english_edits_needed": False, "drop_card": False},
+                        "question_ar": f"لماذا يُطرح الإشكال العقلي رقم {u['question_turn_id']} حول السببية؟",
+                        "core_answer_summary_ar": "الممكنات تفتقر إلى واجب الوجود بالبرهان العقلي.",
+                        "logical_premises_ar": ["الممكن يفتقر لمخصص.", "التسلسل باطل.", "واجب الوجود ثابت."],
+                        "fallacy_or_misconception_exposed_ar": "مغالطة التسلسل",
+                        "analogy_or_metaphor_ar": "",
+                        "socratic_question_ar": "هل يخلق الممكن نفسه؟",
+                        "verbatim_quote_ar": "الجواب الاستدلالي في التوحيد.",
+                    }
+                    for u in batch
+                ])
+
+        sb_llm = SubBatchMockLLM()
+        sub_units = Stage2ScenarioExtractor(workspace=self.ws, llm_client=sb_llm).extract_video_m6(vid_sub, verbose=False)
+        self.assertEqual(sb_llm.r2_batch_sizes, [2, 1], "3 Round 1 units must split into [2, 1] Round 2 thinking batches")
+        self.assertIn("PRE-ROUND-2 CARD RATING & DEFECT DIAGNOSTICS", sb_llm.prompts[0])
+        self.assertEqual(len(sub_units), 3)
 
     def test_smart_batch_resume_priority_ordering(self):
         manifest = [
@@ -1324,6 +1628,345 @@ class TestStage1HorizontalPhaseBatchingAndModelCache(unittest.TestCase):
                     self.assertTrue(any("htdemucs.th" in n for n in names))
                     self.assertTrue(any("titanet_large.nemo" in n for n in names))
                     self.assertFalse(any(n.endswith(".gguf") for n in names))
+
+
+class TestColabWave5Regressions(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        from core.drive_sync import SharedWorkspace
+
+        self.ws = SharedWorkspace(root_dir=self.root, worker_name="test-wave5-worker")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_classify_transient_errors_do_not_quarantine_and_online_check_drops_android(self):
+        import subprocess
+        import time as _t
+        from unittest.mock import patch
+        from core.cookie_pool import CookiePool, classify_ytdlp_output
+
+        self.assertEqual(
+            classify_ytdlp_output(
+                "warning: ('connection aborted.', remotedisconnected('remote end closed connection'))\nerror: requested format is not available"
+            ),
+            "network",
+        )
+        self.assertEqual(classify_ytdlp_output("error: requested format is not available."), "format_unavailable")
+        self.assertEqual(classify_ytdlp_output("error: http error 403: forbidden"), "forbidden_403")
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        cookie = cdir / "acct_ok.txt"
+        cookie.write_text(
+            f"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t{future}\t__Secure-3PSID\ttok123\n",
+            encoding="utf-8",
+        )
+
+        pool = CookiePool(self.ws, include_repo_dir=False)
+        pool.mark_failed(cookie, "network", "RemoteDisconnected")
+        pool.mark_failed(cookie, "format_unavailable", "Requested format is not available")
+        self.assertEqual([p.name for p in pool.healthy_cookies()], ["acct_ok.txt"])
+
+        captured_cmds = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured_cmds.append(list(cmd))
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="dQw4w9WgXcQ\n")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            ok, kind, _ = pool.test_cookie_online(cookie, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertTrue(ok)
+        self.assertEqual(kind, "ok")
+        cmd_str = " ".join(captured_cmds[0])
+        self.assertNotIn("player_client=android", cmd_str)
+        self.assertIn("--remote-components ejs:github", cmd_str)
+
+    def test_ensure_deno_runtime_not_skipped_by_node(self):
+        import subprocess
+        from unittest.mock import patch
+        import run_colab_all_in_one as rca
+
+        deno_state = {"installed": False}
+
+        def fake_which(name):
+            if name == "node":
+                return "/usr/bin/node"
+            if name == "deno":
+                return "/root/.deno/bin/deno" if deno_state["installed"] else None
+            return None
+
+        def fake_run(cmd, *args, **kwargs):
+            if "deno.land/install.sh" in str(cmd):
+                deno_state["installed"] = True
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("shutil.which", side_effect=fake_which), patch("subprocess.run", side_effect=fake_run) as m_run:
+            rca._ensure_deno_runtime()
+
+        self.assertTrue(m_run.called)
+        self.assertIn("deno.land/install.sh", str(m_run.call_args.args[0]))
+
+    def test_fetch_audio_preserves_cookie_on_network_drop_and_uses_pytubefix_fallback(self):
+        import subprocess
+        import sys
+        import types
+        import time as _t
+        from unittest.mock import patch
+        from core.cookie_pool import CookiePool
+        from core.yt_audio_fetcher import YouTubeBotChallengeError, fetch_video_audio_m1
+
+        cdir = self.ws.root / "cookies"
+        cdir.mkdir(parents=True, exist_ok=True)
+        future = int(_t.time()) + 30 * 86400
+        good_cookie = cdir / "good.txt"
+        good_cookie.write_text(
+            f"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t{future}\t__Secure-3PSID\tabc123\n",
+            encoding="utf-8",
+        )
+
+        # Case 1: Anon hits bot check, cookie hits RemoteDisconnected + format unavailable -> android_vr succeeds
+        # WITHOUT quarantining good.txt!
+        vid1 = "net_drop_vid"
+        seen_cmds = []
+
+        def mock_net_drop(cmd, *args, **kwargs):
+            cmd_str = " ".join(cmd)
+            seen_cmds.append(cmd_str)
+            if "player_client=android_vr" in cmd_str:
+                tmp_dir = Path(cmd[cmd.index("-o") + 1]).parent
+                (tmp_dir / f"{vid1}.opus").write_bytes(b"OggS" + b"\x00" * 10000)
+                (tmp_dir / f"{vid1}.info.json").write_text('{"duration": 60.0}', encoding="utf-8")
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[download] 100%")
+            if "--cookies" in cmd:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="WARNING: ('Connection aborted.', RemoteDisconnected('Remote end closed connection'))\nERROR: Requested format is not available.",
+                )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="ERROR: [youtube] Sign in to confirm you're not a bot",
+            )
+
+        with patch("core.yt_audio_fetcher.CookiePool", side_effect=lambda w: CookiePool(w, include_repo_dir=False)), \
+             patch("subprocess.run", side_effect=mock_net_drop), \
+             patch("time.sleep", return_value=None):
+            raw_audio, _ = fetch_video_audio_m1({"video_id": vid1}, self.ws, min_global_gap_sec=0.0)
+        self.assertTrue(raw_audio.exists())
+        self.assertEqual([p.name for p in CookiePool(self.ws, include_repo_dir=False).healthy_cookies()], ["good.txt"])
+        self.assertEqual(len(seen_cmds), 3)
+
+        # Case 2: All yt-dlp attempts fail -> PytubeFix tries ANDROID_VR then WEB with use_po_token=True
+        vid2 = "pt_fallback_vid"
+        pt_calls = []
+
+        class FakeStream:
+            def download(self, output_path, filename):
+                (Path(output_path) / filename).write_bytes(b"ftypmp4" + b"\x00" * 10000)
+
+        class FakeStreamQuery:
+            def __init__(self, has_stream):
+                self.has_stream = has_stream
+
+            def get_audio_only(self):
+                return FakeStream() if self.has_stream else None
+
+            def filter(self, **kwargs):
+                return self
+
+            def first(self):
+                return FakeStream() if self.has_stream else None
+
+        class FakeYouTube:
+            def __init__(self, url, client=None, **kwargs):
+                pt_calls.append((client, kwargs))
+                if client == "ANDROID_VR":
+                    raise RuntimeError("ANDROID_VR failed")
+                self.streams = FakeStreamQuery(has_stream=True)
+
+        fake_pt = types.ModuleType("pytubefix")
+        fake_pt.YouTube = FakeYouTube
+
+        def mock_all_fail(cmd, *args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="ERROR: [youtube] Sign in to confirm you're not a bot",
+            )
+
+        with patch.dict(sys.modules, {"pytubefix": fake_pt}), \
+             patch("core.yt_audio_fetcher.CookiePool", side_effect=lambda w: CookiePool(w, include_repo_dir=False)), \
+             patch("subprocess.run", side_effect=mock_all_fail), \
+             patch("time.sleep", return_value=None):
+            raw2, _ = fetch_video_audio_m1({"video_id": vid2}, self.ws, min_global_gap_sec=0.0)
+        self.assertTrue(raw2.exists())
+        self.assertEqual(pt_calls, [("ANDROID_VR", {}), ("WEB", {"use_po_token": True})])
+
+        # Case 3: Both yt-dlp and PytubeFix fail on bot challenge -> raises YouTubeBotChallengeError
+        class BrokenYouTube:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("This request was detected as a bot")
+
+        fake_pt.YouTube = BrokenYouTube
+        with patch.dict(sys.modules, {"pytubefix": fake_pt}), \
+             patch("core.yt_audio_fetcher.CookiePool", side_effect=lambda w: CookiePool(w, include_repo_dir=False)), \
+             patch("subprocess.run", side_effect=mock_all_fail), \
+             patch("time.sleep", return_value=None):
+            with self.assertRaises(YouTubeBotChallengeError):
+                fetch_video_audio_m1({"video_id": "blocked_vid"}, self.ws, min_global_gap_sec=0.0)
+
+    def test_orchestrator_trips_breaker_after_3_bot_challenges_without_poisoning(self):
+        import argparse
+        from unittest.mock import MagicMock, patch
+        from core.pipeline_orchestrator import _normalize_error_signature, run_stage1_worker
+        from core.yt_audio_fetcher import YouTubeBotChallengeError
+
+        self.assertEqual(
+            _normalize_error_signature("abc123", RuntimeError("Failed to fetch abc123 with all 1 option(s)")),
+            _normalize_error_signature("xyz999", RuntimeError("Failed to fetch xyz999 with all 1 option(s)")),
+        )
+
+        manifest = [
+            {"video_id": "v_off_m2", "priority_score": 100, "is_short": False, "title_ar": "Offline"},
+            {"video_id": "v_m0_1", "priority_score": 90, "is_short": False, "title_ar": "M0 1"},
+            {"video_id": "v_m0_2", "priority_score": 80, "is_short": False, "title_ar": "M0 2"},
+            {"video_id": "v_m0_3", "priority_score": 70, "is_short": False, "title_ar": "M0 3"},
+            {"video_id": "v_m0_4", "priority_score": 60, "is_short": False, "title_ar": "M0 4"},
+            {"video_id": "v_m0_5", "priority_score": 50, "is_short": False, "title_ar": "M0 5"},
+        ]
+        self.ws.atomic_write_json(self.ws.data_dir / "video_manifest.json", manifest)
+        self.ws.advance_micro_step("v_off_m2", "M2_VOCALS_CLEANED")
+
+        dl_attempts = []
+        completed_vids = []
+
+        class FakeStage1Pipeline:
+            def __init__(self, workspace, **kwargs):
+                self.workspace = workspace
+                self.demucs = MagicMock()
+                self.diarizer = MagicMock()
+                self.separator = MagicMock()
+                self.asr = MagicMock()
+
+            def run_phase_a_m1_m2(self, rec, allow_youtube_download=True):
+                vid = rec["video_id"]
+                if self.workspace.get_video_state(vid)["step_rank"] >= 2:
+                    return True
+                dl_attempts.append(vid)
+                raise YouTubeBotChallengeError(f"Failed to fetch {vid} with all 1 option(s)", status_kind="challenged")
+
+            def run_phase_b_m3_m4(self, rec):
+                self.workspace.advance_micro_step(rec["video_id"], "M4_OVERLAPS_SEPARATED")
+                return True
+
+            def run_phase_c_m5(self, rec, t_start_vid=None):
+                vid = rec["video_id"]
+                payload = {
+                    "video_id": vid,
+                    "title_ar": rec.get("title_ar", ""),
+                    "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                    "duration_sec": 60.0,
+                    "detected_language": "en",
+                    "metrics": {"turns_count": 2, "overlap_windows_count": 0, "pedestrian_turns_count": 0},
+                    "speakers": [],
+                    "turns": [],
+                }
+                self.workspace.atomic_write_json(self.workspace.scenarios_dir / f"{vid}.json", payload)
+                self.workspace.advance_micro_step(vid, "M5_SCENARIO_BUILT")
+                completed_vids.append(vid)
+                return payload
+
+            def shutdown(self):
+                pass
+
+        args = argparse.Namespace(
+            worker_id="test-breaker-worker",
+            debates_only=False,
+            batch_videos=4,
+            max_session_minutes=0,
+            whisper_model="large-v3",
+            whisper_batch_size=8,
+            keep_raw_audio=False,
+            offline_only=False,
+        )
+
+        with patch("core.pipeline_orchestrator.SharedWorkspace", return_value=self.ws), \
+             patch("core.audio_diarizer.Stage1AudioPipeline", side_effect=FakeStage1Pipeline):
+            rc = run_stage1_worker(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(completed_vids, ["v_off_m2"])
+        # Stopped after 3 consecutive bot challenges without hammering v_m0_4 or v_m0_5
+        self.assertEqual(dl_attempts, ["v_m0_1", "v_m0_2", "v_m0_3"])
+        can_dl, _, reason = self.ws.check_youtube_download_slot(min_global_gap_sec=0.0)
+        self.assertFalse(can_dl)
+        self.assertIn("Anti-ban cooldown", reason)
+        for vid in ("v_m0_1", "v_m0_2", "v_m0_3", "v_m0_4", "v_m0_5"):
+            self.assertEqual(self.ws.get_video_state(vid)["error_count"], 0)
+
+    def test_monotonic_state_on_sync_select_skips_scenario_and_phase_bc_clip_reuse(self):
+        from unittest.mock import patch
+        from core.audio_diarizer import Stage1AudioPipeline
+        from core.overlap_resolver import cleanup_deterministic_clip_dir, get_deterministic_clip_dir
+        from core.pipeline_orchestrator import select_stage1_candidates
+
+        vid = "race_vid_01"
+        scen_path = self.ws.scenarios_dir / f"{vid}.json"
+        self.ws.atomic_write_json(
+            scen_path,
+            {
+                "video_id": vid,
+                "title_ar": "حوار اختباري",
+                "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                "duration_sec": 120.0,
+                "detected_language": "en",
+                "metrics": {"turns_count": 1},
+                "speakers": [{"speaker_id": "SPEAKER_00", "role": "muslim_daee", "speaking_time_sec": 10.0}],
+                "turns": [{"speaker_id": "SPEAKER_00", "start": 0.0, "end": 5.0, "text": "hello world"}],
+            },
+        )
+        # Simulate FUSE stale state overwriting state.json back to M4_OVERLAPS_SEPARATED
+        self.ws.atomic_write_json(
+            self.ws.state_path(vid),
+            {"video_id": vid, "micro_step": "M4_OVERLAPS_SEPARATED", "step_rank": 4, "error_count": 0},
+        )
+
+        # 1. select_stage1_candidates must skip vid because valid scenario JSON exists
+        cands = select_stage1_candidates(self.ws, [{"video_id": vid, "is_short": False, "priority_score": 100}])
+        self.assertEqual(cands, [])
+
+        # 2. sync_completed_shards_to_sqlite must enforce monotonic M5 floor on state.json
+        stats = self.ws.sync_completed_shards_to_sqlite()
+        self.assertEqual(stats["scenarios_synced"], 1)
+        repaired_st = self.ws.get_video_state(vid)
+        self.assertEqual(repaired_st["micro_step"], "M5_SCENARIO_BUILT")
+        self.assertEqual(repaired_st["step_rank"], 5)
+
+        # 3. run_phase_b_m3_m4 must pass local_tmp_dir=None to run_overlap_separation_m4
+        pipe = Stage1AudioPipeline(workspace=self.ws, whisper_model="base", device="cpu", batch_size=1)
+        vid_pb = "pb_clips_vid"
+        self.ws.advance_micro_step(vid_pb, "M2_VOCALS_CLEANED")
+        seen_local_tmp = []
+
+        def fake_m4(*args, **kwargs):
+            seen_local_tmp.append(kwargs.get("local_tmp_dir"))
+            get_deterministic_clip_dir(vid_pb).mkdir(parents=True, exist_ok=True)
+            return []
+
+        try:
+            with patch("core.audio_diarizer.ensure_local_leveled_16k_wav", return_value=(self.root / "fake.wav", [])), \
+                 patch("core.audio_diarizer.run_diarization_m3", return_value=([{"speaker_id": "S0"}], {}, [])), \
+                 patch("core.audio_diarizer.run_overlap_separation_m4", side_effect=fake_m4):
+                ok = pipe.run_phase_b_m3_m4({"video_id": vid_pb, "is_short": False})
+            self.assertTrue(ok)
+            self.assertEqual(seen_local_tmp, [None])
+            self.assertTrue(get_deterministic_clip_dir(vid_pb).exists())
+        finally:
+            cleanup_deterministic_clip_dir(vid_pb)
 
 
 if __name__ == "__main__":

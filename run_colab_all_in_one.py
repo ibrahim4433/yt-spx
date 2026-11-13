@@ -15,8 +15,12 @@ Features:
 from __future__ import annotations
 import os
 import sys
+import time
 import shutil
+import socket
+import platform
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Tuple
 
@@ -239,24 +243,97 @@ def persist_stage1_models_to_drive(workspace: Optional[Any] = None) -> bool:
         return False
 
 
-def _ensure_deno_runtime() -> None:
-    """Installs Deno so yt-dlp solves YouTube challenges cleanly."""
+def _prepend_deno_to_path() -> None:
+    """Adds standard Deno install bin directories to PATH if present."""
     for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
         if d.exists() and str(d) not in os.environ.get("PATH", ""):
             os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
-    if shutil.which("deno") or shutil.which("node"):
+
+
+def _ensure_deno_runtime() -> None:
+    """Installs Deno (>=2.3) so yt-dlp-ejs solves YouTube JS challenges cleanly.
+
+    Colab often pre-installs Node <22 which yt-dlp-ejs rejects, so presence of
+    ``node`` must never skip installing Deno.
+    """
+    _prepend_deno_to_path()
+    if shutil.which("deno"):
         return
     print("   -> Installing Deno JS runtime for yt-dlp YouTube challenge solver...")
-    subprocess.run(
+    res = subprocess.run(
         "curl -fsSL https://deno.land/install.sh | sh",
         shell=True,
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    for d in [Path.home() / ".deno" / "bin", Path("/root/.deno/bin")]:
-        if d.exists() and str(d) not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+    _prepend_deno_to_path()
+    if shutil.which("deno"):
+        print("   -> [OK] Deno JS runtime ready.")
+    elif res.returncode != 0:
+        print(f"   -> [WARN] Deno install exited with code {res.returncode}; falling back to available runtimes.")
+
+
+def _is_local_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Returns True if a TCP service is already listening on host:port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ensure_bgutil_pot_provider() -> None:
+    """Best-effort setup of bgutil yt-dlp PO-Token plugin and local HTTP provider (port 4416).
+
+    Ensures the ``bgutil-ytdlp-pot-provider`` yt-dlp plugin package is installed
+    and, on Linux x86_64 runtimes, starts the lightweight ``bgutil-pot`` standalone
+    server on ``127.0.0.1:4416`` if not already listening.
+    """
+    if not _dist_version("bgutil-ytdlp-pot-provider"):
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "bgutil-ytdlp-pot-provider"],
+            check=False,
+        )
+
+    if platform.system() != "Linux" or platform.machine().lower() not in ("x86_64", "amd64"):
+        return
+    if _is_local_port_open("127.0.0.1", 4416):
+        return
+
+    bin_candidates = [Path("/usr/local/bin/bgutil-pot"), Path("/tmp/bgutil-pot")]
+    bin_path = next((p for p in bin_candidates if p.exists() and p.stat().st_size > 100_000), None)
+    if bin_path is None:
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+        for target in bin_candidates:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp_dl = target.with_suffix(".tmp")
+                urllib.request.urlretrieve(url, str(tmp_dl))
+                tmp_dl.chmod(0o755)
+                tmp_dl.replace(target)
+                bin_path = target
+                break
+            except Exception:
+                continue
+
+    if bin_path is None:
+        return
+
+    try:
+        subprocess.Popen(
+            [str(bin_path), "server", "--port", "4416"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(15):
+            if _is_local_port_open("127.0.0.1", 4416, timeout=0.2):
+                print("   -> [OK] BgUtils PO-Token provider server running on 127.0.0.1:4416.")
+                return
+            time.sleep(0.2)
+    except Exception:
+        pass
 
 
 def _get_pip_cache_args() -> List[str]:
@@ -481,10 +558,12 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     if _verify_stage1_runtime_health():
         print("   -> Stage 1 audio/diarization dependencies already verified in this runtime.")
         _ensure_deno_runtime()
+        _ensure_bgutil_pot_provider()
         restore_stage1_models_from_drive()
         return
 
     _ensure_deno_runtime()
+    _ensure_bgutil_pot_provider()
 
     if shutil.which("ffmpeg") is None and shutil.which("apt-get"):
         subprocess.run(["apt-get", "update", "-qq"], check=False)
@@ -495,6 +574,7 @@ def ensure_stage1_dependencies(constraints_path: Path) -> None:
     stage1_pkgs = [
         "yt-dlp[default]>=2025.1.15",
         "yt-dlp-ejs>=0.8.0",
+        "bgutil-ytdlp-pot-provider",
         "pytubefix",
         "curl_cffi",
         "demucs",
@@ -678,9 +758,17 @@ def main() -> int:
 
     constraints_path = Path(CURRENT_DIR) / "constraints_colab.txt"
     if is_colab and mode == "test-cookies":
-        print("\n[2/3] Cookie test mode — ensuring yt-dlp + Deno only...")
+        print("\n[2/3] Cookie test mode — ensuring yt-dlp + Deno + PO-Token plugin...")
         _ensure_deno_runtime()
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp>=2025.1.15", "curl_cffi"], check=False)
+        subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install", "-q", "-U",
+                "yt-dlp[default]>=2025.1.15", "yt-dlp-ejs>=0.8.0",
+                "bgutil-ytdlp-pot-provider", "curl_cffi",
+            ],
+            check=False,
+        )
+        _ensure_bgutil_pot_provider()
     elif is_colab and mode == "auth-youtube":
         print("\n[2/3] Preparing YouTube Smart-TV OAuth2 environment...")
         _ensure_deno_runtime()

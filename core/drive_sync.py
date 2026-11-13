@@ -370,18 +370,20 @@ class SharedWorkspace:
         reason_str = str(data.get("reason", "")).lower()
         if (
             cooldown_until > now
-            and any(k in reason_str for k in ("invalid", "cookies", "how-do-i-pass-cookies", "challenged"))
+            and any(k in reason_str for k in ("cookies are no longer valid", "how-do-i-pass-cookies"))
             and "429" not in reason_str
             and "too many" not in reason_str
         ):
-            # Auto-clear false-positive cooldown tripped by cookie issues (anonymous download works!)
+            # Auto-clear false-positive cooldown tripped by legacy cookie issues (anonymous download works!)
             data["circuit_breaker_until"] = 0.0
             self.atomic_write_json(rl_path, data)
             cooldown_until = 0.0
 
         if cooldown_until > now:
             rem = round(cooldown_until - now, 1)
-            return False, rem, data.get("reason", "Anti-ban cooldown active")
+            raw_reason = str(data.get("reason") or "").strip()
+            msg = raw_reason if "Anti-ban cooldown" in raw_reason else (f"Anti-ban cooldown active: {raw_reason}" if raw_reason else "Anti-ban cooldown active")
+            return False, rem, msg
 
         last_dl = float(data.get("last_download_at", 0.0))
         elapsed = now - last_dl
@@ -458,12 +460,23 @@ class SharedWorkspace:
                 vid = scen_path.stem
                 st = self.get_video_state(vid)
                 if st.get("db_scenario_synced") and (vid in db_stage1_ok) and not force_reingest:
+                    if st.get("step_rank", 0) < STEP_RANK["M5_SCENARIO_BUILT"]:
+                        self.advance_micro_step(
+                            vid,
+                            "M5_SCENARIO_BUILT",
+                            artifacts={"scenario_json": str(scen_path)},
+                            extra_updates={"db_scenario_synced": True},
+                        )
                     continue
                 payload = self.read_json(scen_path)
                 if isinstance(payload, dict) and payload.get("video_id"):
                     ingest_scenario_payload(payload, db_path=db_file)
-                    st["db_scenario_synced"] = True
-                    self.atomic_write_json(self.state_path(vid), st)
+                    self.advance_micro_step(
+                        vid,
+                        "M5_SCENARIO_BUILT",
+                        artifacts={"scenario_json": str(scen_path)},
+                        extra_updates={"db_scenario_synced": True},
+                    )
                     stats["scenarios_synced"] += 1
 
             # 2. Sync Extracted Q&A Units (M6)
@@ -471,6 +484,13 @@ class SharedWorkspace:
                 vid = qa_path.name.replace(".qa.json", "")
                 st = self.get_video_state(vid)
                 if st.get("db_qa_synced") and (vid in db_stage2_ok) and (vid not in db_missing_arabic_vids) and not force_reingest:
+                    if st.get("step_rank", 0) < STEP_RANK["M6_LLM_EXTRACTED"]:
+                        self.advance_micro_step(
+                            vid,
+                            "M6_LLM_EXTRACTED",
+                            artifacts={"qa_json": str(qa_path)},
+                            extra_updates={"db_qa_synced": True},
+                        )
                     continue
                 payload = self.read_json(qa_path)
                 units = payload.get("units", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
@@ -486,8 +506,12 @@ class SharedWorkspace:
                     continue
 
                 ingest_extraction_payload(vid, units, db_path=db_file)
-                st["db_qa_synced"] = True
-                self.atomic_write_json(self.state_path(vid), st)
+                self.advance_micro_step(
+                    vid,
+                    "M6_LLM_EXTRACTED",
+                    artifacts={"qa_json": str(qa_path)},
+                    extra_updates={"db_qa_synced": True},
+                )
                 stats["qa_videos_synced"] += 1
                 stats["qa_units_synced"] += len(units)
 

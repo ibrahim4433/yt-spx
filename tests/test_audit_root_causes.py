@@ -399,6 +399,111 @@ class TestDeepAuditRegressions(unittest.TestCase):
             "verbatim_quote_ar": "اقتباس فيه كلمة יהודים عبرية",
         }))
 
+    def test_12_daee_counter_ask_perspective_and_rubric_integration(self):
+        """Ensures Da'ee defensive counter-asks are inverted/rejected and Round 2 conditional EN repair respects rubric audit."""
+        from core.extractor_prompt import ROUND1_ENGLISH_EXTRACTION_PROMPT, ROUND2_ARABIC_VERIFICATION_PROMPT
+        from core.scenario_extractor import merge_round1_and_round2_units
+        from tools.card_rating_system.audit_cards import audit_single_card, format_pre_round2_rubric_summary
+
+        # 1. Prompt parity checks for Seeker-Intent Polarity & non-forced Round 2 rubric checks
+        self.assertIn("SEEKER-INTENT POLARITY TEST", ROUND1_ENGLISH_EXTRACTION_PROMPT)
+        self.assertIn("what is the problem with that?", ROUND1_ENGLISH_EXTRACTION_PROMPT)
+        self.assertIn("فما المشكل في ذلك؟", ROUND2_ARABIC_VERIFICATION_PROMPT)
+        self.assertIn("english_edits_needed", ROUND2_ARABIC_VERIFICATION_PROMPT)
+
+        # 2. Exact Da'ee defensive rejoinder EN + AR normalization to seeker perspective
+        norm_en, norm_ar, ok = normalize_question_syntax_and_perspective(
+            "If every man in heaven has 72 virgins following him around, what is the problem with that?",
+            "إذا كان كل رجل في الجنة يُتبعه 72 فتاة، فما هو المشكل في ذلك؟",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(norm_en, "If every man in heaven has 72 virgins following him around, isn't that a bad thing?")
+        self.assertEqual(norm_ar, "إذا كان كل رجل في الجنة يُتبعه 72 فتاة، أليس ذلك أمرًا سيئًا؟")
+
+        # 3. Bare un-rewritable Da'ee defensive filler must be rejected in EN & AR
+        _, _, ok_bare_en = normalize_question_syntax_and_perspective("What is the problem with that?", "")
+        _, _, ok_bare_ar = normalize_question_syntax_and_perspective("", "فما هو المشكل في ذلك؟")
+        self.assertFalse(ok_bare_en)
+        self.assertFalse(ok_bare_ar)
+        self.assertFalse(is_valid_dialectical_question("What is the problem with that?"))
+        self.assertFalse(is_valid_dialectical_question("", "ما المشكل في ذلك؟"))
+
+        # 4. Genuine seeker question mentioning "problem with the Trinity" must stay untouched
+        keep_en, _, ok_genuine = normalize_question_syntax_and_perspective(
+            "What is the problem with the Trinity in early church councils?",
+            "ما الإشكال العقدي في عقيدة التثليث؟",
+        )
+        self.assertTrue(ok_genuine)
+        self.assertEqual(keep_en, "What is the problem with the Trinity in early church councils?")
+
+        # 5. Rubric audit integration + conditional (not forced) Round 2 merge
+        scen = self._base_scenario("rubric_vid")
+        clean_r1 = {
+            "question_turn_id": "rubric_vid_T0001",
+            "answer_turn_id": "rubric_vid_T0002",
+            "question_en": "Does God prescribe objective moral duties for humanity?",
+            "core_answer_summary_en": (
+                "Objective moral duties require a transcendent Lawgiver beyond subjective human opinion or evolving cultural conventions, "
+                "because binding moral accountability cannot originate from blind unconscious matter or shifting social preference alone. "
+                "When secular materialism reduces ethics to biological survival impulses or consensus, it strips moral obligation of any unconditional authority. "
+                "Only the All-Wise Creator provides an unchanging ontological foundation grounding justice, human dignity, and universal accountability."
+            ),
+            "logical_premises": [
+                "Premise 1: Binding moral duties cannot arise solely from arbitrary subjective preference.",
+                "Premise 2: Objective moral obligations hold universally across cultures.",
+                "Conclusion: Therefore an objective transcendent Lawgiver must exist.",
+            ],
+            "fallacy_or_misconception_exposed": "Moral Relativism: Conflating shifting human conventions with objective moral ontology.",
+            "socratic_question": "Without a Creator, why are your moral intuitions more binding than anyone else's?",
+            "verbatim_quote": scen["turns"][1]["text_original"],
+            "interlocutor_verbatim_quote": scen["turns"][0]["text_original"],
+            "dialogue_exchange": [
+                {"turn_id": "rubric_vid_T0001", "role": "INTERLOCUTOR", "text_en": scen["turns"][0]["text_original"]},
+                {"turn_id": "rubric_vid_T0002", "role": "MAIN_DAEE", "text_en": scen["turns"][1]["text_original"]},
+            ],
+        }
+        pre_eval = audit_single_card(clean_r1, scen["turns"], require_arabic=False)
+        self.assertFalse(pre_eval["needs_english_repair"])
+        summary_txt = format_pre_round2_rubric_summary([clean_r1], scen["turns"])
+        self.assertIn("Status=CLEAN", summary_txt)
+
+        # Clean card with english_edits_needed=false must preserve R1 English untouched even if R2 tries paraphrasing
+        merged_clean = merge_round1_and_round2_units(
+            [clean_r1],
+            [{
+                "question_turn_id": "rubric_vid_T0001",
+                "rubric_audit": {"score": 95, "english_edits_needed": False, "drop_card": False},
+                "question_en": "Attempted unnecessary paraphrase?",
+                "question_ar": "هل شرع الله واجبات أخلاقية موضوعية للبشرية؟",
+                "core_answer_summary_ar": "الواجبات الأخلاقية الموضوعية تستلزم مشرعًا متعاليًا.",
+                "logical_premises_ar": ["المقدمة الأولى", "المقدمة الثانية", "النتيجة"],
+                "fallacy_or_misconception_exposed_ar": "النسبية الأخلاقية",
+                "analogy_or_metaphor_ar": "",
+                "socratic_question_ar": "لولا الخالق فما مصدر الإلزام الأخلاقي؟",
+                "verbatim_quote_ar": "الأخلاق الموضوعية تستلزم مشرعًا.",
+            }],
+        )
+        self.assertEqual(merged_clean[0]["question_en"], clean_r1["question_en"])
+
+        # Defective card with english_edits_needed=true applies targeted fix; drop_card=true flags drop
+        merged_repaired = merge_round1_and_round2_units(
+            [dict(clean_r1, question_en="Why does God order morality, what is the problem with that?")],
+            [{
+                "question_turn_id": "rubric_vid_T0001",
+                "rubric_audit": {"score": 88, "english_edits_needed": True, "issues_fixed": ["DAEE_COUNTER_ASK"], "drop_card": False},
+                "question_en": "If God prescribes absolute moral laws, isn't that restrictive?",
+                "question_ar": "إذا فرض الله قوانين أخلاقية مطلقة، أليس ذلك تقييدًا للحرية؟",
+                "core_answer_summary_ar": "الواجبات الأخلاقية الموضوعية تستلزم مشرعًا متعاليًا.",
+            }],
+        )
+        self.assertEqual(merged_repaired[0]["question_en"], "If God prescribes absolute moral laws, isn't that restrictive?")
+
+        merged_dropped = merge_round1_and_round2_units(
+            [clean_r1],
+            [{"question_turn_id": "rubric_vid_T0001", "rubric_audit": {"drop_card": True, "hard_fail": "[GATE-NOISE]"}}],
+        )
+        self.assertTrue(merged_dropped[0].get("_dropped_by_round2_audit"))
+
 
 if __name__ == "__main__":
     unittest.main()

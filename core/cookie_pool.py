@@ -66,23 +66,50 @@ AGE_GATE_PATTERNS = [
     r"age.?restricted",
     r"inappropriate for some users",
 ]
+NETWORK_ERROR_PATTERNS = [
+    r"remotedisconnected",
+    r"remote end closed connection",
+    r"connection reset by peer",
+    r"connection aborted",
+    r"connectionerror",
+    r"incomplete read",
+    r"timed?\s*out",
+    r"temporary failure in name resolution",
+    r"name or service not known",
+    r"proxy error",
+    r"transport error",
+]
+FORBIDDEN_403_PATTERNS = [
+    r"http error 403",
+    r"403:\s*forbidden",
+]
+FORMAT_UNAVAILABLE_PATTERNS = [
+    r"requested format is not available",
+    r"no video formats found",
+]
 
 # Quarantine durations (seconds) per failure kind
 QUARANTINE_SEC = {
     "invalid": 7 * 24 * 3600,   # logged-out/rotated cookies: until the file is replaced
-    "challenged": 6 * 3600,     # bot-check while using this cookie
-    "rate_limited": 3600,       # HTTP 429 (often IP-level; short quarantine)
+    "challenged": 900,          # bot-check while using this cookie (15m -> 30m -> 60m cap)
+    "rate_limited": 900,        # HTTP 429 (often IP-level; short quarantine)
+    "forbidden_403": 900,       # HTTP 403 fragment/stream rejection (short cooldown)
     "age_gate": 0,              # age-gate failure doesn't mean the cookie is bad
+    "network": 0,               # transient TLS/socket/proxy disconnect doesn't mean the cookie is bad
+    "format_unavailable": 0,    # missing format / EJS issue doesn't mean the cookie is bad
 }
 
 
 def classify_ytdlp_output(output_lower: str) -> str:
-    """Returns one of: 'invalid', 'challenged', 'rate_limited', 'age_gate', '' (unknown/other)."""
+    """Returns 'invalid', 'challenged', 'rate_limited', 'age_gate', 'network', 'forbidden_403', 'format_unavailable', or ''."""
     for kind, pats in (
         ("invalid", COOKIE_INVALID_PATTERNS),
         ("challenged", COOKIE_CHALLENGED_PATTERNS),
         ("rate_limited", RATE_LIMIT_PATTERNS),
         ("age_gate", AGE_GATE_PATTERNS),
+        ("network", NETWORK_ERROR_PATTERNS),
+        ("forbidden_403", FORBIDDEN_403_PATTERNS),
+        ("format_unavailable", FORMAT_UNAVAILABLE_PATTERNS),
     ):
         if any(re.search(p, output_lower) for p in pats):
             return kind
@@ -318,16 +345,22 @@ class CookiePool:
         # A replaced file starts a fresh failure history
         if entry.get("fingerprint") and entry["fingerprint"] != self._fingerprint(path):
             entry = {}
-        fails = int(entry.get("consecutive_failures", 0)) + 1
-        base = QUARANTINE_SEC.get(kind, 1800)
-        # Escalate repeat challenges (6h -> 12h -> 24h ...), capped at 7 days
-        quarantine = min(base * (2 ** max(0, fails - 1)), QUARANTINE_SEC["invalid"]) if base > 0 else 0
+        fails = int(entry.get("consecutive_failures", 0))
+        base = QUARANTINE_SEC.get(kind, 900)
+        if base <= 0:
+            # Transient/non-cookie errors must neither quarantine the cookie nor escalate future penalties.
+            quarantined_until = float(entry.get("quarantined_until", 0.0) or 0.0)
+        else:
+            fails += 1
+            max_cap = QUARANTINE_SEC["invalid"] if kind == "invalid" else 3600
+            quarantine = min(base * (2 ** max(0, fails - 1)), max_cap)
+            quarantined_until = time.time() + quarantine
         entry.update({
             "consecutive_failures": fails,
             "last_failure_at": time.time(),
             "last_failure_kind": kind,
             "last_failure": reason[:300],
-            "quarantined_until": time.time() + quarantine,
+            "quarantined_until": quarantined_until,
             "fingerprint": self._fingerprint(path),
             "last_worker": self.ws.worker_id,
         })
@@ -427,7 +460,8 @@ class CookiePool:
                 "--no-playlist",
                 "--no-progress",
                 "--print", "id",
-                "--extractor-args", "youtube:player_client=android,web",
+                "--remote-components", "ejs:github",
+                "--extractor-args", "youtube:player_skip=initial_data",
                 "--cookies", str(jar),
             ]
             runtimes = [r for r in ("deno", "node") if shutil.which(r)]

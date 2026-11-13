@@ -1082,7 +1082,7 @@ class Stage1AudioPipeline:
                 workspace=self.workspace,
                 separator=self.separator,
                 diarizer=self.diarizer,
-                local_tmp_dir=local_tmp,
+                local_tmp_dir=None,
             )
             print(f"[DONE] ({len(sep_manifest)} cross-talk stream(s) unmixed)")
             self.workspace.heartbeat_lock(f"{vid}.stage1")
@@ -1100,6 +1100,16 @@ class Stage1AudioPipeline:
         srt_path = self.workspace.scenarios_dir / f"{vid}.diarized.srt"
 
         state = self.workspace.get_video_state(vid)
+        if scen_path.exists() and scen_path.stat().st_size > 100:
+            payload = self.workspace.read_json(scen_path)
+            if isinstance(payload, dict) and payload.get("video_id") == vid:
+                if state["step_rank"] < STEP_RANK["M5_SCENARIO_BUILT"]:
+                    self.workspace.advance_micro_step(
+                        vid,
+                        "M5_SCENARIO_BUILT",
+                        artifacts={"scenario_json": str(scen_path)},
+                    )
+                return payload
         if state["step_rank"] >= STEP_RANK["M5_SCENARIO_BUILT"] and scen_path.exists():
             return self.workspace.read_json(scen_path)
 

@@ -58,6 +58,21 @@ except (ImportError, ValueError):
         sanitize_arabic_unit_fields = None
         resolve_turn_speaker_labels = None
 
+try:
+    from tools.card_rating_system.audit_cards import (
+        audit_single_card,
+        format_pre_round2_rubric_summary,
+    )
+except (ImportError, ValueError):
+    try:
+        from ..tools.card_rating_system.audit_cards import (
+            audit_single_card,
+            format_pre_round2_rubric_summary,
+        )
+    except Exception:
+        audit_single_card = None
+        format_pre_round2_rubric_summary = None
+
 
 def _is_dialectical_payload_item(x: Any) -> bool:
     if not isinstance(x, dict):
@@ -983,7 +998,8 @@ def anchor_and_enrich_extracted_unit(
     cohesive turns and diarized Speaker records.
     Returns None if the unit fails theological validation, perspective integrity, or attributes opponent bias.
     """
-    item = sanitize_arabic_fields(dict(raw_unit))
+    item = sanitize_arabic_fields({k: v for k, v in raw_unit.items() if not str(k).startswith("_")})
+    item.pop("rubric_audit", None)
     vid = scenario["video_id"]
     yt_url = scenario.get("youtube_url") or f"https://www.youtube.com/watch?v={vid}"
 
@@ -1383,16 +1399,33 @@ def anchor_and_enrich_extracted_unit(
     return item
 
 
+_CONDITIONAL_EN_SCALAR_KEYS = (
+    "question_en",
+    "core_answer_summary_en",
+    "fallacy_or_misconception_exposed",
+    "analogy_or_metaphor",
+    "socratic_question",
+    "topic_category",
+    "topic_subcategory",
+    "interlocutor_type",
+    "question_turn_id",
+    "answer_turn_id",
+    "verbatim_quote",
+    "interlocutor_verbatim_quote",
+)
+
+
 def merge_round1_and_round2_units(
     r1_units: List[Dict[str, Any]],
     r2_units: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
     Deterministically zipper-merges Round 1 (pure English dialectical reasoning)
-    with Round 2 (theological verification and Classical Arabic localization).
+    with Round 2 (bounded-thinking Rubric Verification, conditional EN repairs, & Arabic localization).
 
     Protects against:
     - Out-of-order LLM response generation in Round 2 (matches by turn IDs or question similarity).
+    - Forced/needless English rewrites when Round 1 already passed quality checks (`english_edits_needed=false`).
     - Dropping English dialogue turns if Round 2 truncates dialogue turns.
     - Wiping out English scriptural citation source/significance if Round 2 only provides Arabic significance.
     - Wiping out multiple English analogies.
@@ -1460,11 +1493,48 @@ def merge_round1_and_round2_units(
             r2_u = {}
 
         merged = dict(r1_u)
+        r2_audit = r2_u.get("rubric_audit") if isinstance(r2_u.get("rubric_audit"), dict) else {}
+        if r2_audit.get("drop_card") is True:
+            merged["_dropped_by_round2_audit"] = True
+            merged["_drop_reason"] = str(r2_audit.get("hard_fail") or "Dropped by Round 2 Rubric Audit")
+            final_merged.append(merged)
+            continue
+
+        english_edits_needed = bool(r2_audit.get("english_edits_needed") is True)
 
         # Merge Arabic scalar & list fields
         for k, v in r2_u.items():
             if (k.endswith("_ar") or k == "topic_category_ar") and v:
                 merged[k] = v
+
+        # Conditional English repairs (ONLY when explicitly needed or missing in R1)
+        for en_key in _CONDITIONAL_EN_SCALAR_KEYS:
+            r2_val = r2_u.get(en_key)
+            if not r2_val or not str(r2_val).strip():
+                continue
+            r1_val = merged.get(en_key)
+            if not r1_val or not str(r1_val).strip():
+                merged[en_key] = r2_val
+            elif english_edits_needed and str(r2_val).strip() != str(r1_val).strip():
+                if en_key == "core_answer_summary_en":
+                    if len(str(r2_val).split()) >= 30 or len(str(r1_val).split()) < 30:
+                        merged[en_key] = r2_val
+                else:
+                    merged[en_key] = r2_val
+
+        for list_key in ("logical_premises", "analogies", "tags"):
+            r2_list = r2_u.get(list_key)
+            if not isinstance(r2_list, list) or not r2_list:
+                continue
+            r1_list = merged.get(list_key) or []
+            if not r1_list:
+                merged[list_key] = r2_list
+            elif english_edits_needed:
+                if list_key == "logical_premises":
+                    if len(r2_list) >= len(r1_list) or len(r2_list) >= 3:
+                        merged[list_key] = r2_list
+                else:
+                    merged[list_key] = r2_list
 
         # Zipper-merge dialogue exchange
         r1_ex = list(r1_u.get("dialogue_exchange") or r1_u.get("dialogue_trajectory") or [])
@@ -1494,7 +1564,7 @@ def merge_round1_and_round2_units(
                 if t2 and isinstance(t2, dict):
                     if t2.get("text_ar"):
                         turn_merged["text_ar"] = t2["text_ar"]
-                    if not turn_merged.get("text_en") and t2.get("text_en"):
+                    if t2.get("text_en") and (not turn_merged.get("text_en") or english_edits_needed):
                         turn_merged["text_en"] = t2["text_en"]
                     if t2.get("move_type") and not turn_merged.get("move_type"):
                         turn_merged["move_type"] = t2["move_type"]
@@ -1549,7 +1619,7 @@ def merge_round1_and_round2_units(
                         sc_merged["source"] = sc2["source"]
                     if not sc_merged.get("reference") and sc2.get("reference"):
                         sc_merged["reference"] = sc2["reference"]
-                    if not sc_merged.get("significance") and sc2.get("significance"):
+                    if sc2.get("significance") and (not sc_merged.get("significance") or english_edits_needed):
                         sc_merged["significance"] = sc2["significance"]
                 merged_citations.append(sc_merged)
 
@@ -1560,11 +1630,9 @@ def merge_round1_and_round2_units(
         elif r1_sc:
             merged["scriptural_citations"] = r1_sc
 
-        # Merge analogies (English preserved from R1, Arabic from R2)
+        # Preserve or conditionally update analogies
         if r2_u.get("analogies_ar"):
             merged["analogies_ar"] = r2_u["analogies_ar"]
-        if not merged.get("analogies") and r2_u.get("analogies"):
-            merged["analogies"] = r2_u["analogies"]
 
         final_merged.append(merged)
 
@@ -1917,9 +1985,9 @@ class Stage2ScenarioExtractor:
                 completed_win_ids.append(w_idx)
                 continue
 
-            # 3. Round 2: Bilingual Theological Verification & Classical Arabic Translation
-            # Sub-batch groups of up to 3 units when a full-conversation window yields >3 cards to avoid output truncation.
-            r2_batch_size = 3
+            # 3. Round 2: Bounded-Thinking Card Rating Verification, Conditional EN Repair, & Arabic Localization
+            # Sub-batch groups of up to 2 units so <=1024-token <think> + bilingual JSON fit cleanly without truncation.
+            r2_batch_size = 2
             final_raw_units: List[Dict[str, Any]] = []
             elapsed_r2 = 0.0
             for b_start in range(0, len(r1_units), r2_batch_size):
@@ -1937,6 +2005,10 @@ class Stage2ScenarioExtractor:
                     transcript_text=r2_excerpt,
                     english_units_json=r1_json_str,
                 )
+                if format_pre_round2_rubric_summary is not None:
+                    pre_audit_summary = format_pre_round2_rubric_summary(r1_batch, w.get("turns") or [])
+                    if pre_audit_summary:
+                        prompt_r2 = f"{pre_audit_summary}\n\n{prompt_r2}"
                 t0_r2 = time.time()
                 if hasattr(self.client, "extract_round2_arabic"):
                     raw_out_r2 = self.client.extract_round2_arabic(r1_json_str, prompt_r2)
@@ -1950,6 +2022,12 @@ class Stage2ScenarioExtractor:
             # 3B. Per-Unit Targeted Arabic Retry if batch Round 2 truncated or missed any unit's Arabic fields
             repaired_units: List[Dict[str, Any]] = []
             for idx_u, merged_u in enumerate(final_raw_units):
+                if merged_u.get("_dropped_by_round2_audit"):
+                    logger.info(
+                        "Window %d unit %d dropped by Round 2 Rubric Audit (%s).",
+                        w_idx, idx_u + 1, merged_u.get("_drop_reason", ""),
+                    )
+                    continue
                 if has_valid_arabic_localization(merged_u):
                     repaired_units.append(merged_u)
                     continue
@@ -2009,6 +2087,7 @@ class Stage2ScenarioExtractor:
             elapsed = round(elapsed_r1 + elapsed_r2, 1)
 
             win_enriched: List[Dict[str, Any]] = []
+            audit_labels_by_id: Dict[str, str] = {}
             for raw_item in final_raw_units:
                 if not has_valid_arabic_localization(raw_item):
                     continue
@@ -2026,6 +2105,17 @@ class Stage2ScenarioExtractor:
                     continue
                 if not has_valid_arabic_localization(enriched):
                     continue
+                if audit_single_card is not None:
+                    card_audit = audit_single_card(enriched, w.get("turns") or [], require_arabic=True)
+                    hf_gate = card_audit.get("hard_fail_triggered")
+                    if hf_gate in ("[GATE-LEAK]", "[GATE-NOISE]", "[GATE-ROLE]"):
+                        logger.warning(
+                            "Card %s dropped by final Rubric Audit hard-fail %s: %s",
+                            enriched.get("id", ""), hf_gate, card_audit.get("root_cause", ""),
+                        )
+                        continue
+                    tier_short = card_audit["tier"].split(":")[0]
+                    audit_labels_by_id[enriched["id"]] = f"{card_audit['total_score']}/100 {tier_short}"
                 if not _is_duplicate_qa(enriched, all_units + win_enriched):
                     win_enriched.append(enriched)
 
@@ -2052,9 +2142,10 @@ class Stage2ScenarioExtractor:
                         q_en = eu.get("question_en", "")
                         q_ar = eu.get("question_ar", "")
                         cat = eu.get("topic_category", "Theology")
+                        rubric_tag = f" [Rubric: {audit_labels_by_id[eu['id']]}]" if eu.get("id") in audit_labels_by_id else ""
                         ans_en = eu.get("core_answer_summary_en", "")
                         ans_preview = ans_en[:110] + "..." if len(ans_en) > 110 else ans_en
-                        print(f"      * [Card {eu['id']}] [{cat}]")
+                        print(f"      * [Card {eu['id']}] [{cat}]{rubric_tag}")
                         print(f"        Q (Seeker): \"{q_en}\"")
                         if q_ar:
                             print(f"        سؤال الباحث: \"{q_ar}\"")

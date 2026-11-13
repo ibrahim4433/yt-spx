@@ -42,15 +42,36 @@ NOISE_KEYWORDS = [
     "islamnet", "donate now", "link in the description", "fundraising", "subscribe to the channel"
 ]
 
-# Confessional inversion regex
-CONFESSIONAL_REGEX = re.compile(r'\b(why do i|why did i|why am i|how can i believe if i)\b', re.IGNORECASE)
+# Confessional & Da'ee counter-ask perspective regexes
+CONFESSIONAL_REGEX = re.compile(
+    r'(\b(?:why do i|why did i|why am i|how can i believe if i|if i haven\'?t read)\b'
+    r'|لماذا\s+أعارض|لماذا\s+أحمل\s+(?:مشاعر|رؤية)|لماذا\s+أكره)',
+    re.IGNORECASE,
+)
+DAEE_COUNTER_ASK_REGEX = re.compile(
+    r'(?:what(?:\'s|\s+is|\s+would\s+be)\s+(?:the\s+)?(?:problem|issue|harm|wrong|matter)\s+(?:with|about)\s+(?:that|this|it|doing\s+(?:so|that))'
+    r'|what(?:\'s|\s+is)\s+wrong\s+with\s+(?:that|this|it)'
+    r'|why\s+(?:is|would)\s+(?:that|this|it)\s+(?:be\s+)?(?:a\s+problem|an\s+issue|wrong|bad)'
+    r'|(?:ف|و)?ما\s+(?:هو\s+)?(?:المشكل|المشكلة|الإشكال|العيب|الضير)\s+في\s+(?:ذلك|هذا))\s*[؟?!.]*\s*$',
+    re.IGNORECASE,
+)
+SOCRATIC_ROLE_INVERSION_REGEX = re.compile(
+    r'\bshould\s+(?:god|he)\s+(?:love|approve(?:\s+of)?|reward)\s+a\s+(?:rapist|murderer|killer|liar|oppressor|hitler)\b',
+    re.IGNORECASE,
+)
 
-# Russian and Chinese character sets
+# Russian, Hebrew, Korean, and Chinese CJK character sets
 CYRILLIC_REGEX = re.compile(r'[\u0400-\u04FF]')
+HEBREW_REGEX = re.compile(r'[\u0590-\u05FF]')
 CJK_REGEX = re.compile(r'[\u4E00-\u9FFF\u3000-\u303F]')
+LATIN_IN_ARABIC_REGEX = re.compile(r'\b[A-Za-z]{4,}\b')
 
 
-def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+def audit_single_card(
+    card: Dict[str, Any],
+    turns: List[Dict[str, Any]],
+    require_arabic: bool = True,
+) -> Dict[str, Any]:
     card_id = card.get("id") or "UNKNOWN"
     vid = card.get("video_id") or "UNKNOWN"
 
@@ -61,7 +82,10 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
 
     # Concatenate transcript turns for ground-truth verification
     transcript_en = " ".join((t.get("text_original") or "").lower() for t in turns)
-    transcript_ar = " ".join((t.get("text_ar") or "") for t in turns)
+    turn_roles_by_id = {
+        str(t.get("turn_id") or "").strip(): t.get("speaker_role")
+        for t in turns if t.get("turn_id")
+    }
 
     # -------------------------------------------------------------
     # 1. HARD-FAIL GATE: [GATE-ARABIC] Missing Arabic Localization
@@ -70,8 +94,8 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
         "question_ar", "core_answer_summary_ar", "fallacy_or_misconception_exposed_ar",
         "analogy_or_metaphor_ar", "socratic_question_ar", "verbatim_quote_ar"
     ]
-    missing_ar_keys = [k for k in arabic_keys if not (card.get(k) or "").strip()]
-    if missing_ar_keys:
+    missing_ar_keys = [k for k in arabic_keys if not (card.get(k) or "").strip()] if require_arabic else []
+    if require_arabic and missing_ar_keys:
         hard_fail = "[GATE-ARABIC]"
         root_cause = "Round 2 Arabic localization was omitted, failed, or timed out."
         defects.append({
@@ -84,18 +108,43 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
     # -------------------------------------------------------------
     # 2. HARD-FAIL GATE: [GATE-LEAK] Prompt Few-Shot Demonstration Leakage
     # -------------------------------------------------------------
+    premises_raw = card.get("logical_premises") or []
+    if isinstance(premises_raw, str):
+        try:
+            premises_raw = json.loads(premises_raw)
+        except Exception:
+            premises_raw = [premises_raw]
+    analogies_raw = card.get("analogies") or []
+    if isinstance(analogies_raw, str):
+        try:
+            analogies_raw = json.loads(analogies_raw)
+        except Exception:
+            analogies_raw = [analogies_raw]
+    citations_raw = card.get("scriptural_citations") or []
+    if isinstance(citations_raw, str):
+        try:
+            citations_raw = json.loads(citations_raw)
+        except Exception:
+            citations_raw = []
+    citation_parts = [
+        f"{c.get('reference', '')} {c.get('significance', '')}"
+        for c in citations_raw if isinstance(c, dict)
+    ]
+
     card_all_text = " ".join([
         card.get("question_en") or "",
         card.get("core_answer_summary_en") or "",
         card.get("analogy_or_metaphor") or "",
         card.get("socratic_question") or "",
         card.get("verbatim_quote") or "",
-        card.get("interlocutor_verbatim_quote") or ""
+        card.get("interlocutor_verbatim_quote") or "",
+        " ".join(str(x) for x in premises_raw),
+        " ".join(str(x) for x in analogies_raw),
+        " ".join(citation_parts),
     ]).lower()
 
     for leak_code, signature in PROMPT_LEAKAGE_SIGNATURES:
         if signature in card_all_text:
-            # Check if signature was genuinely spoken in the transcript
             if signature not in transcript_en:
                 hard_fail = "[GATE-LEAK]"
                 root_cause = f"Model copied prompt demonstration example ('{signature}') not present in video transcript."
@@ -104,13 +153,14 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
                     "severity": "CRITICAL",
                     "description": f"Prompt demonstration leakage: Found '{signature}' which does not appear in transcript."
                 })
-                recommendations.append(f"Regenerate card without prompt few-shot demonstration text. Ground quotes strictly in video turns.")
+                recommendations.append("Remove prompt few-shot demonstration text and ground quotes strictly in video turns.")
 
     # -------------------------------------------------------------
-    # 3. HARD-FAIL GATE: [GATE-PERSPECTIVE] 1st-Person Confession
+    # 3. HARD-FAIL GATE: [GATE-PERSPECTIVE] Confessional / Da'ee Counter-Ask
     # -------------------------------------------------------------
     q_en = (card.get("question_en") or "").strip()
-    if CONFESSIONAL_REGEX.search(q_en):
+    q_ar = (card.get("question_ar") or "").strip()
+    if CONFESSIONAL_REGEX.search(q_en) or (q_ar and CONFESSIONAL_REGEX.search(q_ar)):
         hard_fail = hard_fail or "[GATE-PERSPECTIVE]"
         root_cause = root_cause or "Question formulated as an awkward 1st-person confession rather than an objective seeker objection."
         defects.append({
@@ -118,7 +168,16 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
             "severity": "HIGH",
             "description": f"1st-person confession detected in question: '{q_en}'"
         })
-        recommendations.append("Rephrase question into an objective third-person inquiry (e.g. 'Can one validly critique Islam without reading its primary texts?').")
+        recommendations.append("Rephrase question_en into an objective seeker objection ending with '?'.")
+    elif SOCRATIC_ROLE_INVERSION_REGEX.search(q_en):
+        hard_fail = hard_fail or "[GATE-PERSPECTIVE]"
+        root_cause = root_cause or "Question is the Da'ee's polemical Socratic challenge rather than the seeker's objection."
+        defects.append({
+            "code": "SOCRATIC_ROLE_INVERSION",
+            "severity": "HIGH",
+            "description": f"Da'ee Socratic cross-examination placed in question_en: '{q_en}'"
+        })
+        recommendations.append("Move Da'ee challenge to socratic_question and rewrite question_en as the seeker/interlocutor claim.")
 
     # -------------------------------------------------------------
     # 4. HARD-FAIL GATE: [GATE-NOISE] Conversational Noise / Outro Pitches / Police
@@ -126,7 +185,7 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
     q_lower = q_en.lower()
     ivq_lower = (card.get("interlocutor_verbatim_quote") or "").lower()
     vq_lower = (card.get("verbatim_quote") or "").lower()
-    
+
     found_noise = [kw for kw in NOISE_KEYWORDS if (kw in q_lower or kw in ivq_lower or kw in vq_lower)]
     if found_noise:
         hard_fail = hard_fail or "[GATE-NOISE]"
@@ -136,7 +195,7 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
             "severity": "CRITICAL",
             "description": f"Extracted non-apologetic content matching keywords: {', '.join(found_noise)}"
         })
-        recommendations.append("Prune this card from the apologetics knowledge base. Implement a pre-extraction relevance gatekeeper.")
+        recommendations.append("Drop this card if it reflects street banter, police logistics, or video outro fundraising.")
 
     # -------------------------------------------------------------
     # 5. HARD-FAIL GATE: [GATE-ROLE] Inverted Attribution / Single-Speaker Collapse
@@ -151,25 +210,48 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
             "severity": "HIGH",
             "description": f"Speaker ID '{daee_id}' assigned to both Da'ee and Interlocutor."
         })
-        recommendations.append("Verify acoustic diarization clusters to separate distinct speaker voiceprints.")
+        recommendations.append("Verify answer_turn_id belongs to MAIN_DAEE/CO_DAEE and question_turn_id to the interlocutor.")
+
+    a_tid = str(card.get("answer_turn_id") or "").strip()
+    if a_tid and a_tid in turn_roles_by_id and turn_roles_by_id[a_tid] not in ("MAIN_DAEE", "CO_DAEE"):
+        hard_fail = hard_fail or "[GATE-ROLE]"
+        root_cause = root_cause or f"answer_turn_id '{a_tid}' points to non-Da'ee role ({turn_roles_by_id[a_tid]})."
+        defects.append({
+            "code": "ANSWER_TURN_NOT_DAEE",
+            "severity": "CRITICAL",
+            "description": f"answer_turn_id '{a_tid}' is spoken by '{turn_roles_by_id[a_tid]}', not MAIN_DAEE/CO_DAEE."
+        })
+        recommendations.append("Re-anchor answer_turn_id to the MAIN_DAEE turn delivering the core refutation.")
 
     # -------------------------------------------------------------
-    # DIMENSIONAL SCORING (100 Points Total)
+    # DIMENSIONAL SCORING
     # -------------------------------------------------------------
     dim_scores = {
         "question_formulation": 15,
         "grounding_fidelity": 25,
         "dialectical_depth": 25,
-        "bilingual_symmetry": 20,
-        "attribution_timestamps": 15
+        "bilingual_symmetry": 20 if require_arabic else 0,
+        "attribution_timestamps": 15,
     }
 
     # Dim 1: Question Formulation (Max 15)
     if not q_en.endswith("?"):
         dim_scores["question_formulation"] -= 3
         defects.append({"code": "SYNTAX_NO_QUESTION_MARK", "severity": "MEDIUM", "description": "English question does not end with '?'"})
-    q_ar = (card.get("question_ar") or "").strip()
-    if q_ar and not q_ar.endswith("؟"):
+        recommendations.append("Rewrite question_en as a grammatical interrogative ending with '?'.")
+    if q_en and ("..." in q_en or "…" in q_en):
+        dim_scores["question_formulation"] -= 4
+        defects.append({"code": "FRAGMENTED_QUESTION", "severity": "HIGH", "description": "English question contains incomplete ellipsis fragment."})
+        recommendations.append("Rewrite question_en as a complete standalone question without '...'.")
+    if DAEE_COUNTER_ASK_REGEX.search(q_en) or (q_ar and DAEE_COUNTER_ASK_REGEX.search(q_ar)):
+        dim_scores["question_formulation"] -= 6
+        defects.append({
+            "code": "DAEE_COUNTER_ASK_PERSPECTIVE",
+            "severity": "HIGH",
+            "description": "Question ends with Da'ee defensive comeback ('what is the problem with that?' / 'فما المشكل في ذلك') instead of seeker objection.",
+        })
+        recommendations.append("Invert question_en/question_ar to the skeptic's objection (e.g., '..., isn't that a bad thing?').")
+    if require_arabic and q_ar and not q_ar.endswith("؟"):
         dim_scores["question_formulation"] -= 2
         defects.append({"code": "SYNTAX_NO_ARABIC_QUESTION_MARK", "severity": "LOW", "description": "Arabic question does not end with '؟'"})
     if len(q_en.split()) < 4:
@@ -178,45 +260,78 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
 
     # Dim 2: Grounding Fidelity (Max 25)
     daee_quote = (card.get("verbatim_quote") or "").strip()
-    if daee_quote:
+    if not daee_quote:
+        dim_scores["grounding_fidelity"] -= 5
+        defects.append({"code": "MISSING_DAEE_QUOTE", "severity": "MEDIUM", "description": "Missing verbatim_quote from transcript."})
+        recommendations.append("Copy an exact word-for-word MAIN_DAEE proof quote from the transcript into verbatim_quote.")
+    elif transcript_en:
         sample_words = [w for w in re.findall(r'\b\w{4,}\b', daee_quote.lower()) if w not in {"that", "this", "what", "from", "with", "have"}]
         if sample_words:
             matched_words = [w for w in sample_words if w in transcript_en]
             ratio = len(matched_words) / len(sample_words)
             if ratio < 0.3:
                 dim_scores["grounding_fidelity"] -= 8
-                defects.append({"code": "QUOTE_UNGROUNDED_DAEE", "severity": "HIGH", "description": f"Da'ee verbatim quote appears fabricated (only {ratio:.0%} lexical overlap with transcript)."})
+                defects.append({"code": "QUOTE_UNGROUNDED_DAEE", "severity": "HIGH", "description": f"Da'ee verbatim quote appears ungrounded (only {ratio:.0%} lexical overlap with transcript)."})
+                recommendations.append("Replace verbatim_quote with an exact spoken quote from the Da'ee in the transcript.")
+
+    ex_turns = card.get("dialogue_exchange") or card.get("dialogue_trajectory") or []
+    if not isinstance(ex_turns, list) or len(ex_turns) < 2:
+        dim_scores["grounding_fidelity"] -= 4
+        defects.append({"code": "THIN_DIALOGUE_EXCHANGE", "severity": "MEDIUM", "description": "dialogue_exchange has fewer than 2 grounded turns."})
 
     # Dim 3: Dialectical Depth (Max 25)
-    premises_en = card.get("logical_premises") or []
-    if isinstance(premises_en, str):
-        try:
-            premises_en = json.loads(premises_en)
-        except Exception:
-            premises_en = [premises_en]
+    premises_en = premises_raw if isinstance(premises_raw, list) else []
     if len(premises_en) < 2:
         dim_scores["dialectical_depth"] -= 6
-        defects.append({"code": "INCOMPLETE_SYLLOGISM", "severity": "MEDIUM", "description": "Fewer than 2 logical premises in deductive syllogism."})
-
-    sum_en = card.get("core_answer_summary_en") or ""
-    if re.search(r'\b(the da\'?ee|hashim|mansur|uthman) (says|counters|explains|argues)\b', sum_en, re.I):
+        defects.append({"code": "INCOMPLETE_SYLLOGISM", "severity": "HIGH", "description": "Fewer than 2 logical premises in deductive syllogism."})
+        recommendations.append("Provide a formal 3-step deductive syllogism (Premise 1, Premise 2, Conclusion) grounded in the debate.")
+    elif len(premises_en) == 2:
         dim_scores["dialectical_depth"] -= 3
-        defects.append({"code": "META_NARRATOR_SUMMARY", "severity": "LOW", "description": "Core summary written in 3rd-person narrator style instead of direct truth."})
+        defects.append({"code": "SYLLOGISM_UNDER_3_PREMISES", "severity": "LOW", "description": "Only 2 premises; rubric recommends 3 deductive steps (Major, Minor, Conclusion)."})
 
-    # Dim 4: Bilingual Symmetry (Max 20)
-    if missing_ar_keys:
-        dim_scores["bilingual_symmetry"] = 0
-    else:
-        for k in arabic_keys:
-            val = card.get(k) or ""
-            if CYRILLIC_REGEX.search(val) or CJK_REGEX.search(val):
-                dim_scores["bilingual_symmetry"] -= 5
-                defects.append({"code": "FOREIGN_SCRIPT_LEAKAGE", "severity": "HIGH", "description": f"Cyrillic or CJK script detected in '{k}'"})
-                break
+    sum_en = (card.get("core_answer_summary_en") or "").strip()
+    if re.search(r'\b(the da\'?ee|the speaker|hashim|mansur|uthman|ali)\s+(says|counters|explains|argues|responds)\b', sum_en, re.I):
+        dim_scores["dialectical_depth"] -= 3
+        defects.append({"code": "META_NARRATOR_SUMMARY", "severity": "MEDIUM", "description": "Core summary uses 3rd-person meta-narrative instead of stating direct Islamic truth."})
+        recommendations.append("Rewrite core_answer_summary_en directly without 3rd-person phrases like 'The Da'ee explains...'.")
+    if len(sum_en.split()) < 60:
+        dim_scores["dialectical_depth"] -= 3
+        defects.append({"code": "SHALLOW_ANSWER_SUMMARY", "severity": "MEDIUM", "description": f"core_answer_summary_en is too brief ({len(sum_en.split())} words vs 150-250 target)."})
+        recommendations.append("Expand core_answer_summary_en with the full rational and scriptural proof spoken in the dialogue.")
+
+    if not (card.get("fallacy_or_misconception_exposed") or "").strip():
+        dim_scores["dialectical_depth"] -= 3
+        defects.append({"code": "MISSING_FALLACY", "severity": "LOW", "description": "fallacy_or_misconception_exposed is empty."})
+
+    soc_q = (card.get("socratic_question") or "").strip()
+    if not soc_q:
+        dim_scores["dialectical_depth"] -= 3
+        defects.append({"code": "MISSING_SOCRATIC_QUESTION", "severity": "LOW", "description": "socratic_question is empty."})
+    elif q_en and soc_q.lower().rstrip("?") == q_en.lower().rstrip("?"):
+        dim_scores["dialectical_depth"] -= 2
+        defects.append({"code": "DUPLICATE_SOCRATIC_QUESTION", "severity": "LOW", "description": "socratic_question merely repeats question_en."})
+
+    # Dim 4: Bilingual Symmetry (Max 20) — evaluated when require_arabic=True
+    if require_arabic:
+        if missing_ar_keys:
+            dim_scores["bilingual_symmetry"] = 0
+        else:
+            for k in arabic_keys:
+                val = card.get(k) or ""
+                if CYRILLIC_REGEX.search(val) or HEBREW_REGEX.search(val) or CJK_REGEX.search(val):
+                    dim_scores["bilingual_symmetry"] -= 5
+                    defects.append({"code": "FOREIGN_SCRIPT_LEAKAGE", "severity": "HIGH", "description": f"Non-Arabic script (Cyrillic/Hebrew/CJK) detected in '{k}'"})
+                    break
+                if LATIN_IN_ARABIC_REGEX.search(val):
+                    dim_scores["bilingual_symmetry"] -= 3
+                    defects.append({"code": "LATIN_LEAKAGE_IN_ARABIC", "severity": "MEDIUM", "description": f"Untranslated Latin words detected in '{k}'"})
+                    break
 
     # Dim 5: Attribution & Timestamps (Max 15)
     ts_sec = card.get("timestamp_seconds")
-    if ts_sec is None or ts_sec < 0:
+    q_tid = str(card.get("question_turn_id") or "").strip()
+    has_valid_turn_anchor = bool(q_tid and (not turn_roles_by_id or q_tid in turn_roles_by_id))
+    if (ts_sec is None or ts_sec < 0) and (require_arabic or not has_valid_turn_anchor):
         dim_scores["attribution_timestamps"] -= 5
         defects.append({"code": "INVALID_TIMESTAMP", "severity": "MEDIUM", "description": "Missing or negative timestamp seconds."})
 
@@ -224,38 +339,85 @@ def audit_single_card(card: Dict[str, Any], turns: List[Dict[str, Any]]) -> Dict
     for d in dim_scores:
         dim_scores[d] = max(0, dim_scores[d])
 
-    total_score = sum(dim_scores.values())
+    raw_score = sum(dim_scores.values())
+    max_score = 100 if require_arabic else 80
+    score_pct = int(round((raw_score / max_score) * 100)) if max_score else 0
 
-    # If Hard-Fail was triggered, score collapses to 0
     if hard_fail:
-        total_score = 0
+        raw_score = 0
+        score_pct = 0
         status = "FAIL"
         tier = "Tier 4: Critical Failure / Rejected (Red)"
     else:
-        status = "PASS"
-        if total_score >= 90:
+        status = "PASS" if score_pct >= 50 else "FAIL"
+        if score_pct >= 90:
             tier = "Tier 1: Production Ready (Gold)"
-        elif total_score >= 75:
+        elif score_pct >= 75:
             tier = "Tier 2: Minor Polish Needed (Silver)"
-        elif total_score >= 50:
+        elif score_pct >= 50:
             tier = "Tier 3: Substandard / Requires Regeneration (Bronze)"
         else:
             tier = "Tier 4: Critical Failure / Rejected (Red)"
-            status = "FAIL"
+
+    needs_english_repair = bool(
+        hard_fail
+        or score_pct < 85
+        or any(d.get("severity") in ("HIGH", "CRITICAL") for d in defects)
+    )
 
     return {
         "card_id": card_id,
         "video_id": vid,
-        "total_score": total_score,
+        "total_score": raw_score if require_arabic else score_pct,
+        "raw_score": raw_score,
+        "max_score": max_score,
+        "score_pct": score_pct,
         "status": status,
         "tier": tier,
         "hard_fail_triggered": hard_fail,
+        "needs_english_repair": needs_english_repair,
         "dimension_scores": dim_scores,
         "defect_count": len(defects),
         "defects": defects,
         "root_cause": root_cause,
-        "recommendations": recommendations
+        "recommendations": recommendations,
     }
+
+
+def format_pre_round2_rubric_summary(
+    r1_units: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+) -> str:
+    """
+    Runs the Card Rating System pre-check on Round 1 English dossiers before Round 2 runs,
+    generating targeted instructions telling Round 2 which cards are CLEAN (keep English untouched)
+    vs which specific English defects need conditional repair alongside Arabic localization.
+    """
+    if not r1_units:
+        return ""
+
+    lines = ["PRE-ROUND-2 CARD RATING & DEFECT DIAGNOSTICS (tools/card_rating_system):"]
+    for idx, u in enumerate(r1_units, 1):
+        ev = audit_single_card(u, turns, require_arabic=False)
+        q_tid = u.get("question_turn_id", "")
+        a_tid = u.get("answer_turn_id", "")
+        if not ev["needs_english_repair"] and not ev["defects"]:
+            lines.append(
+                f"- Card {idx} ({q_tid} -> {a_tid}): Score={ev['score_pct']}/100 ({ev['tier']}) | "
+                "Status=CLEAN -> Keep ALL Round 1 English fields UNCHANGED (set english_edits_needed=false) and focus on Classical Arabic localization."
+            )
+        else:
+            status_tag = ev["hard_fail_triggered"] or ("NEEDS_REPAIR" if ev["needs_english_repair"] else "MINOR_POLISH")
+            defect_strs = [f"[{d['code']}] {d['description']}" for d in ev["defects"][:4]]
+            rec_strs = ev["recommendations"][:3]
+            lines.append(
+                f"- Card {idx} ({q_tid} -> {a_tid}): Score={ev['score_pct']}/100 | Status={status_tag}"
+            )
+            if defect_strs:
+                lines.append(f"  Defects: {'; '.join(defect_strs)}")
+            if rec_strs:
+                lines.append(f"  Targeted Fix: {' | '.join(rec_strs)}")
+    return "\n".join(lines)
 
 
 def run_audit(db_path: Path, video_filter: Optional[str] = None, fail_only: bool = False) -> Dict[str, Any]:

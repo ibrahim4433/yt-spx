@@ -48,8 +48,63 @@ class AntiBanCircuitBreakerError(RuntimeError):
     """Raised when YouTube challenges or rate-limits downloads so the batch pauses fetching safely."""
 
 
+class YouTubeBotChallengeError(RuntimeError):
+    """Raised when fetch attempts fail due to YouTube bot-check, HTTP 429, or HTTP 403 challenge."""
+
+    def __init__(self, message: str, status_kind: str = "challenged") -> None:
+        super().__init__(message)
+        self.status_kind = status_kind
+
+
 class PermanentVideoUnavailableError(RuntimeError):
     """Raised when a YouTube video was deleted or made private."""
+
+
+def _extract_concise_ytdlp_error(output: str, max_len: int = 240) -> str:
+    """Returns the last ERROR line from yt-dlp output, or a trimmed tail fallback."""
+    for line in reversed(output.splitlines()):
+        stripped = line.strip()
+        if "ERROR:" in stripped:
+            return stripped[-max_len:]
+    return output[-max_len:].strip()
+
+
+def _attempt_pytubefix_download(url: str, vid: str, tmp_dir: Path, expected_dur: float = 0.0) -> bool:
+    """Best-effort PytubeFix fallback trying ANDROID_VR (PO-token-free) then WEB PoToken client."""
+    try:
+        from pytubefix import YouTube
+    except Exception as exc:
+        print(f"    [auth] PytubeFix unavailable: {exc}", flush=True)
+        return False
+
+    min_bytes = int(expected_dur * 1500) if expected_dur >= 300.0 else 5_000
+    dl_name = f"{vid}.mp4"
+    for client_name, kwargs in (
+        ("ANDROID_VR", {}),
+        ("WEB", {"use_po_token": True}),
+    ):
+        dl_path = tmp_dir / dl_name
+        dl_path.unlink(missing_ok=True)
+        try:
+            print(f"    [auth] Trying PytubeFix fallback ({client_name}) for {vid}...", flush=True)
+            yt = YouTube(url, client=client_name, **kwargs)
+            st = (
+                yt.streams.get_audio_only()
+                or yt.streams.filter(progressive=True).first()
+                or yt.streams.filter(only_audio=True).first()
+            )
+            if not st:
+                continue
+            st.download(output_path=str(tmp_dir), filename=dl_name)
+            if dl_path.exists() and dl_path.stat().st_size >= min_bytes:
+                print(
+                    f"    [auth] PytubeFix ({client_name}) succeeded ({dl_path.stat().st_size // 1024} KB).",
+                    flush=True,
+                )
+                return True
+        except Exception as pt_exc:
+            print(f"    [auth] PytubeFix ({client_name}) note: {pt_exc}", flush=True)
+    return False
 
 
 def patch_youtube_oauth2_plugin() -> bool:
@@ -201,44 +256,56 @@ def fetch_video_audio_m1(
             runtimes.append("node")
         if runtimes:
             base_cmd.extend(["--js-runtimes", ",".join(runtimes)])
+        base_cmd.extend(["--remote-components", "ejs:github"])
 
         # Multi-attempt strategy:
-        # 1. Anonymous download FIRST by default!
-        #    yt-dlp uses visionos/web HLS formats (234/233) which don't require PO tokens or auth.
-        # 2. Healthy rotating cookie pool for restricted/age-gated videos.
+        # 1. Anonymous download FIRST (visionos/HLS avoids PO tokens when unflagged).
+        #    If anonymous fails due to transient network/format issues, immediately try android_vr anonymously
+        #    before touching authenticated cookies.
+        # 2. Healthy rotating cookie pool for bot-challenged / restricted / age-gated videos.
+        # 3. Anonymous android_vr retry if not yet tried, followed by PytubeFix fallback.
         pool = CookiePool(workspace)
         healthy = pool.healthy_cookies()[:max_cookie_attempts]
 
-        attempts: List[Any] = [None]
-        attempts.extend(list(healthy))
+        plan: List[Tuple[Optional[Path], Optional[str], str]] = [
+            (None, None, "anonymous (visionos/hls)"),
+        ]
+        for c_path in healthy:
+            plan.append((c_path, None, pool.cookie_key(c_path)))
 
-        proc = None
         last_kind = ""
         last_tail = ""
+        saw_bot_challenge = False
+        tried_android_vr = False
         success = False
-        for idx, cookie in enumerate(attempts):
-            if idx > 0:
+        attempts_run = 0
+        quarantine_kinds = {"invalid", "challenged", "rate_limited", "forbidden_403"}
+
+        while plan:
+            cookie, player_client, cookie_label = plan.pop(0)
+            if attempts_run > 0:
                 time.sleep(random.uniform(4.0, 8.0))
-            # Clean partial files from any previous failed attempt
+            attempts_run += 1
+
             for f in tmp_dir.iterdir():
                 if f.is_file():
                     f.unlink(missing_ok=True)
 
             cmd = list(base_cmd)
-            cookie_label = "anonymous (visionos/hls)"
-            cmd.extend([
-                "--extractor-args", "youtube:player_skip=initial_data",
-            ])
+            ext_arg = "youtube:player_skip=initial_data"
+            if player_client:
+                ext_arg = f"youtube:player_client={player_client};player_skip=initial_data"
+                tried_android_vr = tried_android_vr or (player_client == "android_vr")
+            cmd.extend(["--extractor-args", ext_arg])
+
             if cookie is not None:
-                # Isolated working copy with Netscape header & tab repair so yt-dlp never fails syntax
                 cookies_tmp = tmp_dir / "cookies_working.txt"
                 sanitize_cookie_file(cookie, cookies_tmp)
                 cmd.extend(["--cookies", str(cookies_tmp)])
-                cookie_label = pool.cookie_key(cookie)
-            cmd.append(url)
 
-            if idx > 0:
-                print(f"    [auth] Fallback attempt {idx + 1}/{len(attempts)} with {cookie_label}", flush=True)
+            if attempts_run > 1:
+                total_planned = attempts_run + len(plan)
+                print(f"    [auth] Fallback attempt {attempts_run}/{total_planned} with {cookie_label}", flush=True)
 
             proc = subprocess.run(
                 cmd,
@@ -252,10 +319,9 @@ def fetch_video_audio_m1(
             output = proc.stdout or ""
             output_lower = output.lower()
             kind = classify_ytdlp_output(output_lower)
-            last_tail = output[-240:].strip()
+            last_tail = _extract_concise_ytdlp_error(output)
 
             if proc.returncode == 0:
-                # Ensure the downloaded file is complete and not an aborted/truncated fragment
                 cand_audio = None
                 for f in tmp_dir.iterdir():
                     if f.is_file() and not f.name.endswith((".part", ".ytdl", ".info.json", "cookies_working.txt")):
@@ -264,12 +330,12 @@ def fetch_video_audio_m1(
                 min_bytes = int(expected_dur * 1500) if expected_dur >= 300.0 else 5_000
                 if cand_audio is None or cand_audio.stat().st_size < min_bytes:
                     cand_sz = cand_audio.stat().st_size if cand_audio else 0
-                    print(f"    [download] Attempt {idx + 1} produced truncated file ({cand_sz // 1024} KB < {min_bytes // 1024} KB expected) -> rotating to next attempt.", flush=True)
+                    print(f"    [download] Attempt {attempts_run} produced truncated file ({cand_sz // 1024} KB < {min_bytes // 1024} KB expected) -> rotating to next attempt.", flush=True)
+                    last_kind = "network"
                     continue
 
                 if cookie is not None:
                     if kind == "invalid":
-                        # Downloaded anonymously, but this cookie is dead -> quarantine so next video uses another
                         pool.mark_failed(cookie, "invalid", last_tail)
                         print(f"    [cookies] {cookie_label} is no longer valid (rotated/logged out) -> quarantined.", flush=True)
                     else:
@@ -281,54 +347,46 @@ def fetch_video_audio_m1(
                 if re.search(pat, output_lower):
                     raise PermanentVideoUnavailableError(f"Video {vid} is permanently unavailable on YouTube.")
 
-            # If this attempt failed while using a cookie, quarantine/record it and ROTATE!
-            if cookie is not None:
-                fail_kind = kind or "format_or_access_restricted"
-                last_kind = fail_kind
-                if fail_kind != "age_gate":
-                    pool.mark_failed(cookie, fail_kind, last_tail)
-                    print(f"    [cookies] {cookie_label} failed ({fail_kind}) -> quarantined, rotating to next attempt.", flush=True)
-                continue
-
-            # If anonymous attempt failed (idx == 0) and fallbacks are available, log fallback
-            if idx == 0 and len(attempts) > 1:
-                print(f"    [auth] Anonymous download encountered restriction ({kind or 'code ' + str(proc.returncode)}) -> trying authenticated fallback pool...", flush=True)
-                continue
-
-            # If any attempt failed but there are remaining fallback attempts
-            if idx + 1 < len(attempts):
-                continue
-
             last_kind = kind or f"code_{proc.returncode}"
-            break
+            if kind in ("challenged", "rate_limited", "forbidden_403"):
+                saw_bot_challenge = True
+
+            if cookie is not None:
+                if kind in quarantine_kinds:
+                    pool.mark_failed(cookie, kind, last_tail)
+                    print(f"    [cookies] {cookie_label} failed ({kind}) -> cooldown, rotating to next attempt.", flush=True)
+                else:
+                    print(
+                        f"    [cookies] {cookie_label} failed ({last_kind}: {last_tail[:100]}) -> keeping cookie active.",
+                        flush=True,
+                    )
+            elif attempts_run == 1:
+                # If anonymous HLS failed for non-auth reasons, test android_vr before burning cookies
+                if not tried_android_vr and kind in ("network", "format_unavailable", "forbidden_403"):
+                    plan.insert(0, (None, "android_vr", "anonymous (android_vr)"))
+                elif plan:
+                    print(
+                        f"    [auth] Anonymous download encountered restriction ({last_kind}) -> trying authenticated fallback pool...",
+                        flush=True,
+                    )
+
+            # Before giving up on yt-dlp, give anonymous android_vr one clean shot unless age-gated
+            if not plan and not tried_android_vr and last_kind != "age_gate":
+                plan.append((None, "android_vr", "anonymous (android_vr)"))
 
         if not success:
-            # PytubeFix fallback (WEB client uses Node.js PoToken generation)
-            try:
-                print(f"    [auth] Trying PytubeFix fallback for {vid}...", flush=True)
-                from pytubefix import YouTube
-                yt = YouTube(url, client="WEB")
-                st = yt.streams.get_audio_only()
-                if not st:
-                    st = yt.streams.filter(progressive=True).first()
-                if not st:
-                    st = yt.streams.filter(only_audio=True).first()
-                if st:
-                    dl_name = f"{vid}.mp4"
-                    st.download(output_path=str(tmp_dir), filename=dl_name)
-                    dl_path = tmp_dir / dl_name
-                    if dl_path.exists() and dl_path.stat().st_size > 5_000:
-                        success = True
-                        print(f"    [auth] PytubeFix fallback download succeeded ({dl_path.stat().st_size // 1024} KB).", flush=True)
-            except Exception as pt_exc:
-                print(f"    [auth] PytubeFix fallback note: {pt_exc}", flush=True)
+            success = _attempt_pytubefix_download(url, vid, tmp_dir, expected_dur=expected_dur)
 
         if not success:
             if last_kind == "age_gate":
                 raise RuntimeError(f"Video {vid} is age-restricted and no available cookie could access it.")
-            raise RuntimeError(
-                f"Failed to fetch {vid} with all {len(attempts)} option(s) (last status: {last_kind or 'unknown'}): {last_tail}"
+            err_msg = (
+                f"Failed to fetch {vid} with all {attempts_run} option(s) "
+                f"(last status: {last_kind or 'unknown'}): {last_tail}"
             )
+            if saw_bot_challenge or any(re.search(pat, last_tail.lower()) for pat in BOT_CHALLENGE_PATTERNS):
+                raise YouTubeBotChallengeError(err_msg, status_kind=last_kind or "challenged")
+            raise RuntimeError(err_msg)
 
         # Locate downloaded media file and .info.json
         downloaded_audio: Optional[Path] = None
