@@ -674,7 +674,9 @@ MANDATORY GLOSSARY:
 - "synchronicities" -> "التزامنات / التوافقات" (NEVER translate as المؤامرات or الموامرات!).
 - "Taoism" -> "الطاوية" (NEVER translate as الطائفة!).
 - Biblical names: Paul -> "بولس" (NEVER بول!), Matthew -> "متى" (NEVER ماتيو!), Mark -> "مرقس", Luke -> "لوقا", John -> "يوحنا", Peter -> "بطرس", James -> "يعقوب".
+- Kalam & comparative theology: "necessary being" -> "واجب الوجود", "contingency" -> "الإمكان", "infinite regress" -> "التسلسل اللانهائي", "Trinity" -> "التثليث", "Crucifixion" -> "الصلب", "Atonement" -> "الفداء".
 - "Jews" -> "اليهود" (NEVER Hebrew characters!).
+- Orthodox attribution (عقيدة أهل السنة والجماعة): preserve God's transcendence and distinguish the Da'ee's Islamic refutation from the interlocutor's claims.
 For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating ALL Arabic fields:
 - `question_ar` (from seeker/skeptic perspective ending with '؟' — NEVER a Da'ee defensive comeback like "فما المشكل في ذلك؟"), `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
 - `logical_premises_ar` (array of exactly 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
@@ -699,7 +701,7 @@ ROUND 1 EXTRACTED ENGLISH DOSSIERS:
 Perform a concise <think> Rubric Verification & Theological Audit (within thinking limit: keep reasoning concise under ~400 words/card), fix any flagged English defect ONLY IF NEEDED (`english_edits_needed: true`, else preserve original English untouched), and translate all fields into pure Classical Arabic (فصحى رصينة) with text_ar on every dialogue_exchange turn. Output strictly the completed JSON array after </think>: [ {{ ... }} ]
 """
 
-USER_COMPACT_ROUND2_RETRY_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
+USER_ROUND2_CLEAN_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
 Video Title: {title_ar}
 YouTube URL: {youtube_url}
 Episode: #{episode_index} ({start_fmt} -> {end_fmt})
@@ -711,7 +713,9 @@ ORIGINAL DIARIZED TRANSCRIPT EXCERPT:
 ROUND 1 EXTRACTED ENGLISH DOSSIERS:
 {english_units_json}
 
-Translate and localize ALL fields of the Round 1 dossier above into pure, eloquent Classical Arabic (فصحى رصينة), keeping `question_turn_id`, `answer_turn_id`, and `question_en` intact and adding `text_ar` on every `dialogue_exchange` turn. Do NOT emit `<think>` blocks. Output strictly a valid JSON array: [ {{ ... }} ] /no_think
+Translate and localize ALL fields of every Round 1 dossier above into pure, eloquent Classical Arabic (فصحى رصينة), keeping `question_turn_id`, `answer_turn_id`, and `question_en` intact and adding `text_ar` on every `dialogue_exchange` turn. Do NOT emit `<think>` blocks. Output strictly a valid JSON array: [ {{ ... }} ] /no_think
 """
+
+USER_COMPACT_ROUND2_RETRY_TEMPLATE = USER_ROUND2_CLEAN_TEMPLATE
 
 

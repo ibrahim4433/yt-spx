@@ -37,8 +37,13 @@ from core.extractor_prompt import (
     ROUND2_ARABIC_VERIFICATION_PROMPT,
     COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
     USER_ROUND2_PROMPT_TEMPLATE,
+    USER_ROUND2_CLEAN_TEMPLATE,
     USER_COMPACT_ROUND2_RETRY_TEMPLATE,
 )
+try:
+    from core.colab_runner import _supports_kwarg
+except (ImportError, ValueError):
+    from .colab_runner import _supports_kwarg
 from core.audio_diarizer import ms_to_fmt
 
 try:
@@ -63,16 +68,19 @@ try:
     from tools.card_rating_system.audit_cards import (
         audit_single_card,
         format_pre_round2_rubric_summary,
+        summarize_pre_round2_batch,
     )
 except (ImportError, ValueError):
     try:
         from ..tools.card_rating_system.audit_cards import (
             audit_single_card,
             format_pre_round2_rubric_summary,
+            summarize_pre_round2_batch,
         )
     except Exception:
         audit_single_card = None
         format_pre_round2_rubric_summary = None
+        summarize_pre_round2_batch = None
 
 
 def _is_dialectical_payload_item(x: Any) -> bool:
@@ -1847,6 +1855,46 @@ def _backfill_clean_arabic_fields(target: Dict[str, Any], source: Dict[str, Any]
                             tgt_turn[turn_ar_key] = cand
 
 
+def _assess_round2_batch_thinking(
+    r1_batch: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+) -> Tuple[str, bool]:
+    """Runs pre-Round-2 rubric check; enables bounded thinking only when English repairs are flagged."""
+    if summarize_pre_round2_batch is not None:
+        return summarize_pre_round2_batch(r1_batch, turns)
+    if format_pre_round2_rubric_summary is not None:
+        summary = format_pre_round2_rubric_summary(r1_batch, turns)
+        needs_repair = bool(
+            not summary
+            or any("Status=" in ln and "Status=CLEAN" not in ln for ln in summary.splitlines())
+        )
+        return summary, needs_repair
+    return "", True
+
+
+def _invoke_round2_client(
+    client: Any,
+    r1_json_str: str,
+    prompt_r2: str,
+    enable_thinking: bool,
+    max_thinking_tokens: int,
+) -> str:
+    """Dispatches Round 2 to extract_round2_arabic (forwarding thinking flags if accepted) or .extract()."""
+    if hasattr(client, "extract_round2_arabic"):
+        fn = client.extract_round2_arabic
+        if _supports_kwarg(fn, "enable_thinking"):
+            kwargs: Dict[str, Any] = {"enable_thinking": enable_thinking}
+            if _supports_kwarg(fn, "max_thinking_tokens"):
+                kwargs["max_thinking_tokens"] = max_thinking_tokens
+            return fn(r1_json_str, prompt_r2, **kwargs)
+        return fn(r1_json_str, prompt_r2)
+
+    sys_prompt = ROUND2_ARABIC_VERIFICATION_PROMPT if enable_thinking else COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
+    if _supports_kwarg(client.extract, "system_prompt"):
+        return client.extract(prompt_r2, system_prompt=sys_prompt)
+    return client.extract(prompt_r2)
+
+
 class Stage2ScenarioExtractor:
     """
     Runs Qwen 2.5 14B Instruct (Q5_K_M GGUF, 20,480 ctx, 8-bit KV cache) over
@@ -2087,16 +2135,22 @@ class Stage2ScenarioExtractor:
                 completed_win_ids.append(w_idx)
                 continue
 
-            # 3. Round 2: Bounded-Thinking Card Rating Verification, Conditional EN Repair, & Arabic Localization
-            # Sub-batch groups of up to 2 units so <=1024-token <think> + bilingual JSON fit cleanly without truncation.
+            # 3. Round 2: Conditional Bounded-Thinking Repair (flagged batches) or Fast /no_think Arabic Localization (CLEAN)
+            # Sub-batch groups of up to 2 units so reasoning (when flagged) + bilingual JSON fit cleanly without truncation.
             r2_batch_size = 2
             final_raw_units: List[Dict[str, Any]] = []
             elapsed_r2 = 0.0
-            for b_start in range(0, len(r1_units), r2_batch_size):
+            r2_batches_total = max(1, (len(r1_units) + r2_batch_size - 1) // r2_batch_size)
+            for b_idx, b_start in enumerate(range(0, len(r1_units), r2_batch_size), 1):
                 r1_batch = r1_units[b_start:b_start + r2_batch_size]
                 r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_batch, max_words=1800)
                 r1_json_str = json.dumps(r1_batch, ensure_ascii=False, indent=2)
-                prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
+                pre_audit_summary, batch_needs_thinking = _assess_round2_batch_thinking(
+                    r1_batch, w.get("turns") or []
+                )
+                r2_think_budget = 512 if batch_needs_thinking else 0
+                prompt_template = USER_ROUND2_PROMPT_TEMPLATE if batch_needs_thinking else USER_ROUND2_CLEAN_TEMPLATE
+                prompt_r2 = prompt_template.format(
                     title_ar=scenario.get("title_ar", ""),
                     youtube_url=scenario.get("youtube_url", ""),
                     episode_index=w["episode_index"],
@@ -2107,15 +2161,23 @@ class Stage2ScenarioExtractor:
                     transcript_text=r2_excerpt,
                     english_units_json=r1_json_str,
                 )
-                if format_pre_round2_rubric_summary is not None:
-                    pre_audit_summary = format_pre_round2_rubric_summary(r1_batch, w.get("turns") or [])
-                    if pre_audit_summary:
-                        prompt_r2 = f"{pre_audit_summary}\n\n{prompt_r2}"
+                if pre_audit_summary:
+                    prompt_r2 = f"{pre_audit_summary}\n\n{prompt_r2}"
+                if verbose:
+                    mode_desc = (
+                        f"flagged EN defects -> bounded <think> ({r2_think_budget} tok)"
+                        if batch_needs_thinking
+                        else "Status=CLEAN -> fast /no_think Arabic localization"
+                    )
+                    print(f"      [Window {w_idx} R2 Batch {b_idx}/{r2_batches_total}] {mode_desc}...", flush=True)
                 t0_r2 = time.time()
-                if hasattr(self.client, "extract_round2_arabic"):
-                    raw_out_r2 = self.client.extract_round2_arabic(r1_json_str, prompt_r2)
-                else:
-                    raw_out_r2 = self.client.extract(prompt_r2, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
+                raw_out_r2 = _invoke_round2_client(
+                    self.client,
+                    r1_json_str,
+                    prompt_r2,
+                    enable_thinking=batch_needs_thinking,
+                    max_thinking_tokens=r2_think_budget,
+                )
                 elapsed_r2 = round(elapsed_r2 + (time.time() - t0_r2), 1)
 
                 parsed_r2 = clean_llm_json_array(raw_out_r2)

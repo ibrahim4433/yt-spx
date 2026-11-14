@@ -1088,6 +1088,249 @@ class TestColabRunnerAndRound2RetryGuards(unittest.TestCase):
             self.assertEqual(units[0]["scriptural_citations"][0].get("significance_ar", ""), "")
 
 
+class TestConditionalRound2ThinkingOptimization(unittest.TestCase):
+    """Tests conditional Round 2 thinking based on pre-Round-2 rubric diagnostics."""
+
+    def test_clean_batch_uses_no_think_while_flagged_batch_uses_bounded_512_thinking(self):
+        """CLEAN batches run Round 2 via /no_think + compact prompt; defective batches run bounded <think> (512 tok)."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.colab_runner import LocalGPUClient
+        from core.drive_sync import SharedWorkspace
+        from core.extractor_prompt import (
+            COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
+            ROUND2_ARABIC_VERIFICATION_PROMPT,
+        )
+        from core.scenario_extractor import Stage2ScenarioExtractor
+        from tools.card_rating_system.audit_cards import summarize_pre_round2_batch
+
+        r2_clean_payload = [
+            {
+                "question_turn_id": "VC_T01",
+                "answer_turn_id": "VC_T02",
+                "question_ar": "هل يشرع الله واجبات أخلاقية موضوعية للبشرية؟",
+                "core_answer_summary_ar": "تقتضي الواجبات الأخلاقية الموضوعية مشرعاً متعالياً يتجاوز الأهواء الذاتية والأعراف المتغيرة لأن الإلزام المطلق لا ينشأ من المادة الصماء.",
+                "logical_premises_ar": [
+                    "المقدمة الأولى: الإلزام الأخلاقي المطلق لا يصدر عن أهواء نسبية.",
+                    "المقدمة الثانية: القيم الأخلاقية الموضوعية ملزمة عبر الثقافات.",
+                    "النتيجة: لا بد من وجود مشرع متعالٍ واجب الوجود.",
+                ],
+                "fallacy_or_misconception_exposed_ar": "النسبية الأخلاقية",
+                "socratic_question_ar": "لولا الخالق فما مصدر الإلزام الأخلاقي المطلق؟",
+                "verbatim_quote_ar": "الأخلاق الموضوعية تستلزم مشرعاً حكيماً متعالياً.",
+                "interlocutor_verbatim_quote_ar": "كيف يكون هناك صواب وخطأ موضوعي بدون تطور اجتماعي؟",
+                "dialogue_exchange": [
+                    {"turn_id": "VC_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_ar": "كيف يكون هناك صواب وخطأ موضوعي بدون تطور اجتماعي؟"},
+                    {"turn_id": "VC_T02", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_ar": "الأخلاق الموضوعية تستلزم مشرعاً حكيماً متعالياً."},
+                ],
+            }
+        ]
+
+        r1_clean_unit = {
+            "question_turn_id": "VC_T01",
+            "answer_turn_id": "VC_T02",
+            "question_en": "Does God prescribe objective moral duties for humanity?",
+            "topic_category": "Objective Morality & Ethics",
+            "core_answer_summary_en": (
+                "Objective moral duties require a transcendent Lawgiver beyond subjective human opinion or evolving cultural conventions, "
+                "because binding moral accountability cannot originate from blind unconscious matter or shifting social preference alone. "
+                "When secular materialism reduces ethics to biological survival impulses or consensus, it strips moral obligation of any unconditional authority. "
+                "Only the All-Wise Creator provides an unchanging ontological foundation grounding justice, human dignity, and universal accountability."
+            ),
+            "logical_premises": [
+                "Premise 1: Binding moral duties cannot arise solely from arbitrary subjective preference.",
+                "Premise 2: Objective moral obligations hold universally across cultures.",
+                "Conclusion: Therefore an objective transcendent Lawgiver must exist.",
+            ],
+            "fallacy_or_misconception_exposed": "Moral Relativism: Conflating shifting human conventions with objective moral ontology.",
+            "socratic_question": "Without a Creator, why are your moral intuitions more binding than anyone else's?",
+            "verbatim_quote": "Objective morality necessarily presupposes a transcendent Wise Lawgiver beyond blind unconscious matter.",
+            "interlocutor_verbatim_quote": "How can there be objective right and wrong without social evolution or cultural consensus?",
+            "dialogue_exchange": [
+                {"turn_id": "VC_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "How can there be objective right and wrong without social evolution or cultural consensus?"},
+                {"turn_id": "VC_T02", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": "Objective morality necessarily presupposes a transcendent Wise Lawgiver beyond blind unconscious matter."},
+            ],
+        }
+
+        turns_clean = [
+            {"turn_id": "VC_T01", "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 6000, "start_fmt": "00:01", "end_fmt": "00:06", "text_original": "How can there be objective right and wrong without social evolution or cultural consensus?"},
+            {"turn_id": "VC_T02", "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 7000, "end_ms": 18000, "start_fmt": "00:07", "end_fmt": "00:18", "text_original": "Objective morality necessarily presupposes a transcendent Wise Lawgiver beyond blind unconscious matter."},
+        ]
+
+        clean_summary, clean_needs_repair = summarize_pre_round2_batch([r1_clean_unit], turns_clean)
+        self.assertIn("Status=CLEAN", clean_summary)
+        self.assertFalse(clean_needs_repair)
+
+        r1_dirty_unit = dict(
+            r1_clean_unit,
+            core_answer_summary_en="The Da'ee explains that God exists.",
+            logical_premises=["Only one premise"],
+            socratic_question="",
+        )
+        dirty_summary, dirty_needs_repair = summarize_pre_round2_batch([r1_dirty_unit], turns_clean)
+        self.assertNotIn("Status=CLEAN", dirty_summary)
+        self.assertTrue(dirty_needs_repair)
+
+        class RecordingLlama:
+            def __init__(self, mode_r1_payload):
+                self.mode_r1_payload = mode_r1_payload
+                self.calls = []
+
+            def tokenize(self, b):
+                return [1] * 120
+
+            def create_chat_completion(self, messages, max_tokens=512, temperature=0.12, top_p=0.9, stream=False):
+                self.calls.append({
+                    "system": messages[0]["content"],
+                    "user": messages[-1]["content"],
+                    "temperature": temperature,
+                    "stream": stream,
+                    "max_tokens": max_tokens,
+                })
+                if len(self.calls) == 1:
+                    return {"choices": [{"message": {"content": json.dumps(self.mode_r1_payload)}}]}
+                if stream:
+                    def _gen():
+                        yield {"choices": [{"delta": {"content": "<think>Fixing defect.</think>"}}]}
+                        yield {"choices": [{"delta": {"content": json.dumps(r2_clean_payload, ensure_ascii=False)}}]}
+                    return _gen()
+                return {"choices": [{"message": {"content": json.dumps(r2_clean_payload, ensure_ascii=False)}}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(root_dir=Path(tmp), worker_name="test_cond_think")
+            base_scen = {
+                "title_ar": "الأخلاق الموضوعية",
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_uthman", "display_name_en": "Uthman", "display_name_ar": "عثمان"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Seeker", "display_name_ar": "السائل"},
+                ],
+                "turns": turns_clean,
+            }
+
+            # Case 1: CLEAN Round 1 -> Round 2 runs /no_think non-streaming with compact system prompt
+            scen_clean = dict(base_scen, video_id="VC_CLEAN", youtube_url="https://www.youtube.com/watch?v=VC_CLEAN")
+            ws.atomic_write_json(ws.scenarios_dir / "VC_CLEAN.json", scen_clean)
+            ws.advance_micro_step("VC_CLEAN", "M5_SCENARIO_BUILT")
+
+            llama_clean = RecordingLlama([r1_clean_unit])
+            client_clean = object.__new__(LocalGPUClient)
+            client_clean.backend = "gguf"
+            client_clean.context_length = 32768
+            client_clean.max_new_tokens = 6144
+            client_clean.llm = llama_clean
+
+            units_clean = Stage2ScenarioExtractor(workspace=ws, llm_client=client_clean).extract_video_m6("VC_CLEAN", verbose=False)
+            self.assertEqual(len(units_clean), 1)
+            self.assertEqual(len(llama_clean.calls), 2)
+            r2_call_clean = llama_clean.calls[1]
+            self.assertEqual(r2_call_clean["system"], COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
+            self.assertTrue(r2_call_clean["user"].endswith("/no_think"))
+            self.assertIn("Do NOT emit `<think>` blocks", r2_call_clean["user"])
+            self.assertFalse(r2_call_clean["stream"])
+            self.assertAlmostEqual(r2_call_clean["temperature"], 0.12)
+
+            # Case 2: Flagged Round 1 -> Round 2 runs /think streaming capped at 512 + 4608 = 5120 tokens
+            scen_dirty = dict(base_scen, video_id="VC_DIRTY", youtube_url="https://www.youtube.com/watch?v=VC_DIRTY")
+            ws.atomic_write_json(ws.scenarios_dir / "VC_DIRTY.json", scen_dirty)
+            ws.advance_micro_step("VC_DIRTY", "M5_SCENARIO_BUILT")
+
+            llama_dirty = RecordingLlama([r1_dirty_unit])
+            client_dirty = object.__new__(LocalGPUClient)
+            client_dirty.backend = "gguf"
+            client_dirty.context_length = 32768
+            client_dirty.max_new_tokens = 6144
+            client_dirty.llm = llama_dirty
+
+            units_dirty = Stage2ScenarioExtractor(workspace=ws, llm_client=client_dirty).extract_video_m6("VC_DIRTY", verbose=False)
+            self.assertEqual(len(units_dirty), 1)
+            self.assertEqual(len(llama_dirty.calls), 2)
+            r2_call_dirty = llama_dirty.calls[1]
+            self.assertEqual(r2_call_dirty["system"], ROUND2_ARABIC_VERIFICATION_PROMPT)
+            self.assertTrue(r2_call_dirty["user"].endswith("/think"))
+            self.assertTrue(r2_call_dirty["stream"])
+            self.assertAlmostEqual(r2_call_dirty["temperature"], 0.3)
+            self.assertEqual(r2_call_dirty["max_tokens"], 5120)
+
+    def test_round2_overflow_followup_uses_compact_system_prompt(self):
+        """When Round 2 <think> exceeds budget, the /no_think follow-up uses COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT."""
+        from core.colab_runner import LocalGPUClient
+        from core.extractor_prompt import (
+            COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
+            ROUND2_ARABIC_VERIFICATION_PROMPT,
+        )
+
+        followup_calls = []
+
+        class OverflowLlama:
+            def create_chat_completion(self, messages, max_tokens=512, temperature=0.12, top_p=0.9, stream=False):
+                if not stream:
+                    followup_calls.append(messages)
+                    return {"choices": [{"message": {"content": '[{"question_ar": "سؤال؟"}]'}}]}
+
+                def _gen():
+                    yield {"choices": [{"delta": {"content": "<think>"}}]}
+                    for i in range(280):
+                        yield {"choices": [{"delta": {"content": f"w{i} "}}]}
+                    yield {"choices": [{"delta": {"content": "</think>[]"}}]}
+                return _gen()
+
+        client = object.__new__(LocalGPUClient)
+        client.backend = "gguf"
+        client.context_length = 32768
+        client.max_new_tokens = 6144
+        client.llm = OverflowLlama()
+
+        out = client._run_gguf_with_thinking_limit(
+            active_messages=[
+                {"role": "system", "content": ROUND2_ARABIC_VERIFICATION_PROMPT},
+                {"role": "user", "content": "audit this\n/think"},
+            ],
+            active_sys=ROUND2_ARABIC_VERIFICATION_PROMPT,
+            base_user_content="audit this",
+            effective_max_tokens=5120,
+            avail=12000,
+            enable_thinking=True,
+            max_thinking_tokens=256,
+        )
+        self.assertIn("سؤال؟", out)
+        self.assertEqual(len(followup_calls), 1)
+        self.assertEqual(followup_calls[0][0]["content"], COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
+        self.assertTrue(followup_calls[0][1]["content"].endswith("/no_think"))
+
+    def test_extraction_client_forwards_conditional_round2_thinking_flags(self):
+        """ExtractionClient forwards thinking flags to aware backends and swaps prompt for plain backends."""
+        from core.colab_runner import ExtractionClient
+        from core.extractor_prompt import COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
+
+        class AwareBackend:
+            def __init__(self):
+                self.recorded = []
+
+            def extract(self, prompt, system_prompt=None):
+                return "[]"
+
+            def extract_round2_arabic(self, r1_json, prompt, enable_thinking=True, max_thinking_tokens=1024):
+                self.recorded.append((enable_thinking, max_thinking_tokens))
+                return "[]"
+
+        class PlainExtractBackend:
+            def __init__(self):
+                self.recorded = []
+
+            def extract(self, prompt, system_prompt=None):
+                self.recorded.append(system_prompt)
+                return "[]"
+
+        aware = AwareBackend()
+        ExtractionClient(client=aware).extract_round2_arabic("[]", "prompt", enable_thinking=False, max_thinking_tokens=0)
+        self.assertEqual(aware.recorded, [(False, 0)])
+
+        plain = PlainExtractBackend()
+        ExtractionClient(client=plain).extract_round2_arabic("[]", "prompt", enable_thinking=False, max_thinking_tokens=0)
+        self.assertEqual(plain.recorded, [COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT])
+
+
 if __name__ == "__main__":
     unittest.main()
 

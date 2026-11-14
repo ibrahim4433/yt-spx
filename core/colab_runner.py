@@ -13,8 +13,20 @@ import re
 import sys
 import time
 import json
+import inspect
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+
+
+def _supports_kwarg(fn: Any, kw: str) -> bool:
+    """Returns True when `fn` explicitly accepts `kw` or `**kwargs`."""
+    try:
+        sig = inspect.signature(fn)
+        return kw in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+    except (TypeError, ValueError):
+        return False
 
 # Prevent PyTorch CUDA memory fragmentation on Nvidia GPUs (T4 / L4 / A100)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -852,8 +864,13 @@ class LocalGPUClient:
         notes = re.sub(r"</?think>", "", raw_out, flags=re.IGNORECASE).strip()[-1200:]
         clean_user = re.sub(r"\s*/(?:no_)?think\s*$", "", base_user_content or "").rstrip()
         rem_tokens = max(512, min(4096, avail - token_count))
+        followup_sys = (
+            COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
+            if ("ROUND 2" in active_sys or "CLASSICAL ARABIC LOCALIZATION" in active_sys)
+            else active_sys
+        )
         followup_messages = [
-            {"role": "system", "content": active_sys},
+            {"role": "system", "content": followup_sys},
             {
                 "role": "user",
                 "content": (
@@ -1079,10 +1096,11 @@ class LocalGPUClient:
         enable_thinking: bool = True,
         max_thinking_tokens: int = 1024,
     ) -> str:
-        """Executes Stage 2 Round 2: Bounded-thinking Rubric Verification, conditional EN repair, & Arabic localization."""
+        """Executes Stage 2 Round 2: Conditional bounded-thinking repair or fast /no_think Arabic localization."""
+        sys_prompt = ROUND2_ARABIC_VERIFICATION_PROMPT if enable_thinking else COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
         if "ROUND 1 EXTRACTED ENGLISH DOSSIERS" in transcript_prompt:
             user_prompt = transcript_prompt
-        else:
+        elif enable_thinking:
             user_prompt = (
                 f"ORIGINAL TRANSCRIPT CONTEXT:\n{transcript_prompt}\n\n"
                 f"ROUND 1 EXTRACTED ENGLISH DOSSIERS:\n{english_units_json}\n\n"
@@ -1091,9 +1109,17 @@ class LocalGPUClient:
                 "and translate all fields into pure Classical Arabic (فصحى رصينة) with text_ar on every dialogue turn. "
                 "Output strictly the completed bilingual JSON array after </think>: [ { ... } ]"
             )
+        else:
+            user_prompt = (
+                f"ORIGINAL TRANSCRIPT CONTEXT:\n{transcript_prompt}\n\n"
+                f"ROUND 1 EXTRACTED ENGLISH DOSSIERS:\n{english_units_json}\n\n"
+                "Translate and localize ALL fields of every Round 1 dossier into pure Classical Arabic (فصحى رصينة), "
+                "keeping question_turn_id, answer_turn_id, and question_en intact and adding text_ar on every dialogue turn. "
+                "Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"
+            )
         return self.extract(
             user_prompt,
-            system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT,
+            system_prompt=sys_prompt,
             enable_thinking=enable_thinking,
             max_thinking_tokens=max_thinking_tokens,
         )
@@ -1128,9 +1154,21 @@ class ExtractionClient:
         except TypeError:
             return self.client.extract(prompt)
 
-    def extract_round2_arabic(self, english_units_json: str, transcript_prompt: str) -> str:
+    def extract_round2_arabic(
+        self,
+        english_units_json: str,
+        transcript_prompt: str,
+        enable_thinking: bool = True,
+        max_thinking_tokens: int = 1024,
+    ) -> str:
         if hasattr(self.client, "extract_round2_arabic"):
-            return self.client.extract_round2_arabic(english_units_json, transcript_prompt)
+            fn = self.client.extract_round2_arabic
+            if _supports_kwarg(fn, "enable_thinking"):
+                kwargs = {"enable_thinking": enable_thinking}
+                if _supports_kwarg(fn, "max_thinking_tokens"):
+                    kwargs["max_thinking_tokens"] = max_thinking_tokens
+                return fn(english_units_json, transcript_prompt, **kwargs)
+            return fn(english_units_json, transcript_prompt)
         user_prompt = transcript_prompt
         if "ROUND 1 EXTRACTED ENGLISH DOSSIERS" not in user_prompt:
             user_prompt = (
@@ -1139,8 +1177,9 @@ class ExtractionClient:
                 "Perform Theological Verification and Classical Arabic Localization on the English dossiers. "
                 "Translate all fields into pure Classical Arabic (فصحى رصينة), enrich every dialogue exchange turn with text_ar, purge all foreign tokens, and output strictly the completed bilingual JSON array: [ { ... } ]"
             )
+        sys_prompt = ROUND2_ARABIC_VERIFICATION_PROMPT if enable_thinking else COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
         try:
-            return self.client.extract(user_prompt, system_prompt=ROUND2_ARABIC_VERIFICATION_PROMPT)
+            return self.client.extract(user_prompt, system_prompt=sys_prompt)
         except TypeError:
             return self.client.extract(user_prompt)
 

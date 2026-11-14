@@ -384,19 +384,20 @@ def audit_single_card(
     }
 
 
-def format_pre_round2_rubric_summary(
+def summarize_pre_round2_batch(
     r1_units: List[Dict[str, Any]],
     turns: List[Dict[str, Any]],
-) -> str:
+) -> Tuple[str, bool]:
     """
-    Runs the Card Rating System pre-check on Round 1 English dossiers before Round 2 runs,
-    generating targeted instructions telling Round 2 which cards are CLEAN (keep English untouched)
-    vs which specific English defects need conditional repair alongside Arabic localization.
+    Runs the Card Rating System pre-check on Round 1 English dossiers before Round 2 runs.
+    Returns `(summary_text, batch_needs_repair)` where `batch_needs_repair` is False iff
+    every card in `r1_units` is Status=CLEAN so Round 2 can run fast `/no_think` localization.
     """
     if not r1_units:
-        return ""
+        return "", False
 
     lines = ["PRE-ROUND-2 CARD RATING & DEFECT DIAGNOSTICS (tools/card_rating_system):"]
+    batch_needs_repair = False
     for idx, u in enumerate(r1_units, 1):
         ev = audit_single_card(u, turns, require_arabic=False)
         q_tid = u.get("question_turn_id", "")
@@ -407,6 +408,7 @@ def format_pre_round2_rubric_summary(
                 "Status=CLEAN -> Keep ALL Round 1 English fields UNCHANGED (set english_edits_needed=false) and focus on Classical Arabic localization."
             )
         else:
+            batch_needs_repair = True
             status_tag = ev["hard_fail_triggered"] or ("NEEDS_REPAIR" if ev["needs_english_repair"] else "MINOR_POLISH")
             defect_strs = [f"[{d['code']}] {d['description']}" for d in ev["defects"][:4]]
             rec_strs = ev["recommendations"][:3]
@@ -417,7 +419,20 @@ def format_pre_round2_rubric_summary(
                 lines.append(f"  Defects: {'; '.join(defect_strs)}")
             if rec_strs:
                 lines.append(f"  Targeted Fix: {' | '.join(rec_strs)}")
-    return "\n".join(lines)
+    return "\n".join(lines), batch_needs_repair
+
+
+def format_pre_round2_rubric_summary(
+    r1_units: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+) -> str:
+    """
+    Runs the Card Rating System pre-check on Round 1 English dossiers before Round 2 runs,
+    generating targeted instructions telling Round 2 which cards are CLEAN (keep English untouched)
+    vs which specific English defects need conditional repair alongside Arabic localization.
+    """
+    summary_text, _ = summarize_pre_round2_batch(r1_units, turns)
+    return summary_text
 
 
 def run_audit(db_path: Path, video_filter: Optional[str] = None, fail_only: bool = False) -> Dict[str, Any]:
