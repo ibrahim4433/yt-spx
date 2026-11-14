@@ -699,4 +699,19 @@ ROUND 1 EXTRACTED ENGLISH DOSSIERS:
 Perform a concise <think> Rubric Verification & Theological Audit (within thinking limit: keep reasoning concise under ~400 words/card), fix any flagged English defect ONLY IF NEEDED (`english_edits_needed: true`, else preserve original English untouched), and translate all fields into pure Classical Arabic (فصحى رصينة) with text_ar on every dialogue_exchange turn. Output strictly the completed JSON array after </think>: [ {{ ... }} ]
 """
 
+USER_COMPACT_ROUND2_RETRY_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
+Video Title: {title_ar}
+YouTube URL: {youtube_url}
+Episode: #{episode_index} ({start_fmt} -> {end_fmt})
+Target Da'ee: {target_daee_name} ({target_daee_id})
+
+ORIGINAL DIARIZED TRANSCRIPT EXCERPT:
+{transcript_text}
+
+ROUND 1 EXTRACTED ENGLISH DOSSIERS:
+{english_units_json}
+
+Translate and localize ALL fields of the Round 1 dossier above into pure, eloquent Classical Arabic (فصحى رصينة), keeping `question_turn_id`, `answer_turn_id`, and `question_en` intact and adding `text_ar` on every `dialogue_exchange` turn. Do NOT emit `<think>` blocks. Output strictly a valid JSON array: [ {{ ... }} ] /no_think
+"""
+
 

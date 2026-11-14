@@ -856,6 +856,238 @@ class TestTwoRoundThinkingBudgetAndLimits(unittest.TestCase):
             self.assertTrue(recorded_calls[0]["followup_user"].endswith("/no_think"))
 
 
+class TestColabRunnerAndRound2RetryGuards(unittest.TestCase):
+    """Regression suite for Colab Drive-to-SSD chunked copy and Round 2 sanitization/retry hygiene."""
+
+    def test_copy_large_file_chunked_imports_and_byte_fidelity(self):
+        """Verifies core.colab_runner binds sys/Tuple and _copy_large_file_chunked copies without NameError."""
+        import tempfile
+        import typing
+        from pathlib import Path
+        import core.colab_runner as colab_runner
+
+        self.assertTrue(hasattr(colab_runner, "sys"))
+        self.assertTrue(hasattr(colab_runner, "Tuple"))
+        hints = typing.get_type_hints(colab_runner._copy_large_file_chunked)
+        self.assertEqual(hints.get("return"), None.__class__)
+
+        payload = b"GGUF_MOCK_WEIGHTS_" * 512
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "drive_model.gguf"
+            dst = Path(tmp) / "ssd_cache" / "local_model.gguf"
+            src.write_bytes(payload)
+            colab_runner._copy_large_file_chunked(src, dst, label="Unit Test GGUF")
+            self.assertTrue(dst.exists())
+            self.assertEqual(dst.read_bytes(), payload)
+
+    def test_round2_sanitizes_before_barrier_preventing_unnecessary_retries(self):
+        """Foreign punctuation or N/A in optional Arabic fields must be sanitized before gate checks."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.drive_sync import SharedWorkspace
+        from core.scenario_extractor import Stage2ScenarioExtractor
+
+        class SanitizingBatchMockClient:
+            def __init__(self):
+                self.retry_calls = 0
+
+            def extract_round1_english(self, prompt: str) -> str:
+                return json.dumps([
+                    {
+                        "question_turn_id": "VS1_T01",
+                        "answer_turn_id": "VS1_T02",
+                        "question_en": "Does Islam compel non-Muslims in their personal daily worship?",
+                        "topic_category": "Shariah & Social Inquiries",
+                        "core_answer_summary_en": "Islam strictly prohibits compulsion in religion and respects personal conscience in worship.",
+                        "logical_premises": ["Quran 2:256 forbids coercion", "Freedom of belief", "Civic coexistence"],
+                        "scriptural_citations": [
+                            {"source": "Quran", "reference": "2:256", "significance": "No compulsion in religion"}
+                        ],
+                        "dialogue_exchange": [
+                            {"turn_id": "VS1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "Does Islam force personal beliefs on non-Muslims?"},
+                            {"turn_id": "VS1_T02", "role": "MAIN_DAEE", "move_type": "Scriptural Proof", "text_en": "No, the Quran explicitly establishes that there is no compulsion in religion."},
+                        ],
+                    }
+                ])
+
+            def extract_round2_arabic(self, english_units_json: str, prompt: str) -> str:
+                return json.dumps([
+                    {
+                        "question_turn_id": "VS1_T01",
+                        "answer_turn_id": "VS1_T02",
+                        "question_ar": "هل يُكره الإسلام غير المسلمين في عباداتهم الشخصية اليومية؟",
+                        "core_answer_summary_ar": "يُحرّم الإسلام الإكراه في الدين تحريماً قاطعاً ويصون حرية الاعتقاد والتعايش السلمي.",
+                        "analogy_or_metaphor_ar": "N/A",
+                        "logical_premises_ar": ["القرآن ينفي الإكراه في الدين", "N/A", "。"],
+                        "scriptural_citations": [
+                            {
+                                "source": "Quran",
+                                "reference": "2:256",
+                                "significance": "No compulsion in religion",
+                                "significance_ar": "تقرير مبدأ عدم الإكراه في الدين\u4e2d",
+                            }
+                        ],
+                        "dialogue_exchange": [
+                            {"turn_id": "VS1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_ar": "هل يفرض الإسلام معتقداته قسراً على غير المسلمين؟"},
+                            {"turn_id": "VS1_T02", "role": "MAIN_DAEE", "move_type": "Scriptural Proof", "text_ar": "كلا، فالقرآن يقرر صراحة أن لا إكراه في الدين."},
+                        ],
+                    }
+                ], ensure_ascii=False)
+
+            def extract(self, prompt: str, system_prompt: str = None) -> str:
+                self.retry_calls += 1
+                return "[]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(root_dir=Path(tmp), worker_name="test_san_barrier")
+            scen = {
+                "video_id": "VS1",
+                "title_ar": "حرية الاعتقاد في الإسلام",
+                "youtube_url": "https://www.youtube.com/watch?v=VS1",
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_hashim", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Seeker", "display_name_ar": "السائل"},
+                ],
+                "turns": [
+                    {"turn_id": "VS1_T01", "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 6000, "start_fmt": "00:01", "end_fmt": "00:06", "text_original": "Does Islam force personal beliefs on non-Muslims in daily life?"},
+                    {"turn_id": "VS1_T02", "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 7000, "end_ms": 16000, "start_fmt": "00:07", "end_fmt": "00:16", "text_original": "No, the Quran explicitly says there is no compulsion in religion and protects peaceful coexistence."},
+                ],
+            }
+            ws.atomic_write_json(ws.scenarios_dir / "VS1.json", scen)
+            ws.advance_micro_step("VS1", "M5_SCENARIO_BUILT")
+
+            client = SanitizingBatchMockClient()
+            extractor = Stage2ScenarioExtractor(workspace=ws, llm_client=client)
+            units = extractor.extract_video_m6("VS1", verbose=False)
+
+            self.assertEqual(client.retry_calls, 0)
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0]["analogy_or_metaphor_ar"], "")
+            self.assertEqual(units[0]["logical_premises_ar"], ["القرآن ينفي الإكراه في الدين"])
+            self.assertEqual(
+                units[0]["scriptural_citations"][0]["significance_ar"],
+                "تقرير مبدأ عدم الإكراه في الدين",
+            )
+
+    def test_round2_retry_uses_compact_template_clean_seed_and_incremental_backfill(self):
+        """Retries must use /no_think prompt, clean R1 JSON seed, and converge incrementally."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.drive_sync import SharedWorkspace
+        from core.extractor_prompt import COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT
+        from core.scenario_extractor import Stage2ScenarioExtractor
+
+        class IncrementalRetryMockClient:
+            def __init__(self):
+                self.retry_calls = []
+
+            def extract_round1_english(self, prompt: str) -> str:
+                return json.dumps([
+                    {
+                        "question_turn_id": "VR1_T01",
+                        "answer_turn_id": "VR1_T02",
+                        "question_en": "Why does the Quran call Jesus the word of Allah yet deny his divinity?",
+                        "topic_category": "Comparative Religion & Christianity",
+                        "core_answer_summary_en": "Being created directly by Allah's command 'Be' honors Jesus as a prophet rather than making him divine.",
+                        "logical_premises": ["Divine command creation", "Distinction between creature and Creator", "Consistent Quranic Christology"],
+                        "scriptural_citations": [
+                            {"source": "Quran", "reference": "3:45", "significance": "Jesus as a word from Allah"}
+                        ],
+                        "dialogue_exchange": [
+                            {"turn_id": "VR1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "If Jesus is Allah's word, why isn't he divine?"},
+                            {"turn_id": "VR1_T02", "role": "MAIN_DAEE", "move_type": "Conceptual Distinction", "text_en": "He is called a word because Allah created him by the command 'Be', not as part of God's essence."},
+                        ],
+                    }
+                ])
+
+            def extract_round2_arabic(self, english_units_json: str, prompt: str) -> str:
+                # Batch Round 2 leaves question_ar empty (forcing retry), provides valid summary + turn 0 + dirty citation N/A
+                return json.dumps([
+                    {
+                        "question_turn_id": "VR1_T01",
+                        "answer_turn_id": "VR1_T02",
+                        "question_ar": "",
+                        "core_answer_summary_ar": "تسمية عيسى بكلمة الله تعني أنه خُلق بأمر التكوين الإلهي «كن»، وهو تكريم نبوي لا يقتضي الألوهية.",
+                        "scriptural_citations": [
+                            {"source": "Quran", "reference": "3:45", "significance": "Jesus as a word from Allah", "significance_ar": "N/A"}
+                        ],
+                        "dialogue_exchange": [
+                            {"turn_id": "VR1_T01", "role": "INTERLOCUTOR", "move_type": "Objection", "text_ar": "إذا كان عيسى كلمة الله فلماذا لا يكون إلهاً؟"},
+                            {"turn_id": "VR1_T02", "role": "MAIN_DAEE", "move_type": "Conceptual Distinction", "text_ar": "слово"},
+                        ],
+                    }
+                ], ensure_ascii=False)
+
+            def extract(self, prompt: str, system_prompt: str = None) -> str:
+                self.retry_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+                if len(self.retry_calls) == 1:
+                    # Attempt 1 supplies turn 1 text_ar and omits summary/turn 0, leaving question_ar empty -> triggers Attempt 2
+                    return json.dumps([
+                        {
+                            "question_turn_id": "VR1_T01",
+                            "answer_turn_id": "VR1_T02",
+                            "question_ar": "",
+                            "dialogue_exchange": [
+                                {"turn_id": "VR1_T02", "role": "MAIN_DAEE", "move_type": "Conceptual Distinction", "text_ar": "سُمي كلمة الله لأنه خُلق بكلمة «كن» لا لكونه جزءاً من الذات الإلهية."},
+                            ],
+                        }
+                    ], ensure_ascii=False)
+                # Attempt 2 supplies only question_ar; backfill must preserve summary + turn 0 (batch) + turn 1 (attempt 1)
+                return json.dumps([
+                    {
+                        "question_turn_id": "VR1_T01",
+                        "answer_turn_id": "VR1_T02",
+                        "question_ar": "لماذا يصف القرآن عيسى عليه السلام بكلمة الله وينفي عنه الألوهية؟",
+                    }
+                ], ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(root_dir=Path(tmp), worker_name="test_retry_hygiene")
+            scen = {
+                "video_id": "VR1",
+                "title_ar": "حقيقة المسيح كلمة الله",
+                "youtube_url": "https://www.youtube.com/watch?v=VR1",
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "profile_id": "daee_hashim", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "profile_id": None, "display_name_en": "Seeker", "display_name_ar": "السائل"},
+                ],
+                "turns": [
+                    {"turn_id": "VR1_T01", "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 1000, "end_ms": 7000, "start_fmt": "00:01", "end_fmt": "00:07", "text_original": "If Jesus is the word of Allah, then why isn't Jesus considered divine?"},
+                    {"turn_id": "VR1_T02", "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 8000, "end_ms": 19000, "start_fmt": "00:08", "end_fmt": "00:19", "text_original": "He is called the word of Allah because Allah created him directly by saying 'Be', not as a divine hypostasis."},
+                ],
+            }
+            ws.atomic_write_json(ws.scenarios_dir / "VR1.json", scen)
+            ws.advance_micro_step("VR1", "M5_SCENARIO_BUILT")
+
+            client = IncrementalRetryMockClient()
+            extractor = Stage2ScenarioExtractor(workspace=ws, llm_client=client)
+            units = extractor.extract_video_m6("VR1", verbose=False)
+
+            self.assertEqual(len(client.retry_calls), 2)
+            first_call = client.retry_calls[0]
+            self.assertEqual(first_call["system_prompt"], COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT)
+            self.assertIn("/no_think", first_call["prompt"])
+            self.assertIn("Do NOT emit `<think>` blocks", first_call["prompt"])
+            self.assertNotIn("Perform a concise <think>", first_call["prompt"])
+            self.assertNotIn('"question_ar"', first_call["prompt"])
+            self.assertNotIn('"N/A"', first_call["prompt"])
+
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0]["question_ar"], "لماذا يصف القرآن عيسى عليه السلام بكلمة الله وينفي عنه الألوهية؟")
+            self.assertIn("أمر التكوين الإلهي", units[0]["core_answer_summary_ar"])
+            self.assertEqual(
+                units[0]["dialogue_exchange"][0]["text_ar"],
+                "إذا كان عيسى كلمة الله فلماذا لا يكون إلهاً؟",
+            )
+            self.assertEqual(
+                units[0]["dialogue_exchange"][1]["text_ar"],
+                "سُمي كلمة الله لأنه خُلق بكلمة «كن» لا لكونه جزءاً من الذات الإلهية.",
+            )
+            self.assertEqual(units[0]["scriptural_citations"][0].get("significance_ar", ""), "")
+
+
 if __name__ == "__main__":
     unittest.main()
 

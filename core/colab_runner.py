@@ -10,10 +10,11 @@ workspace (/content/drive/MyDrive/yt-spx).
 
 import os
 import re
+import sys
 import time
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Prevent PyTorch CUDA memory fragmentation on Nvidia GPUs (T4 / L4 / A100)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -241,7 +242,6 @@ def ensure_cuda_runtime_loaded() -> None:
     except Exception:
         pass
 
-    import sys
     if sys.platform != "linux":
         return
 
@@ -310,37 +310,39 @@ def _copy_large_file_chunked(src_path: Path, dst_path: Path, label: str = "Copyi
 
             num_workers = 4
             chunk_size = 32 * 1024 * 1024  # 32 MB
-            src_fd = os.open(str(src_path), os.O_RDONLY)
-            dst_fd = os.open(str(write_target), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-            os.ftruncate(dst_fd, total_size)
-
-            copied = 0
-            copied_lock = threading.Lock()
-            t0 = time.time()
-            last_log = [t0]
-            chunks = [(off, min(chunk_size, total_size - off)) for off in range(0, total_size, chunk_size)]
-
-            def _parallel_worker(off_len: Tuple[int, int]) -> None:
-                nonlocal copied
-                off, clen = off_len
-                buf = os.pread(src_fd, clen, off)
-                if len(buf) != clen:
-                    raise IOError(f"Short read at offset {off}: expected {clen}, got {len(buf)}")
-                os.pwrite(dst_fd, buf, off)
-                with copied_lock:
-                    copied += clen
-                    now = time.time()
-                    if now - last_log[0] >= 10.0 or copied >= total_size:
-                        last_log[0] = now
-                        pct = round((copied / max(1, total_size)) * 100, 1)
-                        mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
-                        print(
-                            f"   [{label} (Parallel x{num_workers})] {pct}% ({round(copied / (1024**3), 2)} GB / "
-                            f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
-                            flush=True,
-                        )
-
+            src_fd: Optional[int] = None
+            dst_fd: Optional[int] = None
             try:
+                src_fd = os.open(str(src_path), os.O_RDONLY)
+                dst_fd = os.open(str(write_target), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+                os.ftruncate(dst_fd, total_size)
+
+                copied = 0
+                copied_lock = threading.Lock()
+                t0 = time.time()
+                last_log = [t0]
+                chunks = [(off, min(chunk_size, total_size - off)) for off in range(0, total_size, chunk_size)]
+
+                def _parallel_worker(off_len: Tuple[int, int]) -> None:
+                    nonlocal copied
+                    off, clen = off_len
+                    buf = os.pread(src_fd, clen, off)
+                    if len(buf) != clen:
+                        raise IOError(f"Short read at offset {off}: expected {clen}, got {len(buf)}")
+                    os.pwrite(dst_fd, buf, off)
+                    with copied_lock:
+                        copied += clen
+                        now = time.time()
+                        if now - last_log[0] >= 10.0 or copied >= total_size:
+                            last_log[0] = now
+                            pct = round((copied / max(1, total_size)) * 100, 1)
+                            mb_per_sec = round((copied / (1024 * 1024)) / max(0.1, now - t0), 1)
+                            print(
+                                f"   [{label} (Parallel x{num_workers})] {pct}% ({round(copied / (1024**3), 2)} GB / "
+                                f"{round(total_size / (1024**3), 2)} GB at {mb_per_sec} MB/s)...",
+                                flush=True,
+                            )
+
                 with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                     list(executor.map(_parallel_worker, chunks))
                 try:
@@ -351,14 +353,16 @@ def _copy_large_file_chunked(src_path: Path, dst_path: Path, label: str = "Copyi
                     write_target.replace(dst_path)
                 return
             finally:
-                try:
-                    os.close(src_fd)
-                except Exception:
-                    pass
-                try:
-                    os.close(dst_fd)
-                except Exception:
-                    pass
+                if src_fd is not None:
+                    try:
+                        os.close(src_fd)
+                    except Exception:
+                        pass
+                if dst_fd is not None:
+                    try:
+                        os.close(dst_fd)
+                    except Exception:
+                        pass
         except Exception as parallel_err:
             print(f"   [-] Parallel stream note ({parallel_err}); using sequential fallback...", flush=True)
 
@@ -614,7 +618,7 @@ class LocalGPUClient:
                     from llama_cpp import Llama, llama_supports_gpu_offload
                 except ImportError:
                     print("[+] Auto-installing pre-built CUDA wheel for llama-cpp-python...")
-                    import subprocess, sys
+                    import subprocess
                     for cu_ver in ["cu124", "cu122", "cu121"]:
                         res = subprocess.run(
                             [
@@ -633,7 +637,7 @@ class LocalGPUClient:
                     try:
                         from huggingface_hub import hf_hub_download
                     except ImportError:
-                        import subprocess, sys
+                        import subprocess
                         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"], check=False)
                         from huggingface_hub import hf_hub_download
 
@@ -729,7 +733,7 @@ class LocalGPUClient:
                 import bitsandbytes
             except ImportError:
                 print("[+] Auto-installing bitsandbytes for 4-bit GPU quantization...")
-                import subprocess, sys
+                import subprocess
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "bitsandbytes", "accelerate"], check=False)
 
             try:

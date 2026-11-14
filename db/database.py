@@ -1051,6 +1051,12 @@ ARABIC_UNIT_SCALAR_KEYS = (
 )
 
 
+def _clean_arabic_unit_str(val: str) -> str:
+    """Sanitizes an Arabic unit string and clears non-Arabic punctuation leftovers (e.g. 'N/A' -> '/')."""
+    cleaned = sanitize_text_field(val, is_arabic=True)
+    return cleaned if (cleaned and re.search(r"[\u0600-\u06ff]", cleaned)) else ""
+
+
 def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Canonical cleaner for all Classical Arabic fields across scalars, lists, citations, and dialogue turns."""
     if not isinstance(item, dict):
@@ -1059,7 +1065,7 @@ def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     for k in ARABIC_UNIT_SCALAR_KEYS:
         val = item.get(k)
         if isinstance(val, str) and val:
-            item[k] = sanitize_text_field(val, is_arabic=True)
+            item[k] = _clean_arabic_unit_str(val)
 
     for list_key in ("logical_premises_ar", "analogies_ar"):
         raw_list = item.get(list_key)
@@ -1073,7 +1079,7 @@ def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
                 cleaned
                 for p in raw_list
                 if isinstance(p, str)
-                for cleaned in (sanitize_text_field(p, is_arabic=True),)
+                for cleaned in (_clean_arabic_unit_str(p),)
                 if cleaned
             ]
 
@@ -1081,14 +1087,14 @@ def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(citations, list):
         for cit in citations:
             if isinstance(cit, dict) and isinstance(cit.get("significance_ar"), str) and cit["significance_ar"]:
-                cit["significance_ar"] = sanitize_text_field(cit["significance_ar"], is_arabic=True)
+                cit["significance_ar"] = _clean_arabic_unit_str(cit["significance_ar"])
 
     for ex_key in ("dialogue_exchange", "dialogue_trajectory"):
         exchanges = item.get(ex_key)
         if isinstance(exchanges, list):
             for ex in exchanges:
                 if isinstance(ex, dict) and isinstance(ex.get("text_ar"), str) and ex["text_ar"]:
-                    ex["text_ar"] = sanitize_text_field(ex["text_ar"], is_arabic=True)
+                    ex["text_ar"] = _clean_arabic_unit_str(ex["text_ar"])
 
     return item
 

@@ -37,6 +37,7 @@ from core.extractor_prompt import (
     ROUND2_ARABIC_VERIFICATION_PROMPT,
     COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT,
     USER_ROUND2_PROMPT_TEMPLATE,
+    USER_COMPACT_ROUND2_RETRY_TEMPLATE,
 )
 from core.audio_diarizer import ms_to_fmt
 
@@ -178,6 +179,18 @@ def clean_llm_json_array(raw_text: str) -> List[Dict[str, Any]]:
     return results
 
 
+_ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06ff]")
+_FOREIGN_SCRIPT_RE = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+")
+
+
+def _is_clean_arabic_text(val: Any) -> bool:
+    """Returns True when `val` is a non-empty string with Arabic script and zero foreign script tokens."""
+    if not isinstance(val, str):
+        return False
+    s = val.strip()
+    return bool(s and _ARABIC_SCRIPT_RE.search(s) and not _FOREIGN_SCRIPT_RE.search(s))
+
+
 def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Purges foreign scripts, Latin splices, and domain translation drift via canonical db.database cleaner."""
     if not isinstance(item, dict):
@@ -185,12 +198,11 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     if sanitize_arabic_unit_fields is not None:
         return sanitize_arabic_unit_fields(item)
 
-    _fallback_re = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+")
-
     def _clean_str(val: str) -> str:
         if sanitize_text_field is not None:
             val = sanitize_text_field(val, is_arabic=True)
-        return _fallback_re.sub("", val).strip()
+        cleaned = _FOREIGN_SCRIPT_RE.sub("", val).strip()
+        return cleaned if (cleaned and _ARABIC_SCRIPT_RE.search(cleaned)) else ""
 
     for k in (
         "question_ar",
@@ -208,10 +220,16 @@ def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(item.get(list_key), list):
             item[list_key] = [_clean_str(str(p)) for p in item[list_key] if _clean_str(str(p))]
 
-    if isinstance(item.get("dialogue_exchange"), list):
-        for ex in item["dialogue_exchange"]:
-            if isinstance(ex, dict) and isinstance(ex.get("text_ar"), str) and ex["text_ar"]:
-                ex["text_ar"] = _clean_str(ex["text_ar"])
+    if isinstance(item.get("scriptural_citations"), list):
+        for cit in item["scriptural_citations"]:
+            if isinstance(cit, dict) and isinstance(cit.get("significance_ar"), str) and cit["significance_ar"]:
+                cit["significance_ar"] = _clean_str(cit["significance_ar"])
+
+    for ex_key in ("dialogue_exchange", "dialogue_trajectory"):
+        if isinstance(item.get(ex_key), list):
+            for ex in item[ex_key]:
+                if isinstance(ex, dict) and isinstance(ex.get("text_ar"), str) and ex["text_ar"]:
+                    ex["text_ar"] = _clean_str(ex["text_ar"])
 
     return item
 
@@ -1648,28 +1666,22 @@ def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
     if not isinstance(unit, dict):
         return False
 
-    arabic_regex = re.compile(r"[\u0600-\u06ff]")
-    foreign_script_regex = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]")
-
-    def _is_clean_ar_str(val: str) -> bool:
-        return bool(val and arabic_regex.search(val) and not foreign_script_regex.search(val))
-
     # 1. Core mandatory theological fields that MUST be present, contain Arabic script, and be free of foreign script
-    q_ar = str(unit.get("question_ar") or "").strip()
-    ans_ar = str(unit.get("core_answer_summary_ar") or "").strip()
-    if not _is_clean_ar_str(q_ar) or not _is_clean_ar_str(ans_ar):
+    if not _is_clean_arabic_text(str(unit.get("question_ar") or "")) or not _is_clean_arabic_text(
+        str(unit.get("core_answer_summary_ar") or "")
+    ):
         return False
 
     # 2. Any populated Arabic scalar field must contain authentic Arabic script and no foreign script
-    for f in [
+    for f in (
         "fallacy_or_misconception_exposed_ar",
         "analogy_or_metaphor_ar",
         "socratic_question_ar",
         "verbatim_quote_ar",
         "interlocutor_verbatim_quote_ar",
-    ]:
+    ):
         val = str(unit.get(f) or "").strip()
-        if val and not _is_clean_ar_str(val):
+        if val and not _is_clean_arabic_text(val):
             return False
 
     # 3. Populated Arabic premises / analogies must contain clean Arabic script
@@ -1681,19 +1693,19 @@ def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
             except Exception:
                 vals = [vals] if vals.strip() else []
         if isinstance(vals, list) and vals:
-            if not all(isinstance(p, str) and _is_clean_ar_str(p) for p in vals):
+            if not all(isinstance(p, str) and _is_clean_arabic_text(p) for p in vals):
                 return False
 
     # 4. Populated Arabic text in scriptural_citations & dialogue_exchange must be free of foreign scripts
     for cit in (unit.get("scriptural_citations") or []):
         if isinstance(cit, dict):
             sig_ar = str(cit.get("significance_ar") or "").strip()
-            if sig_ar and not _is_clean_ar_str(sig_ar):
+            if sig_ar and not _is_clean_arabic_text(sig_ar):
                 return False
     for ex in (unit.get("dialogue_exchange") or unit.get("dialogue_trajectory") or []):
         if isinstance(ex, dict):
             txt_ar = str(ex.get("text_ar") or "").strip()
-            if txt_ar and not _is_clean_ar_str(txt_ar):
+            if txt_ar and not _is_clean_arabic_text(txt_ar):
                 return False
 
     return True
@@ -1743,6 +1755,96 @@ def _build_round2_transcript_excerpt(
     if selected_lines:
         return "\n".join(selected_lines)
     return " ".join(words[:max_words])
+
+
+_ARABIC_UNIT_SCALAR_FIELDS = (
+    "question_ar",
+    "core_answer_summary_ar",
+    "fallacy_or_misconception_exposed_ar",
+    "analogy_or_metaphor_ar",
+    "socratic_question_ar",
+    "verbatim_quote_ar",
+    "interlocutor_verbatim_quote_ar",
+    "topic_category_ar",
+)
+_ARABIC_UNIT_LIST_FIELDS = ("logical_premises_ar", "analogies_ar")
+
+
+def _strip_arabic_fields(unit: Dict[str, Any]) -> Dict[str, Any]:
+    """Returns a shallow deep-copied English Round 1 seed with Arabic & internal fields stripped."""
+    if not isinstance(unit, dict):
+        return {}
+    cleaned = {
+        k: v
+        for k, v in unit.items()
+        if not k.startswith("_") and not k.endswith("_ar") and k != "topic_category_ar"
+    }
+    if isinstance(unit.get("scriptural_citations"), list):
+        cleaned["scriptural_citations"] = [
+            {ck: cv for ck, cv in cit.items() if ck != "significance_ar"}
+            if isinstance(cit, dict)
+            else cit
+            for cit in unit["scriptural_citations"]
+        ]
+    for ex_key in ("dialogue_exchange", "dialogue_trajectory"):
+        if isinstance(unit.get(ex_key), list):
+            cleaned[ex_key] = [
+                {ek: ev for ek, ev in ex.items() if ek not in ("text_ar", "speaker_label_ar")}
+                if isinstance(ex, dict)
+                else ex
+                for ex in unit[ex_key]
+            ]
+    return cleaned
+
+
+def _backfill_clean_arabic_fields(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Fills empty Arabic fields in `target` from verified clean Arabic values in `source`."""
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for field in _ARABIC_UNIT_SCALAR_FIELDS:
+        if not str(target.get(field) or "").strip():
+            cand = str(source.get(field) or "").strip()
+            if _is_clean_arabic_text(cand):
+                target[field] = cand
+    for list_field in _ARABIC_UNIT_LIST_FIELDS:
+        if not target.get(list_field):
+            cand_list = source.get(list_field)
+            if isinstance(cand_list, list) and cand_list and all(
+                isinstance(p, str) and _is_clean_arabic_text(p) for p in cand_list
+            ):
+                target[list_field] = list(cand_list)
+    tgt_cits = target.get("scriptural_citations")
+    src_cits = source.get("scriptural_citations")
+    if isinstance(tgt_cits, list) and isinstance(src_cits, list):
+        for idx, tgt_cit in enumerate(tgt_cits):
+            if idx < len(src_cits) and isinstance(tgt_cit, dict) and isinstance(src_cits[idx], dict):
+                if not str(tgt_cit.get("significance_ar") or "").strip():
+                    cand = str(src_cits[idx].get("significance_ar") or "").strip()
+                    if _is_clean_arabic_text(cand):
+                        tgt_cit["significance_ar"] = cand
+    for ex_key in ("dialogue_exchange", "dialogue_trajectory"):
+        tgt_ex = target.get(ex_key)
+        src_ex = source.get(ex_key)
+        if isinstance(tgt_ex, list) and isinstance(src_ex, list):
+            src_by_tid = {
+                str(ex.get("turn_id") or "").strip(): ex
+                for ex in src_ex
+                if isinstance(ex, dict) and str(ex.get("turn_id") or "").strip()
+            }
+            for idx, tgt_turn in enumerate(tgt_ex):
+                if not isinstance(tgt_turn, dict):
+                    continue
+                tid = str(tgt_turn.get("turn_id") or "").strip()
+                src_turn = src_by_tid.get(tid) if tid and tid in src_by_tid else (
+                    src_ex[idx] if idx < len(src_ex) else None
+                )
+                if not isinstance(src_turn, dict):
+                    continue
+                for turn_ar_key in ("text_ar", "speaker_label_ar"):
+                    if not str(tgt_turn.get(turn_ar_key) or "").strip():
+                        cand = str(src_turn.get(turn_ar_key) or "").strip()
+                        if _is_clean_arabic_text(cand):
+                            tgt_turn[turn_ar_key] = cand
 
 
 class Stage2ScenarioExtractor:
@@ -2017,7 +2119,11 @@ class Stage2ScenarioExtractor:
                 elapsed_r2 = round(elapsed_r2 + (time.time() - t0_r2), 1)
 
                 parsed_r2 = clean_llm_json_array(raw_out_r2)
-                final_raw_units.extend(merge_round1_and_round2_units(r1_batch, parsed_r2))
+                for merged_batch_u in merge_round1_and_round2_units(r1_batch, parsed_r2):
+                    if merged_batch_u.get("_dropped_by_round2_audit"):
+                        final_raw_units.append(merged_batch_u)
+                    else:
+                        final_raw_units.append(sanitize_arabic_fields(merged_batch_u))
 
             # 3B. Per-Unit Targeted Arabic Retry if batch Round 2 truncated or missed any unit's Arabic fields
             repaired_units: List[Dict[str, Any]] = []
@@ -2032,10 +2138,11 @@ class Stage2ScenarioExtractor:
                     repaired_units.append(merged_u)
                     continue
 
-                single_r1 = [r1_units[idx_u]] if idx_u < len(r1_units) else [merged_u]
-                single_json_str = json.dumps(single_r1, ensure_ascii=False, indent=2)
-                single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], single_r1, max_words=900)
-                single_prompt_r2 = USER_ROUND2_PROMPT_TEMPLATE.format(
+                single_r1_base = r1_units[idx_u] if idx_u < len(r1_units) else merged_u
+                clean_r1_seed = _strip_arabic_fields(single_r1_base)
+                single_json_str = json.dumps([clean_r1_seed], ensure_ascii=False, indent=2)
+                single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], [clean_r1_seed], max_words=900)
+                single_prompt_r2 = USER_COMPACT_ROUND2_RETRY_TEMPLATE.format(
                     title_ar=scenario.get("title_ar", ""),
                     youtube_url=scenario.get("youtube_url", ""),
                     episode_index=w["episode_index"],
@@ -2047,8 +2154,12 @@ class Stage2ScenarioExtractor:
                     english_units_json=single_json_str,
                 )
 
-                cur_candidate = merged_u
+                best_clean_source = sanitize_arabic_fields(dict(merged_u))
+                cur_candidate = best_clean_source
+                dropped_on_retry = False
                 for retry_attempt in range(1, 4):
+                    if verbose:
+                        print(f"      [Window {w_idx} Unit {idx_u+1}] Round 2 Arabic retry attempt {retry_attempt}/3...", flush=True)
                     t0_retry = time.time()
                     try:
                         if hasattr(self.client, "extract"):
@@ -2069,12 +2180,25 @@ class Stage2ScenarioExtractor:
                     elapsed_r2 = round(elapsed_r2 + (time.time() - t0_retry), 1)
                     parsed_retry = clean_llm_json_array(raw_retry)
                     if parsed_retry:
-                        cur_candidate = merge_round1_and_round2_units([cur_candidate], parsed_retry)[0]
+                        retry_merged = merge_round1_and_round2_units(
+                            [_strip_arabic_fields(clean_r1_seed)], parsed_retry
+                        )[0]
+                        if retry_merged.get("_dropped_by_round2_audit"):
+                            logger.info(
+                                "Window %d unit %d dropped on Round 2 retry by Rubric Audit (%s).",
+                                w_idx, idx_u + 1, retry_merged.get("_drop_reason", ""),
+                            )
+                            dropped_on_retry = True
+                            break
+                        retry_merged = sanitize_arabic_fields(retry_merged)
+                        _backfill_clean_arabic_fields(retry_merged, best_clean_source)
+                        _backfill_clean_arabic_fields(best_clean_source, retry_merged)
+                        cur_candidate = retry_merged
                         if has_valid_arabic_localization(cur_candidate):
                             break
-                    if verbose:
-                        print(f"      [Window {w_idx} Unit {idx_u+1}] Round 2 Arabic retry attempt {retry_attempt}/3...", flush=True)
 
+                if dropped_on_retry:
+                    continue
                 if has_valid_arabic_localization(cur_candidate):
                     repaired_units.append(cur_candidate)
                 else:
