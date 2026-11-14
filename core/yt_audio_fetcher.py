@@ -30,6 +30,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 BOT_CHALLENGE_PATTERNS = [
     r"sign in to confirm you.?re not a bot",
+    r"detected as a bot",
     r"http error 429",
     r"too many requests",
     r"confirm your age",
@@ -69,16 +70,18 @@ def _extract_concise_ytdlp_error(output: str, max_len: int = 240) -> str:
     return output[-max_len:].strip()
 
 
-def _attempt_pytubefix_download(url: str, vid: str, tmp_dir: Path, expected_dur: float = 0.0) -> bool:
-    """Best-effort PytubeFix fallback trying ANDROID_VR (PO-token-free) then WEB PoToken client."""
+def _attempt_pytubefix_download(url: str, vid: str, tmp_dir: Path, expected_dur: float = 0.0) -> Tuple[bool, str, bool]:
+    """Best-effort PytubeFix fallback trying ANDROID_VR, VISION_OS, and WEB clients."""
     try:
         from pytubefix import YouTube
     except Exception as exc:
         print(f"    [auth] PytubeFix unavailable: {exc}", flush=True)
-        return False
+        return False, "", False
 
     min_bytes = int(expected_dur * 1500) if expected_dur >= 300.0 else 5_000
     dl_name = f"{vid}.mp4"
+    last_pt_err = ""
+    saw_bot = False
     for client_name, kwargs in (
         ("ANDROID_VR", {}),
         ("VISION_OS", {}),
@@ -102,10 +105,18 @@ def _attempt_pytubefix_download(url: str, vid: str, tmp_dir: Path, expected_dur:
                     f"    [auth] PytubeFix ({client_name}) succeeded ({dl_path.stat().st_size // 1024} KB).",
                     flush=True,
                 )
-                return True
+                return True, "", False
         except Exception as pt_exc:
+            pt_msg = str(pt_exc).strip()
+            last_pt_err = pt_msg
+            pt_lower = pt_msg.lower()
+            pt_kind = classify_ytdlp_output(pt_lower)
+            if pt_kind in ("challenged", "rate_limited", "forbidden_403") or any(
+                re.search(pat, pt_lower) for pat in BOT_CHALLENGE_PATTERNS
+            ):
+                saw_bot = True
             print(f"    [auth] PytubeFix ({client_name}) note: {pt_exc}", flush=True)
-    return False
+    return False, last_pt_err, saw_bot
 
 
 def patch_youtube_oauth2_plugin() -> bool:
@@ -293,6 +304,7 @@ def fetch_video_audio_m1(
                 cookies_tmp = tmp_dir / "cookies_working.txt"
                 sanitize_cookie_file(cookie, cookies_tmp)
                 cmd.extend(["--cookies", str(cookies_tmp)])
+            cmd.append(url)
 
             if attempts_run > 1:
                 total_planned = attempts_run + len(plan)
@@ -366,7 +378,17 @@ def fetch_video_audio_m1(
                 plan.append((None, "android_vr", "anonymous (android_vr)"))
 
         if not success:
-            success = _attempt_pytubefix_download(url, vid, tmp_dir, expected_dur=expected_dur)
+            success, pt_err, pt_bot_challenge = _attempt_pytubefix_download(
+                url, vid, tmp_dir, expected_dur=expected_dur
+            )
+            if not success:
+                if pt_bot_challenge:
+                    saw_bot_challenge = True
+                    if last_kind.startswith("code_"):
+                        last_kind = "challenged"
+                if pt_err:
+                    pt_note = f"PytubeFix: {pt_err[-160:]}"
+                    last_tail = f"{last_tail} | {pt_note}" if last_tail else pt_note
 
         if not success:
             if last_kind == "age_gate":

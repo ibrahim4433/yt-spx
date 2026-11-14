@@ -1028,6 +1028,7 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         record = {"video_id": vid, "youtube_url": f"https://www.youtube.com/watch?v={vid}"}
 
         def mock_subp_run(cmd, *args, **kwargs):
+            self.assertEqual(cmd[-1], record["youtube_url"])
             # If --cookies is present, simulate rotated cookie failure
             if "--cookies" in cmd:
                 return subprocess.CompletedProcess(
@@ -1081,6 +1082,7 @@ class TestSpeakerRolesEpisodesAndStage2Resume(unittest.TestCase):
         call_log = []
 
         def mock_subp_run(cmd, *args, **kwargs):
+            self.assertEqual(cmd[-1], record["youtube_url"])
             has_cookies = "--cookies" in cmd
             call_log.append("cookie" if has_cookies else "anon")
             if not has_cookies:
@@ -1738,6 +1740,7 @@ class TestColabWave5Regressions(unittest.TestCase):
         seen_cmds = []
 
         def mock_net_drop(cmd, *args, **kwargs):
+            self.assertEqual(cmd[-1], f"https://www.youtube.com/watch?v={vid1}")
             cmd_str = " ".join(cmd)
             seen_cmds.append(cmd_str)
             if "player_client=android_vr" in cmd_str:
@@ -1798,6 +1801,7 @@ class TestColabWave5Regressions(unittest.TestCase):
         fake_pt.YouTube = FakeYouTube
 
         def mock_all_fail(cmd, *args, **kwargs):
+            self.assertTrue(cmd[-1].startswith("https://www.youtube.com/watch?v="))
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=1,
@@ -1824,6 +1828,23 @@ class TestColabWave5Regressions(unittest.TestCase):
              patch("time.sleep", return_value=None):
             with self.assertRaises(YouTubeBotChallengeError):
                 fetch_video_audio_m1({"video_id": "blocked_vid"}, self.ws, min_global_gap_sec=0.0)
+
+        # Case 4: yt-dlp fails with non-bot status (e.g. code 2) while PytubeFix reports bot detection -> still raises YouTubeBotChallengeError
+        def mock_non_bot_fail(cmd, *args, **kwargs):
+            self.assertEqual(cmd[-1], "https://www.youtube.com/watch?v=pt_bot_vid")
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=2,
+                stdout="ERROR: Requested format is not available.",
+            )
+
+        with patch.dict(sys.modules, {"pytubefix": fake_pt}), \
+             patch("core.yt_audio_fetcher.CookiePool", side_effect=lambda w: CookiePool(w, include_repo_dir=False)), \
+             patch("subprocess.run", side_effect=mock_non_bot_fail), \
+             patch("time.sleep", return_value=None):
+            with self.assertRaises(YouTubeBotChallengeError) as pt_ctx:
+                fetch_video_audio_m1({"video_id": "pt_bot_vid"}, self.ws, min_global_gap_sec=0.0)
+        self.assertIn("detected as a bot", str(pt_ctx.exception).lower())
 
     def test_tries_more_than_4_cookies_and_prioritizes_new_cookies(self):
         import os
@@ -1876,6 +1897,7 @@ class TestColabWave5Regressions(unittest.TestCase):
         tried_cookie_runs = []
 
         def fake_subp(cmd, *args, **kwargs):
+            self.assertEqual(cmd[-1], "https://www.youtube.com/watch?v=multi_cookie_vid")
             if "--cookies" in cmd:
                 tried_cookie_runs.append(1)
                 if len(tried_cookie_runs) == 7:
@@ -1917,6 +1939,16 @@ class TestColabWave5Regressions(unittest.TestCase):
         ]
         self.ws.atomic_write_json(self.ws.data_dir / "video_manifest.json", manifest)
         self.ws.advance_micro_step("v_off_m2", "M2_VOCALS_CLEANED")
+        self.ws.atomic_write_json(
+            self.ws.state_path("v_m0_1"),
+            {
+                "video_id": "v_m0_1",
+                "micro_step": "M0_QUEUED",
+                "step_rank": 0,
+                "error_count": 2,
+                "last_error": "RuntimeError: Failed to fetch <vid> with all 9 option(s) (last status: code_2): Usage: __main__.py [OPTIONS] URL [URL...]\n\n__main__.py: error: You must pr",
+            },
+        )
 
         dl_attempts = []
         completed_vids = []
