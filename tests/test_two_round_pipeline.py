@@ -1330,6 +1330,92 @@ class TestConditionalRound2ThinkingOptimization(unittest.TestCase):
         ExtractionClient(client=plain).extract_round2_arabic("[]", "prompt", enable_thinking=False, max_thinking_tokens=0)
         self.assertEqual(plain.recorded, [COMPACT_ROUND2_ARABIC_SYSTEM_PROMPT])
 
+    def test_pre_round2_audit_catches_hallucinated_turns_roles_meta_and_bias(self):
+        """Verifies tightened pre-Round-2 checks close hallucinated ID, role-swap, quote, meta, and bias gaps."""
+        from tools.card_rating_system.audit_cards import audit_single_card, summarize_pre_round2_batch
+
+        turns = [
+            {
+                "turn_id": "VG_T01",
+                "merged_turn_ids": ["VG_T01", "VG_T01b"],
+                "speaker_role": "INTERLOCUTOR",
+                "text_original": "If the Quran affirms the previous scriptures, why don't Jews and Christians accept Muhammad today?",
+            },
+            {
+                "turn_id": "VG_T02",
+                "speaker_role": "MAIN_DAEE",
+                "text_original": "The Quran distinguishes between the original revealed scripture and later textual alterations across historical manuscripts.",
+            },
+        ]
+        clean_card = {
+            "question_turn_id": "VG_T01b",
+            "answer_turn_id": "VG_T02",
+            "question_en": "If the Quran references earlier revelations, why do Christians reject Islamic teachings?",
+            "core_answer_summary_en": (
+                "The Quran consistently affirms the original revelations sent to Moses and Jesus while critiquing subsequent "
+                "doctrinal departures and textual alterations introduced after the prophets departed. Confirming true divine guidance "
+                "means holding earlier scriptures accountable to the final preserved revelation rather than accepting later dogmas "
+                "such as the Trinity or original sin that contradict strict pure monotheism and prophetic teachings across history."
+            ),
+            "logical_premises": [
+                "Premise 1: Original prophetic scriptures taught pure monotheism without later theological accretions.",
+                "Premise 2: The Quran distinguishes original revelation from later human textual alterations.",
+                "Conclusion: Rejecting later human alterations aligns with rather than contradicts true revelation.",
+            ],
+            "fallacy_or_misconception_exposed": "Equivocation between original revelation and current ecclesiastical manuscripts.",
+            "socratic_question": "Do earlier manuscripts confirm every later ecumenical doctrine taught today?",
+            "interlocutor_verbatim_quote": "If the Quran affirms the previous scriptures, why don't Jews and Christians accept Muhammad today?",
+            "verbatim_quote": "The Quran distinguishes between the original revealed scripture and later textual alterations across historical manuscripts.",
+            "dialogue_exchange": [
+                {"turn_id": "VG_T01b", "role": "INTERLOCUTOR", "text_en": "Why don't Jews and Christians accept Muhammad today?"},
+                {"turn_id": "VG_T02", "role": "MAIN_DAEE", "text_en": "The Quran distinguishes original revealed scripture from textual alterations."},
+            ],
+        }
+
+        summary_clean, needs_clean = summarize_pre_round2_batch([clean_card], turns)
+        self.assertIn("Status=CLEAN", summary_clean)
+        self.assertFalse(needs_clean)
+
+        # 1. Hallucinated answer_turn_id
+        ev_hal = audit_single_card(dict(clean_card, answer_turn_id="NONEXISTENT_T99"), turns, require_arabic=False)
+        self.assertTrue(ev_hal["needs_english_repair"])
+        self.assertIn("HALLUCINATED_ANSWER_TURN_ID", [d["code"] for d in ev_hal["defects"]])
+
+        # 2. Missing answer_turn_id
+        ev_mis = audit_single_card(dict(clean_card, answer_turn_id=""), turns, require_arabic=False)
+        self.assertTrue(ev_mis["needs_english_repair"])
+        self.assertIn("MISSING_ANSWER_TURN_ID", [d["code"] for d in ev_mis["defects"]])
+
+        # 3. Dialogue turn speaker role swap
+        swapped_ex = [
+            {"turn_id": "VG_T01b", "role": "MAIN_DAEE", "text_en": "Why don't Jews and Christians accept Muhammad today?"},
+            {"turn_id": "VG_T02", "role": "INTERLOCUTOR", "text_en": "The Quran distinguishes original revealed scripture from textual alterations."},
+        ]
+        ev_swap = audit_single_card(dict(clean_card, dialogue_exchange=swapped_ex), turns, require_arabic=False)
+        self.assertTrue(ev_swap["needs_english_repair"])
+        self.assertIn("DIALOGUE_TURN_ROLE_MISMATCH", [d["code"] for d in ev_swap["defects"]])
+
+        # 4. Ungrounded interlocutor quote
+        ev_ivq = audit_single_card(
+            dict(clean_card, interlocutor_verbatim_quote="Quantum mechanics disproves Newtonian determinism inside black holes completely."),
+            turns,
+            require_arabic=False,
+        )
+        self.assertTrue(ev_ivq["needs_english_repair"])
+        self.assertIn("QUOTE_UNGROUNDED_INTERLOCUTOR", [d["code"] for d in ev_ivq["defects"]])
+
+        # 5. Expanded meta-narrator summary (e.g. Hijab clarifies...)
+        meta_sum = "Hijab clarifies that " + clean_card["core_answer_summary_en"]
+        summary_meta, needs_meta = summarize_pre_round2_batch([dict(clean_card, core_answer_summary_en=meta_sum)], turns)
+        self.assertTrue(needs_meta)
+        self.assertIn("META_NARRATOR_SUMMARY", summary_meta)
+
+        # 6. Opponent bias attribution detected pre-Round-2
+        bias_sum = "Jesus is the true God and " + clean_card["core_answer_summary_en"]
+        summary_bias, needs_bias = summarize_pre_round2_batch([dict(clean_card, core_answer_summary_en=bias_sum)], turns)
+        self.assertTrue(needs_bias)
+        self.assertIn("OPPONENT_BIAS_ATTRIBUTION", summary_bias)
+
 
 if __name__ == "__main__":
     unittest.main()

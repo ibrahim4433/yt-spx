@@ -66,6 +66,43 @@ HEBREW_REGEX = re.compile(r'[\u0590-\u05FF]')
 CJK_REGEX = re.compile(r'[\u4E00-\u9FFF\u3000-\u303F]')
 LATIN_IN_ARABIC_REGEX = re.compile(r'\b[A-Za-z]{4,}\b')
 
+META_NARRATOR_REGEX = re.compile(
+    r'(?:\b(?:the\s+(?:da\'?ee|speaker|apologist|scholar|muslim|debater|narrator|presenter)'
+    r'|hashim|mansur|uthman|ali|hijab|mohammed\s+hijab|hamza|adnan|subboor|zakir|shabir)\s+'
+    r'(?:says|counters|explains|argues|responds|replies|clarifies|asserts|states|demonstrates|concludes|rebuts|refutes)\b'
+    r'|\bin\s+this\s+(?:clip|video|exchange|dialogue),?\s+(?:he|she|the\s+\w+)\s+'
+    r'(?:says|explains|argues|responds|replies|counters))',
+    re.IGNORECASE,
+)
+
+_OVERLAP_STOPWORDS = frozenset({
+    "that", "this", "what", "from", "with", "have", "they", "their",
+    "about", "there", "which", "would", "could", "should", "where", "when",
+})
+
+
+def _quote_transcript_overlap(quote: str, transcript_lower: str) -> Optional[float]:
+    """Computes lexical overlap ratio of >=4-char content words between `quote` and `transcript_lower`."""
+    if not quote or not transcript_lower:
+        return None
+    sample_words = [
+        w for w in re.findall(r'\b\w{4,}\b', quote.lower())
+        if w not in _OVERLAP_STOPWORDS
+    ]
+    if not sample_words:
+        return None
+    matched_words = [w for w in sample_words if w in transcript_lower]
+    return len(matched_words) / len(sample_words)
+
+
+def _detect_opponent_bias(card: Dict[str, Any], a_turn: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Lazily invokes core.scenario_extractor.check_theological_bias without module import cycles."""
+    try:
+        from core.scenario_extractor import check_theological_bias
+    except ImportError:
+        return None
+    return check_theological_bias(card, a_turn)
+
 
 def audit_single_card(
     card: Dict[str, Any],
@@ -80,12 +117,21 @@ def audit_single_card(
     root_cause = None
     recommendations = []
 
-    # Concatenate transcript turns for ground-truth verification
+    # Concatenate transcript turns and index turn IDs (including cohesive merged_turn_ids)
     transcript_en = " ".join((t.get("text_original") or "").lower() for t in turns)
-    turn_roles_by_id = {
-        str(t.get("turn_id") or "").strip(): t.get("speaker_role")
-        for t in turns if t.get("turn_id")
-    }
+    turns_by_id: Dict[str, Dict[str, Any]] = {}
+    turn_roles_by_id: Dict[str, str] = {}
+    for t in turns:
+        role = t.get("speaker_role")
+        tid = str(t.get("turn_id") or "").strip()
+        if tid:
+            turns_by_id[tid] = t
+            turn_roles_by_id[tid] = role
+        for mid in (t.get("merged_turn_ids") or []):
+            m_str = str(mid or "").strip()
+            if m_str:
+                turns_by_id.setdefault(m_str, t)
+                turn_roles_by_id.setdefault(m_str, role)
 
     # -------------------------------------------------------------
     # 1. HARD-FAIL GATE: [GATE-ARABIC] Missing Arabic Localization
@@ -213,6 +259,25 @@ def audit_single_card(
         recommendations.append("Verify answer_turn_id belongs to MAIN_DAEE/CO_DAEE and question_turn_id to the interlocutor.")
 
     a_tid = str(card.get("answer_turn_id") or "").strip()
+    if not require_arabic and turn_roles_by_id:
+        if not a_tid:
+            hard_fail = hard_fail or "[GATE-ROLE]"
+            root_cause = root_cause or "Missing answer_turn_id before Round 2 verification."
+            defects.append({
+                "code": "MISSING_ANSWER_TURN_ID",
+                "severity": "CRITICAL",
+                "description": "answer_turn_id is empty and cannot be anchored to a MAIN_DAEE turn.",
+            })
+            recommendations.append("Anchor answer_turn_id to the substantive MAIN_DAEE response turn in the transcript.")
+        elif a_tid not in turn_roles_by_id:
+            hard_fail = hard_fail or "[GATE-ROLE]"
+            root_cause = root_cause or f"answer_turn_id '{a_tid}' does not exist in window transcript turns."
+            defects.append({
+                "code": "HALLUCINATED_ANSWER_TURN_ID",
+                "severity": "CRITICAL",
+                "description": f"answer_turn_id '{a_tid}' not found in scenario turns.",
+            })
+            recommendations.append("Replace answer_turn_id with an exact MAIN_DAEE turn_id from the transcript.")
     if a_tid and a_tid in turn_roles_by_id and turn_roles_by_id[a_tid] not in ("MAIN_DAEE", "CO_DAEE"):
         hard_fail = hard_fail or "[GATE-ROLE]"
         root_cause = root_cause or f"answer_turn_id '{a_tid}' points to non-Da'ee role ({turn_roles_by_id[a_tid]})."
@@ -222,6 +287,17 @@ def audit_single_card(
             "description": f"answer_turn_id '{a_tid}' is spoken by '{turn_roles_by_id[a_tid]}', not MAIN_DAEE/CO_DAEE."
         })
         recommendations.append("Re-anchor answer_turn_id to the MAIN_DAEE turn delivering the core refutation.")
+
+    bias_reason = _detect_opponent_bias(card, turns_by_id.get(a_tid))
+    if bias_reason:
+        hard_fail = hard_fail or "[GATE-ROLE]"
+        root_cause = root_cause or f"Opponent theological position attributed to Da'ee: {bias_reason}"
+        defects.append({
+            "code": "OPPONENT_BIAS_ATTRIBUTION",
+            "severity": "CRITICAL",
+            "description": f"Potential opponent bias attributed as Islamic proof: {bias_reason}",
+        })
+        recommendations.append("Separate interlocutor claims from the Da'ee's authentic Islamic refutation.")
 
     # -------------------------------------------------------------
     # DIMENSIONAL SCORING
@@ -264,20 +340,62 @@ def audit_single_card(
         dim_scores["grounding_fidelity"] -= 5
         defects.append({"code": "MISSING_DAEE_QUOTE", "severity": "MEDIUM", "description": "Missing verbatim_quote from transcript."})
         recommendations.append("Copy an exact word-for-word MAIN_DAEE proof quote from the transcript into verbatim_quote.")
-    elif transcript_en:
-        sample_words = [w for w in re.findall(r'\b\w{4,}\b', daee_quote.lower()) if w not in {"that", "this", "what", "from", "with", "have"}]
-        if sample_words:
-            matched_words = [w for w in sample_words if w in transcript_en]
-            ratio = len(matched_words) / len(sample_words)
-            if ratio < 0.3:
-                dim_scores["grounding_fidelity"] -= 8
-                defects.append({"code": "QUOTE_UNGROUNDED_DAEE", "severity": "HIGH", "description": f"Da'ee verbatim quote appears ungrounded (only {ratio:.0%} lexical overlap with transcript)."})
-                recommendations.append("Replace verbatim_quote with an exact spoken quote from the Da'ee in the transcript.")
+    else:
+        ratio = _quote_transcript_overlap(daee_quote, transcript_en)
+        if ratio is not None and ratio < 0.3:
+            dim_scores["grounding_fidelity"] -= 8
+            defects.append({"code": "QUOTE_UNGROUNDED_DAEE", "severity": "HIGH", "description": f"Da'ee verbatim quote appears ungrounded (only {ratio:.0%} lexical overlap with transcript)."})
+            recommendations.append("Replace verbatim_quote with an exact spoken quote from the Da'ee in the transcript.")
+
+    inter_quote = (card.get("interlocutor_verbatim_quote") or "").strip()
+    if not inter_quote:
+        dim_scores["grounding_fidelity"] -= 2
+        defects.append({"code": "MISSING_INTERLOCUTOR_QUOTE", "severity": "LOW", "description": "Missing interlocutor_verbatim_quote from transcript."})
+        recommendations.append("Copy an exact spoken question/objection quote from the interlocutor into interlocutor_verbatim_quote.")
+    else:
+        ratio_i = _quote_transcript_overlap(inter_quote, transcript_en)
+        if ratio_i is not None and ratio_i < 0.3:
+            dim_scores["grounding_fidelity"] -= 5
+            defects.append({"code": "QUOTE_UNGROUNDED_INTERLOCUTOR", "severity": "HIGH", "description": f"Interlocutor verbatim quote appears ungrounded (only {ratio_i:.0%} lexical overlap with transcript)."})
+            recommendations.append("Replace interlocutor_verbatim_quote with an exact spoken quote from the interlocutor.")
 
     ex_turns = card.get("dialogue_exchange") or card.get("dialogue_trajectory") or []
     if not isinstance(ex_turns, list) or len(ex_turns) < 2:
         dim_scores["grounding_fidelity"] -= 4
         defects.append({"code": "THIN_DIALOGUE_EXCHANGE", "severity": "MEDIUM", "description": "dialogue_exchange has fewer than 2 grounded turns."})
+    else:
+        if transcript_en:
+            for ex in ex_turns:
+                if not isinstance(ex, dict):
+                    continue
+                txt_en = (ex.get("text_en") or "").strip()
+                sample_tokens = [w for w in re.findall(r'\b\w{4,}\b', txt_en.lower()) if w not in _OVERLAP_STOPWORDS]
+                if len(sample_tokens) >= 4:
+                    t_ratio = _quote_transcript_overlap(txt_en, transcript_en)
+                    if t_ratio is not None and t_ratio < 0.15:
+                        dim_scores["grounding_fidelity"] -= 4
+                        defects.append({"code": "UNGROUNDED_DIALOGUE_TURN", "severity": "HIGH", "description": f"Dialogue turn '{ex.get('turn_id', '?')}' appears ungrounded against transcript ({t_ratio:.0%} overlap)."})
+                        recommendations.append("Ground every dialogue_exchange turn in actual transcript utterances.")
+                        break
+        if turn_roles_by_id:
+            for ex in ex_turns:
+                if not isinstance(ex, dict):
+                    continue
+                ex_tid = str(ex.get("turn_id") or "").strip()
+                claimed_role = str(ex.get("role") or "").strip().upper()
+                actual_role = turn_roles_by_id.get(ex_tid) if ex_tid else None
+                if actual_role and claimed_role and (
+                    (actual_role == "INTERLOCUTOR" and claimed_role in ("MAIN_DAEE", "CO_DAEE"))
+                    or (actual_role in ("MAIN_DAEE", "CO_DAEE") and claimed_role == "INTERLOCUTOR")
+                ):
+                    dim_scores["attribution_timestamps"] -= 5
+                    defects.append({
+                        "code": "DIALOGUE_TURN_ROLE_MISMATCH",
+                        "severity": "HIGH",
+                        "description": f"Turn '{ex_tid}' labeled '{claimed_role}' is actually '{actual_role}' in diarized transcript.",
+                    })
+                    recommendations.append("Correct swapped speaker roles in dialogue_exchange against diarized turn metadata.")
+                    break
 
     # Dim 3: Dialectical Depth (Max 25)
     premises_en = premises_raw if isinstance(premises_raw, list) else []
@@ -290,7 +408,7 @@ def audit_single_card(
         defects.append({"code": "SYLLOGISM_UNDER_3_PREMISES", "severity": "LOW", "description": "Only 2 premises; rubric recommends 3 deductive steps (Major, Minor, Conclusion)."})
 
     sum_en = (card.get("core_answer_summary_en") or "").strip()
-    if re.search(r'\b(the da\'?ee|the speaker|hashim|mansur|uthman|ali)\s+(says|counters|explains|argues|responds)\b', sum_en, re.I):
+    if META_NARRATOR_REGEX.search(sum_en):
         dim_scores["dialectical_depth"] -= 3
         defects.append({"code": "META_NARRATOR_SUMMARY", "severity": "MEDIUM", "description": "Core summary uses 3rd-person meta-narrative instead of stating direct Islamic truth."})
         recommendations.append("Rewrite core_answer_summary_en directly without 3rd-person phrases like 'The Da'ee explains...'.")
@@ -331,6 +449,10 @@ def audit_single_card(
     ts_sec = card.get("timestamp_seconds")
     q_tid = str(card.get("question_turn_id") or "").strip()
     has_valid_turn_anchor = bool(q_tid and (not turn_roles_by_id or q_tid in turn_roles_by_id))
+    if not require_arabic and turn_roles_by_id and not has_valid_turn_anchor:
+        dim_scores["attribution_timestamps"] -= 5
+        defects.append({"code": "UNGROUNDED_QUESTION_TURN_ID", "severity": "HIGH", "description": f"question_turn_id '{q_tid}' not found in scenario turns."})
+        recommendations.append("Anchor question_turn_id to an exact turn_id in the transcript.")
     if (ts_sec is None or ts_sec < 0) and (require_arabic or not has_valid_turn_anchor):
         dim_scores["attribution_timestamps"] -= 5
         defects.append({"code": "INVALID_TIMESTAMP", "severity": "MEDIUM", "description": "Missing or negative timestamp seconds."})
@@ -410,10 +532,12 @@ def summarize_pre_round2_batch(
         else:
             batch_needs_repair = True
             status_tag = ev["hard_fail_triggered"] or ("NEEDS_REPAIR" if ev["needs_english_repair"] else "MINOR_POLISH")
+            codes_hint = ", ".join(d["code"] for d in ev["defects"][:3])
             defect_strs = [f"[{d['code']}] {d['description']}" for d in ev["defects"][:4]]
             rec_strs = ev["recommendations"][:3]
             lines.append(
                 f"- Card {idx} ({q_tid} -> {a_tid}): Score={ev['score_pct']}/100 | Status={status_tag}"
+                + (f" [{codes_hint}]" if codes_hint else "")
             )
             if defect_strs:
                 lines.append(f"  Defects: {'; '.join(defect_strs)}")

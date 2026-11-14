@@ -2164,11 +2164,15 @@ class Stage2ScenarioExtractor:
                 if pre_audit_summary:
                     prompt_r2 = f"{pre_audit_summary}\n\n{prompt_r2}"
                 if verbose:
-                    mode_desc = (
-                        f"flagged EN defects -> bounded <think> ({r2_think_budget} tok)"
-                        if batch_needs_thinking
-                        else "Status=CLEAN -> fast /no_think Arabic localization"
-                    )
+                    if batch_needs_thinking:
+                        flag_tags = [
+                            t.strip() for t in re.findall(r"Status=([^\n]+)", pre_audit_summary or "")
+                            if not t.strip().startswith("CLEAN")
+                        ]
+                        reason_txt = flag_tags[0] if flag_tags else "EN defects"
+                        mode_desc = f"Status={reason_txt} -> bounded <think> ({r2_think_budget} tok)"
+                    else:
+                        mode_desc = "Status=CLEAN -> fast /no_think Arabic localization"
                     print(f"      [Window {w_idx} R2 Batch {b_idx}/{r2_batches_total}] {mode_desc}...", flush=True)
                 t0_r2 = time.time()
                 raw_out_r2 = _invoke_round2_client(
