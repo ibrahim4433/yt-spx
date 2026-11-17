@@ -55,23 +55,29 @@ let lastHighlightedTurnId = "";
 const CATEGORY_MAP = {
   "Prophethood & Quran": { en: "Prophethood & Quran", ar: "النبوة والقرآن الكريم" },
   "Comparative Religion & Christianity": { en: "Comparative Religion & Christianity", ar: "مقارنة الأديان والمسيحية" },
+  "Comparative Religion & Judaism": { en: "Comparative Religion & Judaism", ar: "مقارنة الأديان واليهودية" },
+  "Comparative Religion & Eastern Traditions": { en: "Comparative Religion & Eastern Traditions", ar: "مقارنة الأديان والمعتقدات الشرقية" },
   "Theology & God's Existence": { en: "Theology & God's Existence", ar: "العقيدة ووجود الله" },
   "Epistemology & Science": { en: "Epistemology & Science", ar: "المعرفة والعلم التجريبي" },
   "Shariah & Social Inquiries": { en: "Shariah & Social Inquiries", ar: "الشريعة والشبهات الاجتماعية" },
   "Ethics & Morality": { en: "Ethics & Morality", ar: "الأخلاق والقيم" },
   "Objective Morality & Ethics": { en: "Objective Morality & Ethics", ar: "الأخلاق الموضوعية والقيم" },
   "Problem of Evil & Suffering": { en: "Problem of Evil & Suffering", ar: "معضلة الشر والمعاناة" },
+  "Textual Preservation & Manuscripts": { en: "Textual Preservation & Manuscripts", ar: "حفظ النصوص والمخطوطات" },
+  "Hadith & Sunnah Preservation": { en: "Hadith & Sunnah Preservation", ar: "حفظ السنة والحديث النبوي" },
+  "Islamic History & Civilizations": { en: "Islamic History & Civilizations", ar: "التاريخ والحضارة الإسلامية" },
+  "Eschatology & Free Will": { en: "Eschatology & Free Will", ar: "القدر واليوم الآخر والجنة والنار" },
   "Dawah & Social Inquiries": { en: "Dawah & Social Inquiries", ar: "الدعوة والحوار الاجتماعي" },
   "Comparative Religion & Shariah": { en: "Comparative Religion & Shariah", ar: "مقارنة الأديان والتشريع" },
   "Comparative Religion & History": { en: "Comparative Religion & History", ar: "مقارنة الأديان والتاريخ" },
   "Comparative Religion & Ethics": { en: "Comparative Religion & Ethics", ar: "مقارنة الأديان والأخلاق" },
   "Social Inquiries & Feminism": { en: "Social Inquiries & Feminism", ar: "الشريعة والنسوية والقضايا المجتمعية" },
-  "Textual Preservation & Reliability": { en: "Textual Preservation & Reliability", ar: "مقارنة الأديان وحفظ النصوص" },
-  "Textual Preservation & Manuscript Evidence": { en: "Manuscript Evidence & Preservation", ar: "مقارنة الأديان والمخطوطات" },
-  "Textual Preservation & Biblical Reliability": { en: "Biblical Reliability & Manuscripts", ar: "مقارنة الأديان وموثوقية الكتاب المقدس" },
-  "Textual Preservation & Biblical Manuscripts": { en: "Biblical Manuscripts & Preservation", ar: "مقارنة الأديان ومخطوطات الكتاب المقدس" },
-  "Textual Preservation & Biblical Inerrancy": { en: "Biblical Inerrancy & Criticism", ar: "مقارنة الأديان ونقد دعوى عصمة الإنجيل" },
-  "Textual Preservation & Biblical Criticism": { en: "Biblical Criticism & Preservation", ar: "مقارنة الأديان والنقد النصي" },
+  "Textual Preservation & Reliability": { en: "Textual Preservation & Reliability", ar: "حفظ النصوص والمخطوطات" },
+  "Textual Preservation & Manuscript Evidence": { en: "Manuscript Evidence & Preservation", ar: "حفظ النصوص والمخطوطات" },
+  "Textual Preservation & Biblical Reliability": { en: "Biblical Reliability & Manuscripts", ar: "حفظ النصوص وموثوقية الكتاب المقدس" },
+  "Textual Preservation & Biblical Manuscripts": { en: "Biblical Manuscripts & Preservation", ar: "حفظ النصوص ومخطوطات الكتاب المقدس" },
+  "Textual Preservation & Biblical Inerrancy": { en: "Biblical Inerrancy & Criticism", ar: "نقد دعوى عصمة النص الكتابي" },
+  "Textual Preservation & Biblical Criticism": { en: "Biblical Criticism & Preservation", ar: "النقد النصي وحفظ المخطوطات" },
   "Miscellaneous": { en: "General Philosophical Inquiries", ar: "مباحث فكرية عامة" }
 };
 
@@ -84,9 +90,36 @@ const INTERLOCUTOR_MAP = {
   "Secular Humanist / Christian": { en: "Secular / Christian", ar: "علماني / مسيحي" },
   "Agnostic / Skeptic": { en: "Agnostic / Skeptic", ar: "لاأدري / متشكك" },
   "Muslim with Doubts": { en: "Muslim Seeking Proof", ar: "مسلم يطلب البرهان" },
+  "Jewish / Rabbinic": { en: "Jewish / Rabbinic", ar: "يهودي / حاخامي" },
+  "Hindu / Eastern": { en: "Hindu / Eastern", ar: "هندوسي / شرق آسيوي" },
+  "Buddhist / Eastern": { en: "Buddhist / Eastern", ar: "بوذي / شرق آسيوي" },
   "Shiite": { en: "Shiite", ar: "شيعي" },
   "Shia": { en: "Shia", ar: "شيعي" }
 };
+
+const MOVE_TYPE_MAP = {
+  "objection": "اعتراض / شبهة",
+  "inquiry": "استفسار",
+  "question": "تساؤل",
+  "claim": "ادعاء",
+  "socratic turn": "سؤال سقراطي",
+  "socratic challenge": "إلزام سقراطي",
+  "socratic counter-question": "سؤال سقراطي معاكس",
+  "deductive proof": "برهان عقلي",
+  "rational proof": "دليل عقلي",
+  "refutation": "رد وتفنيد",
+  "counter-argument": "حجة مضادة",
+  "analogy": "قياس ومثال",
+  "clarification": "توضيح",
+  "reaction": "تعقيب",
+  "concession": "إقرار / تسليم"
+};
+
+function getLocalizedMoveType(moveType, lang = currentLang) {
+  const m = String(moveType || "").trim();
+  if (!m || lang !== "ar") return m;
+  return MOVE_TYPE_MAP[m.toLowerCase()] || m;
+}
 
 const SVG_ICONS = {
   fallacy: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></svg>`,
@@ -596,11 +629,26 @@ function getLocalizedCategory(catKey, lang = currentLang) {
     return CATEGORY_MAP[catKey][lang];
   }
   if (lang === "ar") {
+    if (catKey.includes("Judaism") || catKey.includes("Jewish") || catKey.includes("Torah")) {
+      return "مقارنة الأديان واليهودية";
+    }
+    if (catKey.includes("Eastern") || catKey.includes("Hindu") || catKey.includes("Buddh")) {
+      return "مقارنة الأديان والمعتقدات الشرقية";
+    }
+    if (catKey.includes("Hadith") || catKey.includes("Sunnah")) {
+      return "حفظ السنة والحديث النبوي";
+    }
+    if (catKey.includes("Islamic History") || catKey.includes("Civilization")) {
+      return "التاريخ والحضارة الإسلامية";
+    }
+    if (catKey.includes("Eschatology") || catKey.includes("Free Will") || catKey.includes("Afterlife")) {
+      return "القدر واليوم الآخر والجنة والنار";
+    }
     if (catKey.includes("Textual Preservation") || catKey.includes("Manuscript") || catKey.includes("Biblical")) {
-      return "مقارنة الأديان والمخطوطات";
+      return "حفظ النصوص والمخطوطات";
     }
     if (catKey.includes("Feminism") || catKey.includes("Social Inquiries")) {
-      return "الشريعة والقضايا المجتمعية";
+      return "الشريعة والشبهات الاجتماعية";
     }
     if (catKey.includes("Comparative Religion")) {
       return "مقارنة الأديان والمسيحية";
@@ -622,6 +670,20 @@ function getLocalizedCategory(catKey, lang = currentLang) {
     }
   }
   return catKey;
+}
+
+function formatParallelText(enText, arText, showParallel, isAr, borderCss = "rgba(15,82,62,0.18)", wrapQuotes = false) {
+  const enStr = String(enText || "").trim();
+  const arStr = String(arText || "").trim();
+  const active = isAr ? (arStr || enStr) : (enStr || arStr);
+  const qOpen = wrapQuotes ? "“" : "";
+  const qClose = wrapQuotes ? "”" : "";
+  const aqOpen = wrapQuotes ? "«" : "";
+  const aqClose = wrapQuotes ? "»" : "";
+  if (showParallel && enStr && arStr && enStr !== arStr) {
+    return `<div>${qOpen}${escapeHtml(enStr)}${qClose}</div><div class="ar-font" dir="rtl" style="margin-top:0.35rem; padding-top:0.35rem; border-top:1px dashed ${borderCss};">${aqOpen}${escapeHtml(arStr)}${aqClose}</div>`;
+  }
+  return isAr && arStr ? `<span class="ar-font" dir="rtl">${aqOpen}${escapeHtml(active)}${aqClose}</span>` : `${qOpen}${escapeHtml(active)}${qClose}`;
 }
 
 function getLocalizedInterlocutor(interKey, lang = currentLang) {
@@ -1224,34 +1286,36 @@ function renderCards(cards) {
     }
 
     // Dual Verbatim Quotes (Interlocutor Objection + Da'ee Evidence)
-    const interQuote = isAr
-      ? card.interlocutor_verbatim_quote_ar || card.interlocutor_verbatim_quote
-      : card.interlocutor_verbatim_quote || card.interlocutor_verbatim_quote_ar;
-    const daeeQuote = isAr
-      ? card.verbatim_quote_ar || card.verbatim_quote
-      : card.verbatim_quote || card.verbatim_quote_ar;
+    const interQuoteEn = String(card.interlocutor_verbatim_quote || "").trim();
+    const interQuoteAr = String(card.interlocutor_verbatim_quote_ar || "").trim();
+    const activeInterQuote = isAr ? (interQuoteAr || interQuoteEn) : (interQuoteEn || interQuoteAr);
+    const daeeQuoteEn = String(card.verbatim_quote || "").trim();
+    const daeeQuoteAr = String(card.verbatim_quote_ar || "").trim();
+    const activeDaeeQuote = isAr ? (daeeQuoteAr || daeeQuoteEn) : (daeeQuoteEn || daeeQuoteAr);
 
     const verbatimParts = [];
-    if (interQuote && !isNoneText(interQuote)) {
+    if (activeInterQuote && !isNoneText(activeInterQuote)) {
+      const interQuoteBody = formatParallelText(interQuoteEn, interQuoteAr, showParallel, isAr, "rgba(138,75,8,0.22)", true);
       verbatimParts.push(`
         <div class="verbatim-interlocutor-strip">
           <div class="verbatim-strip-label">
             ${SVG_ICONS.verbatim}
             <span>${escapeHtml(t.interVerbatimLabel)} [${escapeHtml(card.timestamp_formatted || "00:00")}]</span>
           </div>
-          <div>“${escapeHtml(interQuote)}”</div>
+          <div>${interQuoteBody}</div>
         </div>
       `);
     }
-    if (daeeQuote && !isNoneText(daeeQuote)) {
+    if (activeDaeeQuote && !isNoneText(activeDaeeQuote)) {
       const ansTs = card.answer_timestamp_formatted || card.timestamp_formatted || "00:00";
+      const daeeQuoteBody = formatParallelText(daeeQuoteEn, daeeQuoteAr, showParallel, isAr, "rgba(15,82,62,0.2)", true);
       verbatimParts.push(`
         <div class="verbatim-strip">
           <div class="verbatim-strip-label">
             ${SVG_ICONS.verbatim}
             <span>${escapeHtml(t.verbatimLabel)} [${escapeHtml(ansTs)}]</span>
           </div>
-          <div>“${escapeHtml(daeeQuote)}”</div>
+          <div>${daeeQuoteBody}</div>
         </div>
       `);
     }
@@ -1304,44 +1368,44 @@ function renderCards(cards) {
       `;
     }
 
-    // Concrete Analogy (Supports Single or Multiple)
+    // Concrete Analogy (Supports Single or Multiple without dropping extra EN/AR items)
     const rawAnalogies = Array.isArray(card.analogies) && card.analogies.length
       ? card.analogies
       : (card.analogy_or_metaphor ? [card.analogy_or_metaphor] : []);
     const rawAnalogiesAr = Array.isArray(card.analogies_ar) && card.analogies_ar.length
       ? card.analogies_ar
       : (card.analogy_or_metaphor_ar ? [card.analogy_or_metaphor_ar] : []);
+    const analogyCount = Math.max(rawAnalogies.length, rawAnalogiesAr.length);
 
     let analogyHtml = "";
-    if (rawAnalogies.length > 1) {
-      const itemsHtml = rawAnalogies.map((anEn, aIdx) => {
-        const anAr = rawAnalogiesAr[aIdx] || "";
+    if (analogyCount > 1) {
+      const itemsHtml = Array.from({ length: analogyCount }, (_, aIdx) => {
+        const anEn = String(rawAnalogies[aIdx] || "").trim();
+        const anAr = String(rawAnalogiesAr[aIdx] || "").trim();
         const activeItem = isAr ? (anAr || anEn) : (anEn || anAr);
-        const itemBody = showParallel && anEn && anAr && anEn !== anAr
-          ? `<div>${escapeHtml(anEn)}</div><div class="ar-font" dir="rtl" style="margin-top:0.25rem; padding-top:0.25rem; border-top:1px dashed rgba(15,82,62,0.15);">${escapeHtml(anAr)}</div>`
-          : escapeHtml(activeItem);
+        if (!activeItem || isNoneText(activeItem)) return "";
+        const itemBody = formatParallelText(anEn, anAr, showParallel, isAr, "rgba(15,82,62,0.15)", false);
         return `
-          <div class="analogy-multi-item" style="margin-bottom:0.45rem; padding-bottom:0.45rem; ${aIdx < rawAnalogies.length - 1 ? 'border-bottom: 1px dashed var(--border-hairline);' : ''}">
+          <div class="analogy-multi-item" style="margin-bottom:0.45rem; padding-bottom:0.45rem; ${aIdx < analogyCount - 1 ? 'border-bottom: 1px dashed var(--border-hairline);' : ''}">
             <span style="font-weight:700; color:var(--emerald-primary); margin-inline-end:0.4rem;">[${aIdx + 1}]</span>
             <span>${itemBody}</span>
           </div>
         `;
-      }).join("");
-      analogyHtml = `
-        <div class="analogy-panel">
-          <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)} (${rawAnalogies.length})</span></div>
-          <div class="analogy-body">${itemsHtml}</div>
-        </div>
-      `;
+      }).filter(Boolean).join("");
+      if (itemsHtml) {
+        analogyHtml = `
+          <div class="analogy-panel">
+            <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)} (${analogyCount})</span></div>
+            <div class="analogy-body">${itemsHtml}</div>
+          </div>
+        `;
+      }
     } else {
       const analogyEn = card.analogy_or_metaphor || (rawAnalogies[0] || "");
       const analogyAr = card.analogy_or_metaphor_ar || (rawAnalogiesAr[0] || "");
       const activeAnalogy = isAr ? analogyAr || analogyEn : analogyEn || analogyAr;
       if (activeAnalogy && !isNoneText(activeAnalogy)) {
-        const analogyBody =
-          showParallel && analogyEn && analogyAr && analogyEn !== analogyAr
-            ? `<div>${escapeHtml(analogyEn)}</div><div class="ar-font" dir="rtl" style="margin-top:0.35rem; padding-top:0.35rem; border-top:1px dashed rgba(15,82,62,0.2);">${escapeHtml(analogyAr)}</div>`
-            : escapeHtml(activeAnalogy);
+        const analogyBody = formatParallelText(analogyEn, analogyAr, showParallel, isAr, "rgba(15,82,62,0.2)", false);
         analogyHtml = `
           <div class="analogy-panel">
             <div class="analogy-bar">${SVG_ICONS.analogy}<span>${escapeHtml(t.analogyLabel)}</span></div>
@@ -1384,7 +1448,7 @@ function renderCards(cards) {
       `;
     }
 
-    // Chronological Dual-Speaker Exchange Timeline (V2: Supports 6-12 turns with toggle)
+    // Chronological Dual-Speaker Exchange Timeline (V2: Supports 6-12 turns with toggle & parallel EN/AR)
     const exchanges = Array.isArray(card.dialogue_exchange) && card.dialogue_exchange.length
       ? card.dialogue_exchange
       : (Array.isArray(card.dialogue_trajectory) ? card.dialogue_trajectory : []);
@@ -1393,17 +1457,18 @@ function renderCards(cards) {
       const displayedExchanges = exchanges.slice(0, 12);
       const hasExtra = displayedExchanges.length > 4;
       const extraCount = displayedExchanges.length - 4;
+      const turnsLabel = isAr ? `${displayedExchanges.length} مداخلة` : `${displayedExchanges.length} TURNS`;
       exchangeHtml = `
         <div class="exchange-timeline-panel">
           <div class="exchange-timeline-bar">
             <span>${SVG_ICONS.scenario} ${escapeHtml(t.exchangeLabel)}</span>
-            <span>${displayedExchanges.length} TURNS</span>
+            <span>${escapeHtml(turnsLabel)}</span>
           </div>
           <div class="exchange-steps-list">
             ${displayedExchanges
               .map((ex, exIdx) => {
                 const isExtra = exIdx >= 4;
-                const isDaeeRole = String(ex.role || "").includes("DAEE");
+                const isDaeeRole = String(ex.role || "").includes("DAEE") || /الداعية|المُحاجج|المحاجج/.test(String(ex.role || ""));
                 const roleCls = isDaeeRole ? "exchange-role-daee" : "exchange-role-inter";
                 let spkName = "";
                 if (isAr) {
@@ -1415,7 +1480,8 @@ function renderCards(cards) {
                     ? ex.speaker_label_en
                     : (isDaeeRole ? (card.daee_name_en || "Main Da'ee") : "Interlocutor");
                 }
-                const exTxt = isAr ? ex.text_ar || ex.text_en || "" : ex.text_en || ex.text_ar || "";
+                const exBody = formatParallelText(ex.text_en, ex.text_ar, showParallel, isAr, "rgba(15,82,62,0.14)", false);
+                const exMove = getLocalizedMoveType(ex.move_type, currentLang);
                 const exTs = ex.timestamp_formatted || card.timestamp_formatted || "00:00";
                 const exSec = Number(ex.timestamp_seconds || card.timestamp_seconds || 0);
                 const extraClass = isExtra ? " exchange-step-extra" : "";
@@ -1423,10 +1489,10 @@ function renderCards(cards) {
                 return `
                   <button type="button" class="exchange-step-item${extraClass}"${extraStyle} onclick="openScenarioStudio('${escapeJsStr(card.video_id || "")}', '${escapeJsStr(ex.turn_id || "")}', ${exSec})">
                     <div class="exchange-step-meta">
-                      <span class="${roleCls}">${escapeHtml(spkName)} · ${escapeHtml(ex.move_type || "")}</span>
+                      <span class="${roleCls}">${escapeHtml(spkName)}${exMove ? ` · ${escapeHtml(exMove)}` : ""}</span>
                       <span>${escapeHtml(exTs)}</span>
                     </div>
-                    <div class="exchange-step-text">${escapeHtml(exTxt)}</div>
+                    <div class="exchange-step-text">${exBody}</div>
                   </button>
                 `;
               })
@@ -1482,7 +1548,7 @@ function renderCards(cards) {
             <button type="button" class="badge-interlocutor" onclick="setInterlocutorFilter('${escapeJsStr(card.interlocutor_type)}')">
               ${escapeHtml(interlocutorName)}
             </button>
-            ${episodeIdx > 1 ? `<span class="badge-episode">EP ${episodeIdx}</span>` : ""}
+            ${episodeIdx > 1 ? `<span class="badge-episode">${isAr ? `الجولة ${episodeIdx}` : `EP ${episodeIdx}`}</span>` : ""}
           </div>
           <button type="button" class="card-lang-peek-btn ${showParallel ? "active" : ""}" onclick="toggleCardParallel('${escapeJsStr(cardId)}')">
             ${SVG_ICONS.parallel}
@@ -1704,11 +1770,11 @@ function renderScenarioCatalogCards(videos) {
         </div>
         <h3 class="scenario-card-title" dir="rtl">${escapeHtml(v.title_ar || v.video_id)}</h3>
         <div class="scenario-metrics-row">
-          <span>DURATION: ${escapeHtml(formatDurationSec(v.duration_sec))}</span>
-          <span>SPEAKERS: ${Number(v.speakers_count || 0)}</span>
-          <span>TURNS: ${Number(v.turns_count || 0)}</span>
-          <span>OVERLAPS UNMIXED: ${Number(v.overlap_windows_count || 0)}</span>
-          <span>PEDESTRIANS ISOLATED: ${Number(v.pedestrian_turns_count || 0)}</span>
+          <span>${isAr ? "المدة:" : "DURATION:"} ${escapeHtml(formatDurationSec(v.duration_sec))}</span>
+          <span>${isAr ? "المتحدثون:" : "SPEAKERS:"} ${Number(v.speakers_count || 0)}</span>
+          <span>${isAr ? "المداخلات:" : "TURNS:"} ${Number(v.turns_count || 0)}</span>
+          <span>${isAr ? "تداخلات مفصولة:" : "OVERLAPS UNMIXED:"} ${Number(v.overlap_windows_count || 0)}</span>
+          <span>${isAr ? "مقاطعات المارة:" : "PEDESTRIANS ISOLATED:"} ${Number(v.pedestrian_turns_count || 0)}</span>
         </div>
       </div>
       <div class="scenario-card-actions">
@@ -1785,10 +1851,10 @@ function renderStudioContents(payload) {
   if (metaEl) {
     metaEl.innerHTML = `
       <span class="badge-serial">${escapeHtml(video.video_id || "")}</span>
-      <span>DURATION: ${escapeHtml(formatDurationSec(video.duration_sec))}</span>
-      <span>TURNS: ${turns.length}</span>
-      <span>OVERLAPS: ${Number(video.overlap_windows_count || 0)}</span>
-      <span>PEDESTRIANS: ${Number(video.pedestrian_turns_count || 0)}</span>
+      <span>${isAr ? "المدة:" : "DURATION:"} ${escapeHtml(formatDurationSec(video.duration_sec))}</span>
+      <span>${isAr ? "المداخلات:" : "TURNS:"} ${turns.length}</span>
+      <span>${isAr ? "التداخلات:" : "OVERLAPS:"} ${Number(video.overlap_windows_count || 0)}</span>
+      <span>${isAr ? "المارة:" : "PEDESTRIANS:"} ${Number(video.pedestrian_turns_count || 0)}</span>
     `;
   }
 
@@ -2170,8 +2236,9 @@ function sendChatMessage() {
   fetch(`/api/chat?q=${encodeURIComponent(query)}`)
     .then((r) => r.json())
     .then((data) => {
-      const isAr = data.language === "ar" || currentLang === "ar";
-      const t = translations[isAr ? "ar" : "en"];
+      const uiAr = currentLang === "ar";
+      const contentAr = data.language === "ar" || uiAr;
+      const t = translations[uiAr ? "ar" : "en"];
       const pkg = data.response_package;
 
       let botResponseHtml = "";
@@ -2181,26 +2248,31 @@ function sendChatMessage() {
             ? `<div class="socratic-turn-panel" style="margin-bottom:0.85rem; padding:0.65rem 0.85rem; font-size:0.84rem; font-weight:600; color:var(--socratic-ochre);">${escapeHtml(data.message)}</div>`
             : "";
 
-        const cleanPremises = (pkg.logical_premises || [])
-          .map((p) => String(p || "").trim())
-          .filter((p) => p.length > 0);
-        const premisesHtml = cleanPremises.length
+        const titleHtml = formatParallelText(pkg.title_en || pkg.title, pkg.title_ar || pkg.title, isParallelMode, contentAr, "rgba(15,82,62,0.18)", false);
+        const summaryHtml = formatParallelText(pkg.summary_en || pkg.summary, pkg.summary_ar || pkg.summary, isParallelMode, contentAr, "rgba(15,82,62,0.18)", false);
+
+        const cleanPremisesEn = (pkg.logical_premises_en || pkg.logical_premises || []).map((p) => String(p || "").trim()).filter(Boolean);
+        const cleanPremisesAr = (pkg.logical_premises_ar || []).map((p) => String(p || "").trim()).filter(Boolean);
+        const activePremises = contentAr && cleanPremisesAr.length ? cleanPremisesAr : cleanPremisesEn;
+
+        const premisesHtml = activePremises.length
           ? `
             <div style="margin-top:0.85rem;">
               <div class="proof-section-bar">
                 <span>${SVG_ICONS.proof} ${escapeHtml(t.premisesLabel)}</span>
-                <span>CONFIDENCE: ${escapeHtml(String(data.confidence_score || 95))}%</span>
+                <span>${uiAr ? "نسبة الثقة:" : "CONFIDENCE:"} ${escapeHtml(String(data.confidence_score || 95))}%</span>
               </div>
               <ol class="syllogism-list" style="margin-top:0.45rem;">
-                ${cleanPremises
+                ${activePremises
                   .map((p, idx) => {
-                    const isLast = idx === cleanPremises.length - 1 && cleanPremises.length > 1;
-                    const badgeCode = isLast ? (isAr ? "النتيجة" : "Conclusion") : `${idx + 1}`;
+                    const isLast = idx === activePremises.length - 1 && activePremises.length > 1;
+                    const badgeCode = isLast ? (uiAr ? "النتيجة" : "Conclusion") : `${idx + 1}`;
                     const badgeClass = isLast ? "step-badge step-badge-conclusion" : "step-badge";
+                    const pBody = formatParallelText(cleanPremisesEn[idx] || p, cleanPremisesAr[idx] || "", isParallelMode, contentAr, "var(--border-hairline)", false);
                     return `
                       <li class="syllogism-step">
                         <span class="${badgeClass}">${badgeCode}</span>
-                        <span>${escapeHtml(p)}</span>
+                        <div>${pBody}</div>
                       </li>
                     `;
                   })
@@ -2210,43 +2282,80 @@ function sendChatMessage() {
           `
           : "";
 
+        const fallacyVal = pkg.fallacy_exposed_en || pkg.fallacy_exposed_ar || pkg.fallacy_exposed;
         const fallacyHtml =
-          pkg.fallacy_exposed && !isNoneText(pkg.fallacy_exposed)
+          fallacyVal && !isNoneText(fallacyVal)
             ? `
               <div class="fallacy-panel" style="margin-top:0.75rem;">
                 <div class="fallacy-panel-bar">${SVG_ICONS.fallacy} <span>${escapeHtml(t.fallacyLabel)}</span></div>
-                <div class="fallacy-panel-body">${escapeHtml(pkg.fallacy_exposed)}</div>
+                <div class="fallacy-panel-body">${formatParallelText(pkg.fallacy_exposed_en || pkg.fallacy_exposed, pkg.fallacy_exposed_ar || "", isParallelMode, contentAr, "rgba(166,43,29,0.2)", false)}</div>
               </div>
             `
             : "";
 
+        const socraticVal = contentAr ? (pkg.socratic_question_ar || pkg.socratic_question) : (pkg.socratic_question_en || pkg.socratic_question);
         const socraticHtml =
-          pkg.socratic_question && !isNoneText(pkg.socratic_question)
+          socraticVal && !isNoneText(socraticVal)
             ? `
               <div class="socratic-turn-panel" style="margin-top:0.75rem;">
                 <div class="socratic-turn-bar">
                   <span class="socratic-badge-title">${SVG_ICONS.socratic} <span>${escapeHtml(t.socraticLabel)}</span></span>
-                  <button type="button" class="socratic-action-btn" onclick="copySocraticText('${escapeJsStr(pkg.socratic_question)}')">
+                  <button type="button" class="socratic-action-btn" onclick="copySocraticText('${escapeJsStr(socraticVal)}')">
                     ${SVG_ICONS.copy} <span>${escapeHtml(t.copyBtn)}</span>
                   </button>
                 </div>
                 <div class="socratic-turn-body">
                   ${SVG_ICONS.quoteMark}
-                  <div class="socratic-question-text">“${escapeHtml(pkg.socratic_question)}”</div>
+                  <div class="socratic-question-text">${formatParallelText(pkg.socratic_question_en || pkg.socratic_question, pkg.socratic_question_ar || "", isParallelMode, contentAr, "rgba(138,75,8,0.22)", true)}</div>
                 </div>
               </div>
             `
             : "";
 
+        const analogyVal = pkg.analogy_en || pkg.analogy_ar || pkg.analogy;
         const analogyHtml =
-          pkg.analogy && !isNoneText(pkg.analogy)
+          analogyVal && !isNoneText(analogyVal)
             ? `
               <div class="analogy-panel" style="margin-top:0.75rem;">
                 <div class="analogy-bar">${SVG_ICONS.analogy} <span>${escapeHtml(t.analogyLabel)}</span></div>
-                <div class="analogy-body">${escapeHtml(pkg.analogy)}</div>
+                <div class="analogy-body">${formatParallelText(pkg.analogy_en || pkg.analogy, pkg.analogy_ar || "", isParallelMode, contentAr, "rgba(15,82,62,0.2)", false)}</div>
               </div>
             `
             : "";
+
+        const chatQuotes = [];
+        const interQ = pkg.interlocutor_verbatim_quote_en || pkg.interlocutor_verbatim_quote_ar || pkg.interlocutor_verbatim_quote;
+        if (interQ && !isNoneText(interQ)) {
+          chatQuotes.push(`
+            <div class="verbatim-interlocutor-strip">
+              <div class="verbatim-strip-label">${SVG_ICONS.verbatim}<span>${escapeHtml(t.interVerbatimLabel)} [${escapeHtml(pkg.timestamp || "00:00")}]</span></div>
+              <div>${formatParallelText(pkg.interlocutor_verbatim_quote_en || pkg.interlocutor_verbatim_quote, pkg.interlocutor_verbatim_quote_ar || "", isParallelMode, contentAr, "rgba(138,75,8,0.22)", true)}</div>
+            </div>
+          `);
+        }
+        const daeeQ = pkg.verbatim_quote_en || pkg.verbatim_quote_ar || pkg.verbatim_quote;
+        if (daeeQ && !isNoneText(daeeQ)) {
+          chatQuotes.push(`
+            <div class="verbatim-strip">
+              <div class="verbatim-strip-label">${SVG_ICONS.verbatim}<span>${escapeHtml(t.verbatimLabel)} [${escapeHtml(pkg.answer_timestamp || pkg.timestamp || "00:00")}]</span></div>
+              <div>${formatParallelText(pkg.verbatim_quote_en || pkg.verbatim_quote, pkg.verbatim_quote_ar || "", isParallelMode, contentAr, "rgba(15,82,62,0.2)", true)}</div>
+            </div>
+          `);
+        }
+        const chatQuotesHtml = chatQuotes.length ? `<div class="verbatim-stack" style="margin-top:0.75rem;">${chatQuotes.join("")}</div>` : "";
+
+        const chatCitations = Array.isArray(pkg.scriptural_citations) ? pkg.scriptural_citations : [];
+        const chatCitationsHtml = chatCitations.length
+          ? `
+            <div class="scriptural-panel" style="margin-top:0.75rem;">
+              <div class="scriptural-bar">${SVG_ICONS.scripture || SVG_ICONS.proof}<span>${escapeHtml(t.scriptureLabel || "Scriptural Citations")}</span></div>
+              <div class="scriptural-body">${chatCitations.map((sc) => typeof sc === "string"
+                ? `<div class="scripture-item"><span class="scripture-badge">${escapeHtml(sc)}</span></div>`
+                : `<div class="scripture-item"><div class="scripture-header">${sc.source ? `<span class="scripture-source-badge">${escapeHtml(sc.source)}</span>` : ""}${sc.reference ? `<strong class="scripture-ref">${escapeHtml(sc.reference)}</strong>` : ""}</div>${(sc.significance || sc.significance_ar) ? `<div class="scripture-sig">${formatParallelText(sc.significance || "", sc.significance_ar || "", isParallelMode, contentAr, "rgba(15,82,62,0.15)", false)}</div>` : ""}</div>`
+              ).join("")}</div>
+            </div>
+          `
+          : "";
 
         const firstTid = Array.isArray(pkg.source_turn_ids) && pkg.source_turn_ids.length ? pkg.source_turn_ids[0] : "";
 
@@ -2255,7 +2364,7 @@ function sendChatMessage() {
             ? `
               <div style="margin-top:0.9rem; padding-top:0.75rem; border-top:1px dashed var(--border-hairline);">
                 <div style="font-family:var(--font-mono); font-size:0.75rem; font-weight:700; text-transform:uppercase; color:var(--ink-muted); margin-bottom:0.4rem;">
-                  ${isAr ? "ملفات ذات صلة في الأرشيف:" : "Related Dossiers in Corpus:"}
+                  ${uiAr ? "ملفات ذات صلة في الأرشيف:" : "Related Dossiers in Corpus:"}
                 </div>
                 <div style="display:flex; flex-wrap:wrap; gap:0.4rem;">
                   ${data.related_questions
@@ -2272,22 +2381,28 @@ function sendChatMessage() {
             `
             : "";
 
+        const pkgDaeeName = uiAr ? (pkg.daee_name_ar || pkg.daee_name) : (pkg.daee_name_en || pkg.daee_name);
+        const pkgCatName = uiAr ? (pkg.category_ar || getLocalizedCategory(pkg.category_en || pkg.category, "ar")) : (pkg.category_en || pkg.category);
+        const pkgInterName = uiAr ? (pkg.interlocutor_ar || getLocalizedInterlocutor(pkg.interlocutor_en || pkg.interlocutor, "ar")) : (pkg.interlocutor_en || pkg.interlocutor);
+
         botResponseHtml = `
           ${noticeHtml}
           <div class="bot-msg-header">
             <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
-              ${pkg.daee_name ? `<span class="badge-daee">${SVG_ICONS.speaker}<span>${escapeHtml(pkg.daee_name)}</span></span>` : ""}
-              <span class="badge-pillar">${escapeHtml(pkg.category || "")}</span>
-              <span class="badge-interlocutor">${escapeHtml(pkg.interlocutor || "")}</span>
+              ${pkgDaeeName ? `<span class="badge-daee">${SVG_ICONS.speaker}<span>${escapeHtml(pkgDaeeName)}</span></span>` : ""}
+              <span class="badge-pillar">${escapeHtml(pkgCatName || "")}</span>
+              <span class="badge-interlocutor">${escapeHtml(pkgInterName || "")}</span>
             </div>
             <span class="timestamp-chip">${escapeHtml(pkg.timestamp || "00:00")}</span>
           </div>
-          <h3 style="font-size:1.18rem; font-weight:800; color:var(--ink-primary); margin-bottom:0.45rem;">${escapeHtml(pkg.title || "")}</h3>
-          <p style="font-size:0.91rem; color:var(--ink-primary); line-height:1.6;">${escapeHtml(pkg.summary || "")}</p>
+          <h3 style="font-size:1.18rem; font-weight:800; color:var(--ink-primary); margin-bottom:0.45rem;">${titleHtml}</h3>
+          <div style="font-size:0.91rem; color:var(--ink-primary); line-height:1.6;">${summaryHtml}</div>
           ${fallacyHtml}
           ${socraticHtml}
+          ${chatQuotesHtml}
           ${premisesHtml}
           ${analogyHtml}
+          ${chatCitationsHtml}
           <div class="video-proof-bar" style="margin-top:0.9rem; padding-top:0.75rem; border-top:1px solid var(--border-hairline);">
             <span class="source-video-title">${escapeHtml(pkg.video_title || "")}</span>
             <div class="proof-actions">
@@ -2313,15 +2428,16 @@ function sendChatMessage() {
           ? `
             <div style="margin-top:0.85rem; display:flex; flex-direction:column; gap:0.45rem;">
               <div style="font-family:var(--font-mono); font-size:0.74rem; font-weight:700; color:var(--emerald-primary);">
-                ${isAr ? "تطابقات مباشرة من نصوص المناظرات المميزة صوتياً:" : "Direct Stage-1 Diarized Scenario Matches:"}
+                ${uiAr ? "تطابقات مباشرة من نصوص المناظرات المميزة صوتياً:" : "Direct Stage-1 Diarized Scenario Matches:"}
               </div>
               ${scenHits
                 .map((sh) => {
                   const sec = Math.floor(Number(sh.start_ms || 0) / 1000);
+                  const spkLbl = uiAr ? (sh.speaker_label_ar || sh.speaker_label_en || sh.speaker_role) : (sh.speaker_label_en || sh.speaker_label_ar || sh.speaker_role);
                   return `
                     <button type="button" class="turn-hit-row" onclick="openScenarioStudio('${escapeJsStr(sh.video_id)}', '${escapeJsStr(sh.turn_id)}', ${sec})">
                       <div class="turn-hit-top">
-                        <span>[${escapeHtml(sh.start_fmt || "00:00")}] ${escapeHtml(sh.speaker_label_en || sh.speaker_role)}</span>
+                        <span>[${escapeHtml(sh.start_fmt || "00:00")}] ${escapeHtml(spkLbl)}</span>
                         <span class="ar-font">${escapeHtml((sh.video_title_ar || "").slice(0, 50))}</span>
                       </div>
                       <div style="font-size:0.94rem;">${escapeHtml(sh.text_original || "")}</div>

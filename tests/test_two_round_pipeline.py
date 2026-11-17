@@ -371,6 +371,7 @@ class TestTwoRoundPipelineExecutionAndResume(unittest.TestCase):
                         "core_answer_summary_ar": "الله غير مخلوق بذاته.",
                         "logical_premises_ar": ["تسلسل العلل ممتنع."],
                         "analogies_ar": ["محرك القطار الأول."],
+                        "verbatim_quote_ar": "الله غير مخلوق بذاته وهو الخالق الأزلي الأول.",
                     }
                 ])
 
@@ -403,6 +404,7 @@ class TestTwoRoundPipelineExecutionAndResume(unittest.TestCase):
             {
                 "question_ar": "إذا كان الله خلق كل شيء فمن خلق الله؟",
                 "core_answer_summary_ar": "مغالطة التسلسل اللانهائي.",
+                "verbatim_quote_ar": "التسلسل اللانهائي في العلل باطل عقلاً فلا بد من خالق أول غير مخلوق.",
             }
         ]
 

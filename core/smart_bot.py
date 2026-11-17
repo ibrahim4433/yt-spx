@@ -12,17 +12,14 @@ Stage 1 scenario turn fallback).
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from db.database import search_qa, search_scenario_turns
+from db.database import (
+    BILINGUAL_TOPIC_DOMAINS,
+    get_category_arabic_name,
+    search_qa,
+    search_scenario_turns,
+)
 
-CATEGORY_TRANSLATIONS = {
-    "Theology & God's Existence": "العقيدة ووجود الله",
-    "Problem of Evil & Suffering": "مشكلة الشر والمعاناة",
-    "Comparative Religion & Christianity": "مقارنة الأديان والنصرانية",
-    "Objective Morality & Ethics": "الأخلاق الموضوعية والإلحاد",
-    "Epistemology & Science": "المعرفة والعلم التجريبي",
-    "Prophethood & Quran": "النبوة والقرآن الكريم",
-    "Shariah & Social Inquiries": "الشريعة والشبهات الاجتماعية",
-}
+CATEGORY_TRANSLATIONS = {k: v["ar"] for k, v in BILINGUAL_TOPIC_DOMAINS.items()}
 
 INTERLOCUTOR_TRANSLATIONS = {
     "Atheist / Materialist": "ملحد / مادي",
@@ -33,7 +30,46 @@ INTERLOCUTOR_TRANSLATIONS = {
     "Secular Humanist": "علماني إنسانوي",
     "Inquiring Seeker": "باحث عن الحق",
     "Muslim with Doubts": "مسلم يطلب دليلاً",
+    "Jewish / Rabbinic": "يهودي / حاخامي",
+    "Hindu / Eastern": "هندوسي / شرق آسيوي",
+    "Buddhist / Eastern": "بوذي / شرق آسيوي",
+    "Shiite": "شيعي",
+    "Shia": "شيعي",
 }
+
+_UBIQUITOUS_TOKENS = {
+    "god", "allah", "islam", "islamic", "muslim", "muslims", "quran",
+    "jesus", "christ", "christian", "christians", "bible", "biblical", "religion",
+    "people", "believe", "allow", "mean", "question", "does",
+    "الله", "الاسلام", "مسلم", "مسلمين", "قران", "القران", "الدين", "ديني",
+}
+
+
+def _stem_token(tok: str, lang: str) -> str:
+    if lang == "ar":
+        for pref in ("وال", "فال", "بال", "كال", "لال", "ال"):
+            if tok.startswith(pref) and len(tok) - len(pref) >= 2:
+                return tok[len(pref):]
+        return tok
+    if len(tok) > 4:
+        if tok.endswith("ies"):
+            return tok[:-3] + "y"
+        if tok.endswith("ing") and len(tok) > 5:
+            return tok[:-3]
+        if tok.endswith("ed") and len(tok) > 4:
+            return tok[:-2]
+        if tok.endswith("es") and len(tok) > 4:
+            return tok[:-2]
+        if tok.endswith("s") and not tok.endswith("ss"):
+            return tok[:-1]
+    return tok
+
+
+def _tokenize_with_stems(text: str, stopwords: set, lang: str) -> tuple[set, set]:
+    norm = normalize_text(text)
+    toks = {t for t in norm.split() if t and t not in stopwords and len(t) > 1}
+    stems = {_stem_token(t, lang) for t in toks}
+    return toks, stems
 
 THEOLOGICAL_INTENT_MAP = [
     {
@@ -173,39 +209,52 @@ def compute_match_score(query_norm: str, item: Dict[str, Any], query_lang: str) 
     if not search_tokens:
         return 0.0
 
-    target_q = normalize_text(item.get("question_ar" if query_lang == "ar" else "question_en", ""))
-    target_tokens = set(target_q.split())
-    target_content_tokens = {t for t in target_tokens if t not in stopwords}
+    search_stems = [_stem_token(t, query_lang) for t in search_tokens]
+    token_weights = [
+        (0.25 if (t in _UBIQUITOUS_TOKENS or _stem_token(t, query_lang) in _UBIQUITOUS_TOKENS) else 1.0)
+        for t in search_tokens
+    ]
+    total_weight = sum(token_weights) or 1.0
 
+    def _weighted_overlap(field_text: str) -> tuple[float, int]:
+        toks, stems = _tokenize_with_stems(field_text, stopwords, query_lang)
+        if not toks:
+            return 0.0, 0
+        matched_w = 0.0
+        specific_hits = 0
+        for tok, st, w in zip(search_tokens, search_stems, token_weights):
+            if tok in toks or st in stems:
+                matched_w += w
+                if w >= 1.0:
+                    specific_hits += 1
+        return matched_w / total_weight, specific_hits
+
+    target_q = normalize_text(item.get("question_ar" if query_lang == "ar" else "question_en", ""))
     if query_norm and query_norm in target_q:
         return 95.0
 
-    overlap = len(set(search_tokens).intersection(target_content_tokens))
-    if overlap == 0:
-        # Also check interlocutor verbatim quote & summary if question phrasing differs
-        inter_quote = normalize_text(
-            (item.get("interlocutor_verbatim_quote_ar") if query_lang == "ar" else item.get("interlocutor_verbatim_quote")) or ""
-        )
-        inter_tokens = {t for t in inter_quote.split() if t not in stopwords}
-        inter_overlap = len(set(search_tokens).intersection(inter_tokens))
-        if inter_overlap == 0:
-            return 0.0
-        score = (inter_overlap / len(search_tokens)) * 55.0
-    else:
-        score = (overlap / len(search_tokens)) * 70.0
-
-    summary_text = normalize_text(
-        (item.get("core_answer_summary_ar") if query_lang == "ar" else item.get("core_answer_summary_en")) or ""
+    q_ratio, q_spec = _weighted_overlap(item.get("question_ar" if query_lang == "ar" else "question_en", "") or "")
+    inter_ratio, inter_spec = _weighted_overlap(
+        (item.get("interlocutor_verbatim_quote_ar") if query_lang == "ar" else item.get("interlocutor_verbatim_quote")) or ""
     )
-    summary_tokens = {t for t in summary_text.split() if t not in stopwords}
-    sum_overlap = len(set(search_tokens).intersection(summary_tokens))
-    score += (sum_overlap / len(search_tokens)) * 20.0
+    subcat_text = f"{item.get('topic_subcategory') or ''} {' '.join(str(t) for t in (item.get('tags') or []))}"
+    tag_ratio, tag_spec = _weighted_overlap(subcat_text)
 
-    tags = [normalize_text(t) for t in item.get("tags", [])]
-    for tag in tags:
-        if any(tok in tag for tok in search_tokens):
-            score += 10.0
-            break
+    premises_list = item.get("logical_premises_ar" if query_lang == "ar" else "logical_premises") or []
+    summary_raw = (
+        f"{(item.get('core_answer_summary_ar') if query_lang == 'ar' else item.get('core_answer_summary_en')) or ''} "
+        f"{' '.join(str(p) for p in premises_list)} "
+        f"{(item.get('fallacy_or_misconception_exposed_ar') if query_lang == 'ar' else item.get('fallacy_or_misconception_exposed')) or ''}"
+    )
+    sum_ratio, sum_spec = _weighted_overlap(summary_raw)
+
+    total_specific_hits = max(q_spec, inter_spec, tag_spec, sum_spec)
+    score = q_ratio * 65.0 + inter_ratio * 25.0 + sum_ratio * 22.0 + tag_ratio * 18.0
+
+    # Prevent ubiquitous single words ("god", "islam", "allow") from hijacking unrelated multi-word questions
+    specific_query_tokens = sum(1 for w in token_weights if w >= 1.0)
+    if specific_query_tokens >= 1 and total_specific_hits == 0:
+        score = min(score, 12.0)
 
     return min(score, 100.0)
 
@@ -222,9 +271,9 @@ class SmartDialecticBot:
         query_lang = detect_language(user_query)
         query_norm = normalize_text(user_query)
 
-        candidates = search_qa(query=user_query, limit=20, db_path=db_path)
+        candidates = search_qa(query=user_query, limit=200, db_path=db_path)
         if not candidates:
-            candidates = search_qa(query="", limit=50, db_path=db_path)
+            candidates = search_qa(query="", limit=250, db_path=db_path)
 
         intent_category = None
         for intent in THEOLOGICAL_INTENT_MAP:
@@ -240,7 +289,7 @@ class SmartDialecticBot:
         scored_candidates = []
         for c in candidates:
             sc = compute_match_score(query_norm, c, query_lang)
-            if intent_category and c.get("topic_category") == intent_category:
+            if intent_category and c.get("topic_category") == intent_category and sc >= 10.0:
                 sc += 15.0
             scored_candidates.append((sc, c))
 
@@ -262,7 +311,7 @@ class SmartDialecticBot:
                         "id": r["id"],
                         "question": r["question_ar"] if query_lang == "ar" else r["question_en"],
                         "category": (
-                            CATEGORY_TRANSLATIONS.get(r["topic_category"], r["topic_category"])
+                            CATEGORY_TRANSLATIONS.get(r["topic_category"], get_category_arabic_name(r["topic_category"]))
                             if query_lang == "ar"
                             else r["topic_category"]
                         ),
@@ -271,7 +320,7 @@ class SmartDialecticBot:
                 ],
             }
 
-        if scored_candidates and top_score >= 15.0:
+        if scored_candidates and top_score >= 20.0:
             best_match = scored_candidates[0][1]
             return {
                 "status": "partial_match",
@@ -322,60 +371,50 @@ class SmartDialecticBot:
                     "id": c["id"],
                     "question": c["question_ar"] if query_lang == "ar" else c["question_en"],
                     "category": (
-                        CATEGORY_TRANSLATIONS.get(c["topic_category"], c["topic_category"])
+                        CATEGORY_TRANSLATIONS.get(c["topic_category"], get_category_arabic_name(c["topic_category"]))
                         if query_lang == "ar"
                         else c["topic_category"]
                     ),
                 }
-                for c in candidates[:3]
-            ] if candidates else [],
+                for sc, c in scored_candidates[:3]
+                if sc >= 12.0
+            ] if scored_candidates else [],
         }
 
     def _format_response_package(self, qa: Dict[str, Any], lang: str) -> Dict[str, Any]:
         is_ar = lang == "ar"
-        raw_premises = (
-            qa.get("logical_premises_ar")
-            if is_ar and qa.get("logical_premises_ar")
-            else qa.get("logical_premises", [])
-        )
-        premises = [str(p).strip() for p in (raw_premises or []) if str(p).strip()]
-        analogy = (
-            qa.get("analogy_or_metaphor_ar")
-            if is_ar and qa.get("analogy_or_metaphor_ar")
-            else qa.get("analogy_or_metaphor")
-        )
-        socratic = (
-            qa.get("socratic_question_ar")
-            if is_ar and qa.get("socratic_question_ar")
-            else qa.get("socratic_question")
-        )
-        verbatim = (
-            qa.get("verbatim_quote_ar")
-            if is_ar and qa.get("verbatim_quote_ar")
-            else qa.get("verbatim_quote")
-        )
-        inter_verbatim = (
-            qa.get("interlocutor_verbatim_quote_ar")
-            if is_ar and qa.get("interlocutor_verbatim_quote_ar")
-            else qa.get("interlocutor_verbatim_quote")
-        )
+        raw_premises_en = [str(p).strip() for p in (qa.get("logical_premises") or []) if str(p).strip()]
+        raw_premises_ar = [str(p).strip() for p in (qa.get("logical_premises_ar") or []) if str(p).strip()]
+        premises = raw_premises_ar if (is_ar and raw_premises_ar) else raw_premises_en
 
         empty_sentinels = {"none", "none used", "none used.", "none.", "n/a", ""}
-        if analogy and str(analogy).strip().lower() in empty_sentinels:
-            analogy = ""
-        if socratic and str(socratic).strip().lower() in empty_sentinels:
-            socratic = ""
 
-        cat = (
-            CATEGORY_TRANSLATIONS.get(qa.get("topic_category"), qa.get("topic_category"))
-            if is_ar
-            else qa.get("topic_category")
-        )
-        interlocutor = (
-            INTERLOCUTOR_TRANSLATIONS.get(qa.get("interlocutor_type"), qa.get("interlocutor_type"))
-            if is_ar
-            else qa.get("interlocutor_type")
-        )
+        def _clean_opt(val: Any) -> str:
+            s = str(val or "").strip()
+            return "" if s.lower() in empty_sentinels else s
+
+        analogy_en = _clean_opt(qa.get("analogy_or_metaphor"))
+        analogy_ar = _clean_opt(qa.get("analogy_or_metaphor_ar"))
+        socratic_en = _clean_opt(qa.get("socratic_question"))
+        socratic_ar = _clean_opt(qa.get("socratic_question_ar"))
+        verbatim_en = _clean_opt(qa.get("verbatim_quote"))
+        verbatim_ar = _clean_opt(qa.get("verbatim_quote_ar"))
+        inter_verbatim_en = _clean_opt(qa.get("interlocutor_verbatim_quote"))
+        inter_verbatim_ar = _clean_opt(qa.get("interlocutor_verbatim_quote_ar"))
+        fallacy_en = _clean_opt(qa.get("fallacy_or_misconception_exposed"))
+        fallacy_ar = _clean_opt(qa.get("fallacy_or_misconception_exposed_ar"))
+
+        analogy = analogy_ar if (is_ar and analogy_ar) else (analogy_en or analogy_ar)
+        socratic = socratic_ar if (is_ar and socratic_ar) else (socratic_en or socratic_ar)
+        verbatim = verbatim_ar if (is_ar and verbatim_ar) else (verbatim_en or verbatim_ar)
+        inter_verbatim = inter_verbatim_ar if (is_ar and inter_verbatim_ar) else (inter_verbatim_en or inter_verbatim_ar)
+
+        raw_cat = qa.get("topic_category") or ""
+        cat_ar = CATEGORY_TRANSLATIONS.get(raw_cat, get_category_arabic_name(raw_cat))
+        cat = cat_ar if is_ar else raw_cat
+        raw_inter = qa.get("interlocutor_type") or ""
+        inter_ar = INTERLOCUTOR_TRANSLATIONS.get(raw_inter, raw_inter)
+        interlocutor = inter_ar if is_ar else raw_inter
         daee_name = (
             qa.get("daee_name_ar") or qa.get("daee_name_en")
             if is_ar
@@ -387,18 +426,39 @@ class SmartDialecticBot:
             "video_id": qa.get("video_id"),
             "episode_index": qa.get("episode_index", 1),
             "title": qa.get("question_ar" if is_ar else "question_en"),
+            "title_en": qa.get("question_en") or "",
+            "title_ar": qa.get("question_ar") or "",
             "daee_name": daee_name or ("الداعية المحاور" if is_ar else "Main Da'ee"),
+            "daee_name_en": qa.get("daee_name_en") or "",
+            "daee_name_ar": qa.get("daee_name_ar") or "",
             "interlocutor": interlocutor,
+            "interlocutor_en": raw_inter,
+            "interlocutor_ar": inter_ar,
             "category": cat,
+            "category_en": raw_cat,
+            "category_ar": cat_ar,
             "summary": qa.get("core_answer_summary_ar" if is_ar else "core_answer_summary_en"),
+            "summary_en": qa.get("core_answer_summary_en") or "",
+            "summary_ar": qa.get("core_answer_summary_ar") or "",
             "logical_premises": premises,
-            "fallacy_exposed": qa.get(
-                "fallacy_or_misconception_exposed_ar" if is_ar else "fallacy_or_misconception_exposed"
-            ),
+            "logical_premises_en": raw_premises_en,
+            "logical_premises_ar": raw_premises_ar,
+            "fallacy_exposed": fallacy_ar if (is_ar and fallacy_ar) else (fallacy_en or fallacy_ar),
+            "fallacy_exposed_en": fallacy_en,
+            "fallacy_exposed_ar": fallacy_ar,
             "analogy": analogy,
+            "analogy_en": analogy_en,
+            "analogy_ar": analogy_ar,
             "socratic_question": socratic,
-            "interlocutor_verbatim_quote": inter_verbatim or "",
-            "verbatim_quote": verbatim or "",
+            "socratic_question_en": socratic_en,
+            "socratic_question_ar": socratic_ar,
+            "interlocutor_verbatim_quote": inter_verbatim,
+            "interlocutor_verbatim_quote_en": inter_verbatim_en,
+            "interlocutor_verbatim_quote_ar": inter_verbatim_ar,
+            "verbatim_quote": verbatim,
+            "verbatim_quote_en": verbatim_en,
+            "verbatim_quote_ar": verbatim_ar,
+            "scriptural_citations": qa.get("scriptural_citations") or [],
             "dialogue_exchange": qa.get("dialogue_exchange") or [],
             "source_turn_ids": qa.get("source_turn_ids") or [],
             "video_title": qa.get("video_title_ar"),

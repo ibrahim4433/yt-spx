@@ -324,9 +324,12 @@ CRITICAL RULES FOR ROUND 1:
      * STRICT BAN ON DA'EE DEFENSIVE REJOINDERS: In debates, when a skeptic implies [Premise X] is objectionable and the Da'ee replies "What is the problem with that?" or "What's wrong with that?", NEVER splice the Da'ee's defensive comeback into "question_en"!
        - BAD (Da'ee counter-ask): "If [Islamic Premise X] holds, what is the problem with that?" / "... what's wrong with that?" / "... why would that be bad?"
        - GOOD (Seeker objection): "If [Islamic Premise X] holds, isn't that a bad thing / unfair / problematic?" or "Why does Islam allow [Premise X]?"
-     * STRICT BAN ON DA'EE OFFENSIVE CROSS-EXAMINATIONS IN "question_en": When the Da'ee attacks the opponent's worldview (e.g. "If [Figure X] is subordinate to the Father, can he still be God?" or "Should God love a rapist...?"), NEVER put the Da'ee's challenge in "question_en" — put it in "socratic_question", and formulate "question_en" around the interlocutor's claim or doubt (e.g. "Can [Figure X] still be fully divine even while praying or submitting to the Father?").
-   - NEVER formulate "question_en" as a 1st-person self-incriminating confession ("Why do I oppose Islam if I haven't read the Quran?", "Why do I hold anti-Islamic views..."). Reframe it into objective inquiry ("Can someone validly critique Islam without reading its primary texts?").
-   - NEVER copy raw declarative ASR sentences ("You believe that..."), incomplete ellipses ("..."), or fragmented mid-sentence chatter.
+     * STRICT BAN ON DA'EE OFFENSIVE CROSS-EXAMINATIONS IN "question_en": When the Da'ee attacks the opponent's scripture or worldview (e.g. Old Testament warfare passages like 1 Samuel 15:3 / 2 Samuel 12, Luke 19:27, John 10:30, Acts 3:13, Trinitarian verses, "If [Figure X] is subordinate to the Father, can he still be God?" or "Should God love a rapist...?"), NEVER put the Da'ee's challenge in "question_en" — put it in "socratic_question". Instead, EITHER frame "question_en" around the opponent's underlying claim or counter-defense explicitly naming Christian/skeptic theology (e.g. "How can Christian theology reconcile Jesus's command to love with Old Testament passages like 1 Samuel 15:3?" or "Can [Figure X] still be fully divine even while praying or submitting to the Father?"), OR skip the window if no Islamic proof is delivered.
+     * STRICT THEOLOGICAL FIDELITY BAN ON CHRISTIAN / OPPONENT DOGMA INVERSIONS: NEVER affirm Christian Trinity ("Jesus is fully divine and fully human", "unique Son of God"), vicarious atonement, Old Testament infant slaughter, non-binary gender claims, or pantheistic "union with the divine" as Islamic truth in `core_answer_summary_en` or `logical_premises`! Keep the Da'ee's Islamic Tawheed and prophetic justice unmistakable.
+   - STRICT BAN ON 1ST/2ND-PERSON STREET CONVERSATION PHRASING & PERSONAL CHAT:
+     * NEVER write 1st/2nd-person street banter ("How can I know...?", "Why can't I believe...?", "Do you agree that...?", "Why do I oppose Islam...?", "What converted you to Islam?") — convert theological inquiries to standalone 3rd-person inquiry syntax ending with '?'.
+     * EXCLUDE non-theological geopolitics (Israel-Palestine conflicts, Palestinian National Charter, Jordanian law), UK statutory trivia (legal marriage age), street insults, and personal biography.
+   - NEVER copy raw declarative ASR sentences ("You believe that..."), incomplete ellipses ("..."), trailing conversational fillers ("..., okay?"), or fragmented mid-sentence chatter.
    - NEVER extract a fleeting greeting or passing remark (<6 words) unless the Da'ee explicitly debates and answers that exact point in the immediately following turns.
 
 2. DIRECT, DEEP INTELLECTUAL TRUTH (150-250 WORDS):
@@ -348,17 +351,18 @@ CRITICAL RULES FOR ROUND 1:
    - "socratic_question": The Da'ee's clincher counter-question that turns the table on the debater and exposes their self-contradiction.
 
 6. SCRIPTURAL CITATIONS (STRICTLY TRANSCRIPT-GROUNDED):
-   - "scriptural_citations": An array of scriptural or historical references EXPLICITLY quoted or directly named in the spoken exchange. NEVER guess Surah:Ayah or Bible chapter:verse numbers from memory if they were not discussed here.
-   - Each entry must be an object: {"source": "Bible / Quran / Hadith / Torah", "reference": "Book Chapter:Verse", "significance": "Brief explanation of how this text disproves the objection"}. If none, return [].
+   - "scriptural_citations": An array of scriptural or historical references EXPLICITLY quoted or directly named in the spoken exchange. NEVER fabricate or guess unmentioned chapter:verse numbers (e.g., Al-Baqarah 2:255, Al-Anbiya 21:107, or unmentioned Hadith numbers) if they were not discussed here! Return [] if none were cited.
+   - Each entry must be an object: {"source": "Bible / Quran / Hadith / Torah", "reference": "Book Chapter:Verse", "significance": "Brief explanation of how this text disproves the objection"}.
 
-7. 100% VERBATIM SPOKEN QUOTES & ZERO OUTSIDE FABRICATION:
-   - "verbatim_quote" and "interlocutor_verbatim_quote" MUST be copied EXACTLY word-for-word from the transcript turns. Zero paraphrasing.
+7. 100% VERBATIM SPOKEN QUOTES, ROLE LOCK & ZERO OUTSIDE FABRICATION:
+   - "verbatim_quote" MUST be copied word-for-word from a [MAIN_DAEE]/[CO_DAEE] turn; "interlocutor_verbatim_quote" MUST be copied word-for-word from an [INTERLOCUTOR] turn (unless genuine solo monologue). NEVER swap Da'ee and interlocutor quotes, and NEVER copy `core_answer_summary_en` prose into `verbatim_quote` or `dialogue_exchange`!
    - CRITICAL ANTI-LEAKAGE MANDATE:
      * NEVER import stock apologetics illustrations, syllogisms, or scriptural verses from outside this transcript!
      * Every quote, analogy, citation, and premise MUST be strictly grounded in the spoken words in the provided episode transcript. Importing ungrounded external templates triggers an automatic hard-fail rejection score of 0.
 
-8. EXPANDED DIALOGUE TRAJECTORY (6 TO 12 TURNS):
+8. EXPANDED DIALOGUE TRAJECTORY & CANONICAL ROLES (6 TO 12 TURNS):
    - "dialogue_exchange" MUST capture the chronological progression of the debate across 6 to 12 turns (or all available turns in the exchange if fewer than 6).
+   - CRITICAL ROLE ENUM: `"role"` MUST strictly be `"INTERLOCUTOR"`, `"MAIN_DAEE"`, or `"CO_DAEE"` — NEVER attach speaker names or Arabic text inside `"role"` (e.g., NEVER `"MAIN_DAEE (Hashim)"` or `"المُحاجج"`).
    - Show the dynamic arc: the initial objection, the Da'ee's Socratic probing, the interlocutor's clarification or reaction, the deductive refutation, and the concluding proof.
    - Each item in "dialogue_exchange":
      {
@@ -538,12 +542,12 @@ CORE TASKS:
 
 1. ORTHODOX THEOLOGICAL VERIFICATION & ATTRIBUTION GUARD:
    - Audit every claim against orthodox Islamic theology (عقيدة أهل السنة والجماعة):
-     * Absolute transcendence of God (تنـزيه الله تعالى عن المشابهة والحدوث والعجز والجهل والحلول والتركيب).
+     * Absolute transcendence of God (تنـزيه الله تعالى عن المشابهة والحدوث والعجز والجهل والحلول والتركيب والاتحاد بالمخلوق).
      * Affirmation of divine wisdom (إثبات كمال الحكمة والعدل في أفعال الله).
      * Prophethood of Muhammad (صلى الله عليه وسلم) and honoring all previous prophets without divine attribution.
-     * Rejection of shirk, Trinity, and vicarious crucifixion as divine truth.
-     * Absolute rejection of justifying immoral abominations (incest, pedophilia).
-   - Ensure the Da'ee's answers reflect authentic Islamic proofs, never attributing opponent dogmas or concessions to the Da'ee.
+     * STRICT REJECTION OF HERETICAL INVERSIONS: NEVER state in `core_answer_summary_*` or `logical_premises*` that Jesus is the unique/begotten Son of God, fully divine and fully human, that Christ died for sins, that killing/punishing innocent children is just or not cruelty, that Islam affirms non-binary gender, or pantheistic "union with the divine". If a Round 1 card committed a theological inversion, either rewrite the summary strictly into the Da'ee's Islamic refutation/post-audit truth OR set `"drop_card": true`.
+   - Ensure `verbatim_quote` matches a `[MAIN_DAEE]`/`[CO_DAEE]` turn and `interlocutor_verbatim_quote` matches an `[INTERLOCUTOR]` turn (fix quote swaps or 1st/2nd-person question phrasings when flagged).
+   - Ensure `dialogue_exchange[].role` is strictly `"INTERLOCUTOR"`, `"MAIN_DAEE"`, or `"CO_DAEE"` (never attach speaker names or Arabic strings to `"role"`).
 
 2. CLASSICAL ARABIC LOCALIZATION (فصحى أصيلة جليلة):
    - Translate all fields into pure, eloquent, grammatically authoritative Classical Arabic:

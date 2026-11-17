@@ -20,6 +20,7 @@ import math
 import json
 import wave
 import shutil
+import logging
 import tempfile
 import subprocess
 from pathlib import Path
@@ -28,6 +29,8 @@ from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 
 from core.drive_sync import SharedWorkspace, STEP_RANK
+
+logger = logging.getLogger(__name__)
 
 
 CHUNK_SEC = 900.0       # 15-minute Demucs chunks (prevents Colab 12.7 GB RAM OOM)
@@ -212,6 +215,46 @@ def stitch_crossfaded_chunks(chunk_files: List[Path], crossfade_sec: float = CRO
     return merged
 
 
+def _restore_dynamic_range_from_rms(
+    samples: np.ndarray,
+    rms_timeline: List[float],
+    sr: int = SAMPLE_RATE_16K,
+    hop_sec: float = 0.25,
+) -> np.ndarray:
+    """
+    Restores proximity dynamic contrast and attenuates boosted inter-turn noise floor
+    on legacy dynaudnorm-leveled clean_opus archives using the pre-norm RMS timeline.
+    """
+    if len(samples) == 0 or not rms_timeline or len(rms_timeline) < 4:
+        return samples
+
+    rms_arr = np.asarray(rms_timeline, dtype=np.float32)
+    active = rms_arr[rms_arr > -65.0]
+    if len(active) < 4:
+        return samples
+
+    peak_db = float(np.percentile(active, 95))
+    # Compute target gain adjustment in dB per 0.25s frame:
+    # - Keep close-mic frames near 0 dB
+    # - Preserve up to ~12 dB natural contrast on quieter off-mic interlocutors
+    # - Suppress noise-floor / silence (< peak_db - 22 dB) up to -14 dB so dynaudnorm's +18 dB boost stops fooling VAD
+    rel_db = np.clip(rms_arr - peak_db, -36.0, 0.0)
+    # Piecewise linear gain curve: 0 down to -8dB -> 0.55x slope; below -22dB -> steeper gate
+    adj_db = np.where(
+        rel_db >= -20.0,
+        rel_db * 0.45,
+        -9.0 + (rel_db + 20.0) * 0.70,
+    )
+    adj_db = np.clip(adj_db, -18.0, 0.0)
+    frame_gain = np.power(10.0, adj_db / 20.0).astype(np.float32)
+
+    hop = max(1, int(sr * hop_sec))
+    frame_centers = (np.arange(len(frame_gain), dtype=np.float32) + 0.5) * hop
+    sample_idx = np.arange(len(samples), dtype=np.float32)
+    env = np.interp(sample_idx, frame_centers, frame_gain).astype(np.float32)
+    return (samples * env).astype(np.float32)
+
+
 def ensure_local_leveled_16k_wav(
     video_id: str,
     workspace: SharedWorkspace,
@@ -240,6 +283,81 @@ def ensure_local_leveled_16k_wav(
     rms_data = workspace.read_json(rms_file, default={}) or {}
     rms_timeline = rms_data.get("rms_db", [])
     return local_wav, rms_timeline
+
+
+def maybe_restore_diarization_wav(
+    video_id: str,
+    base_wav: Path,
+    rms_timeline: List[float],
+    workspace: SharedWorkspace,
+    local_tmp_dir: Path,
+) -> Tuple[Path, str]:
+    """
+    Prepares the cleanest un-leveled 16kHz WAV for NeMo MSDD / TitaNet from `base_wav`.
+    If `normalized_mode == 'highpass_peak'`, `base_wav` already preserves natural proximity contrast.
+    If legacy `dynaudnorm` was baked into `clean_opus`, restores dynamic envelope contrast using
+    `rms_timeline` so NeMo VAD/clustering stops merging distant interlocutors and pauses.
+    """
+    rms_file = workspace.audio_clean_dir / f"{video_id}_rms.json"
+    rms_data = workspace.read_json(rms_file, default={}) or {}
+    norm_mode = str(rms_data.get("normalized_mode") or "legacy_dynaudnorm")
+
+    if norm_mode == "highpass_peak" or not rms_timeline or not base_wav.exists():
+        return base_wav, norm_mode
+
+    diar_wav = local_tmp_dir / f"{video_id}_diar_16k.wav"
+    if not diar_wav.exists():
+        samples, sr = read_wav_float32(base_wav)
+        restored = _restore_dynamic_range_from_rms(
+            samples,
+            rms_timeline,
+            sr=sr,
+            hop_sec=float(rms_data.get("hop_sec", 0.25) or 0.25),
+        )
+        write_wav_float32(diar_wav, restored, sr=sr)
+    return diar_wav, norm_mode
+
+
+def ensure_local_diarization_16k_wav(
+    video_id: str,
+    workspace: SharedWorkspace,
+    local_tmp_dir: Path,
+) -> Tuple[Path, List[float], str]:
+    """
+    Returns (diarization_wav_path, rms_timeline, normalized_mode) for NeMo MSDD / TitaNet.
+    """
+    base_wav, rms_timeline = ensure_local_leveled_16k_wav(video_id, workspace, local_tmp_dir)
+    diar_wav, norm_mode = maybe_restore_diarization_wav(video_id, base_wav, rms_timeline, workspace, local_tmp_dir)
+    return diar_wav, rms_timeline, norm_mode
+
+
+def ensure_local_asr_16k_wav(
+    base_wav: Path,
+    local_tmp_dir: Path,
+    video_id: str,
+    normalized_mode: str = "legacy_dynaudnorm",
+) -> Path:
+    """Applies gentle conversational gain leveling strictly for Whisper ASR when source is unleveled."""
+    if normalized_mode != "highpass_peak":
+        return base_wav
+    asr_wav = local_tmp_dir / f"{video_id}_asr_16k.wav"
+    if not asr_wav.exists():
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(base_wav),
+                    "-af", "dynaudnorm=f=200:g=15:p=0.90:m=3.5",
+                    "-ac", "1", "-ar", str(SAMPLE_RATE_16K), "-c:a", "pcm_s16le",
+                    str(asr_wav),
+                ],
+                check=True,
+                timeout=300,
+            )
+            return asr_wav
+        except Exception:
+            return base_wav
+    return asr_wav
 
 
 def clean_vocals_m2(
@@ -332,24 +450,32 @@ def clean_vocals_m2(
         vocal_raw_samples = raw_samples
         del raw_samples
 
-    # 1. Measure raw pre-normalization mic proximity energy BEFORE dynaudnorm!
+    # 1. Measure raw pre-normalization mic proximity energy BEFORE peak limiting!
     rms_timeline = compute_frame_rms_db(vocal_raw_samples, sr=SAMPLE_RATE_16K, hop_sec=0.25)
     workspace.atomic_write_json(
         rms_json,
-        {"video_id": video_id, "hop_sec": 0.25, "duration_sec": round(total_sec, 2), "rms_db": rms_timeline},
+        {
+            "video_id": video_id,
+            "hop_sec": 0.25,
+            "duration_sec": round(total_sec, 2),
+            "normalized_mode": "highpass_peak",
+            "rms_db": rms_timeline,
+        },
     )
 
     vocal_unleveled_wav = local_tmp_dir / f"{video_id}_vocals_unleveled.wav"
     write_wav_float32(vocal_unleveled_wav, vocal_raw_samples, sr=SAMPLE_RATE_16K)
     del vocal_raw_samples
 
-    # 2. Apply High-Pass 80Hz wind/rumble cut + Conversational Dynamic Loudness Leveling
+    # 2. Apply High-Pass 80Hz wind/rumble cut + Peak Safety Limiter ONLY (preserves true speaker
+    # proximity dynamics and clean inter-turn silence for NeMo MSDD & TitaNet; ASR applies gentle
+    # conversational leveling on a local NVMe copy at M5).
     leveled_wav = local_tmp_dir / f"{video_id}_leveled_16k.wav"
     subprocess.run(
         [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(vocal_unleveled_wav),
-            "-af", "highpass=f=80,dynaudnorm=f=150:g=13:p=0.92:m=8.0",
+            "-af", "highpass=f=80,alimiter=limit=0.95",
             "-ac", "1", "-ar", str(SAMPLE_RATE_16K), "-c:a", "pcm_s16le",
             str(leveled_wav),
         ],

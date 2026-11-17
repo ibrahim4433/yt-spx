@@ -220,9 +220,9 @@ def merge_fragmented_speaker_clusters(
     threshold: float = 0.80,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, np.ndarray], Dict[str, str]]:
     """
-    Merges speaker clusters whose 192-D TitaNet centroid cosine similarity exceeds threshold (>=0.80).
-    Solves outdoor street-debate fragmentation where mic distance changes or head turns cause
-    NeMo MSDD to split the same speaker into SPK_00 and SPK_03.
+    Merges genuinely fragmented speaker clusters using complete-linkage verification across
+    192-D TitaNet centroids (every member pair must exceed `threshold`), with an explicit
+    anti-collapse guard blocking two substantial debate speakers from merging into K=1.
 
     Returns:
         (merged_rttm_segments, merged_centroids, mapping_of_old_to_new_ids)
@@ -239,55 +239,70 @@ def merge_fragmented_speaker_clusters(
 
     spk_list = sorted(speaker_centroids.keys())
     norm_cents = {s: l2_normalize(speaker_centroids[s]) for s in spk_list}
-
-    # Find candidate merge pairs sorted by similarity descending
+    sim_matrix: Dict[Tuple[str, str], float] = {}
     candidate_pairs: List[Tuple[float, str, str]] = []
     for i in range(len(spk_list)):
         s_i = spk_list[i]
         for j in range(i + 1, len(spk_list)):
             s_j = spk_list[j]
             sim = float(np.dot(norm_cents[s_i], norm_cents[s_j]))
+            sim_matrix[(s_i, s_j)] = sim
+            sim_matrix[(s_j, s_i)] = sim
             if sim >= threshold:
                 candidate_pairs.append((sim, s_i, s_j))
 
     candidate_pairs.sort(key=lambda x: x[0], reverse=True)
 
-    # Disjoint-set union to find connected components
-    parent: Dict[str, str] = {s: s for s in spk_list}
+    # Complete-linkage agglomerative clustering (prevents transitive chain collapses)
+    root_of: Dict[str, str] = {s: s for s in spk_list}
+    cluster_members: Dict[str, List[str]] = {s: [s] for s in spk_list}
 
-    def find(i: str) -> str:
-        if parent[i] != i:
-            parent[i] = find(parent[i])
-        return parent[i]
-
-    def union(a: str, b: str):
-        root_a = find(a)
-        root_b = find(b)
-        if root_a != root_b:
-            # Pick the speaker with larger duration as root, or lower alphabetical ID
-            dur_a = spk_durations.get(root_a, 0)
-            dur_b = spk_durations.get(root_b, 0)
-            if dur_a >= dur_b:
-                parent[root_b] = root_a
-            else:
-                parent[root_a] = root_b
+    def _cluster_dur(root_id: str) -> int:
+        return sum(spk_durations.get(m, 0) for m in cluster_members[root_id])
 
     for _, s_i, s_j in candidate_pairs:
-        union(s_i, s_j)
+        root_a = root_of[s_i]
+        root_b = root_of[s_j]
+        if root_a == root_b:
+            continue
 
-    id_mapping: Dict[str, str] = {s: find(s) for s in spk_list}
-    # Check if any merges actually occurred
+        members_a = cluster_members[root_a]
+        members_b = cluster_members[root_b]
+        min_cross_sim = min(
+            sim_matrix.get((u, v), float(np.dot(norm_cents[u], norm_cents[v])))
+            for u in members_a
+            for v in members_b
+        )
+        if min_cross_sim < threshold:
+            continue
+
+        # Anti-collapse guard: never merge the last 2 substantial debate clusters down to K=1
+        # unless their voices are virtually identical (complete-linkage cosine >= 0.90).
+        if len(cluster_members) == 2:
+            dur_a = _cluster_dur(root_a)
+            dur_b = _cluster_dur(root_b)
+            if dur_a >= 12_000 and dur_b >= 12_000 and min_cross_sim < max(threshold, 0.90):
+                continue
+
+        # Keep root with larger total speaking duration (tie-break: lower alphabetical ID)
+        if (_cluster_dur(root_b) > _cluster_dur(root_a)) or (
+            _cluster_dur(root_b) == _cluster_dur(root_a) and root_b < root_a
+        ):
+            root_a, root_b = root_b, root_a
+
+        moved = cluster_members.pop(root_b)
+        cluster_members[root_a].extend(moved)
+        for m in moved:
+            root_of[m] = root_a
+
+    id_mapping: Dict[str, str] = dict(root_of)
     has_merges = any(k != v for k, v in id_mapping.items())
     if not has_merges:
         return rttm_segments, speaker_centroids, {}
 
     # Merge centroids using duration-weighted average
-    clusters: Dict[str, List[str]] = {}
-    for old_id, new_id in id_mapping.items():
-        clusters.setdefault(new_id, []).append(old_id)
-
     merged_centroids: Dict[str, np.ndarray] = {}
-    for canon_id, members in clusters.items():
+    for canon_id, members in cluster_members.items():
         if len(members) == 1:
             merged_centroids[canon_id] = norm_cents[canon_id]
         else:
@@ -604,7 +619,14 @@ class WarmNeMoDiarizer:
         except Exception:
             return [self.extract_embedding(s) for s in slices_16k]
 
-    def run_diarization(self, wav_16k_path: Path, out_rttm_path: Path, is_short: bool = False) -> str:
+    def run_diarization(
+        self,
+        wav_16k_path: Path,
+        out_rttm_path: Path,
+        is_short: bool = False,
+        forced_num_speakers: Optional[int] = None,
+        clustering_overrides: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Runs NeMo MSDD NeuralDiarizer (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
         import importlib
         import torch
@@ -649,6 +671,7 @@ class WarmNeMoDiarizer:
             shutil.rmtree(tmp_p, ignore_errors=True)
         tmp_p.mkdir(parents=True, exist_ok=True)
 
+        custom_cfg = (forced_num_speakers is not None) or bool(clustering_overrides)
         try:
             manifest_path = tmp_p / "input_manifest.json"
             meta = {
@@ -657,11 +680,24 @@ class WarmNeMoDiarizer:
                 "duration": None,
                 "label": "infer",
                 "text": "-",
-                "num_speakers": None,
+                "num_speakers": int(forced_num_speakers) if forced_num_speakers is not None else None,
                 "rttm_filepath": None,
                 "uem_filepath": None,
             }
             manifest_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+
+            clus_params: Dict[str, Any] = {
+                "oracle_num_speakers": forced_num_speakers is not None,
+                "max_num_speakers": int(forced_num_speakers) if forced_num_speakers is not None else (5 if is_short else 10),
+                "enhanced_count_thres": 40,
+                "max_rp_threshold": 0.16,
+                "sparse_search_volume": 40,
+                "maj_vote_spk_count": True,
+                "chunk_cluster_count": 50,
+                "embeddings_per_chunk": 10000,
+            }
+            if clustering_overrides:
+                clus_params.update(clustering_overrides)
 
             cfg = OmegaConf.create({
                 "name": "ClusterDiarizer",
@@ -703,16 +739,7 @@ class WarmNeMoDiarizer:
                         },
                     },
                     "clustering": {
-                        "parameters": {
-                            "oracle_num_speakers": False,
-                            "max_num_speakers": 5 if is_short else 10,
-                            "enhanced_count_thres": 80,
-                            "max_rp_threshold": 0.25,
-                            "sparse_search_volume": 30,
-                            "maj_vote_spk_count": False,
-                            "chunk_cluster_count": 50,
-                            "embeddings_per_chunk": 10000,
-                        },
+                        "parameters": clus_params,
                     },
                     "msdd_model": {
                         "model_path": "diar_msdd_telephonic",
@@ -730,7 +757,7 @@ class WarmNeMoDiarizer:
             })
 
             def _bind_or_create_msdd(force_new: bool = False):
-                if not force_new and self._msdd_instance is not None and self._msdd_is_short == bool(is_short):
+                if (not force_new) and (not custom_cfg) and self._msdd_instance is not None and self._msdd_is_short == bool(is_short):
                     try:
                         msdd_obj = self._msdd_instance
                         for target_obj in (msdd_obj, getattr(msdd_obj, "clus_diar_model", None)):
@@ -751,7 +778,7 @@ class WarmNeMoDiarizer:
                         self._msdd_instance = None
                 self._msdd_instance = DiarizerClass(cfg=cfg).to(cfg.device)
                 _quiet_nemo_loggers()
-                self._msdd_is_short = bool(is_short)
+                self._msdd_is_short = None if custom_cfg else bool(is_short)
                 return self._msdd_instance
 
             orig_cudnn_outer = getattr(getattr(torch, "backends", None), "cudnn", None)
@@ -881,6 +908,73 @@ class WarmMossFormerSeparator:
 # 3. Micro-Step M3 & M4 Execution Runners (Checkpointed to Shared 5 TB Drive)
 # ==============================================================================
 
+def _compute_centroids_for_rttm(
+    rttm_segs: List[Dict[str, Any]],
+    overlaps: List[Dict[str, Any]],
+    samples: np.ndarray,
+    sr: int,
+    diarizer: WarmNeMoDiarizer,
+) -> Dict[str, np.ndarray]:
+    """Computes L2-normalized 192-D TitaNet centroids per speaker using up to 45s clean speech."""
+    clean_spans = extract_clean_non_overlap_spans(rttm_segs, overlaps, min_clean_ms=900)
+    centroids: Dict[str, np.ndarray] = {}
+    all_spks = sorted({s["speaker_id"] for s in rttm_segs})
+    for spk in all_spks:
+        spans = sorted(clean_spans.get(spk, []), key=lambda x: (x[1] - x[0]), reverse=True)
+        if not spans:
+            spans = [(s["start_ms"], s["end_ms"]) for s in rttm_segs if s["speaker_id"] == spk]
+        embs = []
+        slices_for_spk: List[np.ndarray] = []
+        budget_ms = 0
+        for s_ms, e_ms in spans[:12]:
+            s_idx = int(s_ms * sr / 1000)
+            e_idx = min(len(samples), int(e_ms * sr / 1000))
+            if (e_idx - s_idx) >= int(0.4 * sr):
+                slices_for_spk.append(samples[s_idx:e_idx])
+                budget_ms += (e_ms - s_ms)
+                if budget_ms >= 45_000:
+                    break
+        if slices_for_spk:
+            if hasattr(diarizer, "extract_embeddings_batch"):
+                embs = diarizer.extract_embeddings_batch(slices_for_spk)
+            else:
+                embs = [diarizer.extract_embedding(sl) for sl in slices_for_spk]
+        if embs:
+            centroids[spk] = l2_normalize(np.mean(np.stack(embs, axis=0), axis=0))
+    return centroids
+
+
+def _speaker_durations_ms(rttm_segs: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    durs: Dict[str, int] = {}
+    for s in rttm_segs:
+        spk = s["speaker_id"]
+        durs[spk] = durs.get(spk, 0) + max(0, int(s["end_ms"]) - int(s["start_ms"]))
+    return sorted(durs.items(), key=lambda x: x[1], reverse=True)
+
+
+def _is_collapsed_diarization(rttm_segs: List[Dict[str, Any]], total_ms: int) -> bool:
+    """Returns True when a multi-minute video collapsed to <=1 speaker or >=96% single-speaker dominance."""
+    if total_ms < 90_000:
+        return False
+    ranked = _speaker_durations_ms(rttm_segs)
+    if len(ranked) <= 1:
+        return True
+    total_spk_ms = sum(d for _, d in ranked) or 1
+    top_share = ranked[0][1] / total_spk_ms
+    second_ms = ranked[1][1]
+    return top_share >= 0.96 and second_ms < 15_000
+
+
+def _write_rttm_file(video_id: str, rttm_segs: List[Dict[str, Any]], rttm_path: Path) -> None:
+    lines = []
+    for s in rttm_segs:
+        start_s = s["start_ms"] / 1000.0
+        dur_s = max(0.01, (s["end_ms"] - s["start_ms"]) / 1000.0)
+        lines.append(f"SPEAKER {video_id} 1 {start_s:.3f} {dur_s:.3f} <NA> <NA> {s['speaker_id']} <NA> <NA>")
+    rttm_path.parent.mkdir(parents=True, exist_ok=True)
+    rttm_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
 def run_diarization_m3(
     video_id: str,
     leveled_16k_wav: Path,
@@ -891,6 +985,7 @@ def run_diarization_m3(
     """
     Executes Micro-Step M3:
       - Runs NeMo MSDD overlap-aware diarization -> saves {vid}.rttm
+      - Detects and automatically recovers from single-speaker clustering collapse on debates
       - Computes clean 192-D TitaNet-Large centroids -> saves {vid}_embeddings.npz
       - Detects simultaneous cross-talk windows -> saves {vid}_overlaps.json
     """
@@ -911,15 +1006,16 @@ def run_diarization_m3(
         npz = np.load(str(emb_path))
         centroids = {k: npz[k] for k in npz.files}
         overlaps = workspace.read_json(ov_path, default=[]) or []
-        # Post-Clustering Centroid Merge: Ensure unmerged fragments in previously cached runs are unified
+        cached_total_ms = max((int(s["end_ms"]) for s in rttm_segs), default=None)
         rttm_segs, centroids, merge_map = merge_fragmented_speaker_clusters(
             rttm_segments=rttm_segs,
             speaker_centroids=centroids,
-            threshold=0.80,
+            threshold=0.84,
         )
         if merge_map:
             overlaps = detect_simultaneous_overlap_windows(
                 rttm_segs,
+                total_duration_ms=cached_total_ms,
                 min_overlap_ms=600,
             )
         return rttm_segs, centroids, overlaps
@@ -930,57 +1026,83 @@ def run_diarization_m3(
     rttm_text = diarizer.run_diarization(leveled_16k_wav, rttm_path, is_short=is_short)
     rttm_segs = parse_rttm_lines(rttm_text)
     overlaps = detect_simultaneous_overlap_windows(rttm_segs, total_duration_ms=total_ms)
-    clean_spans = extract_clean_non_overlap_spans(rttm_segs, overlaps, min_clean_ms=900)
+    centroids = _compute_centroids_for_rttm(rttm_segs, overlaps, samples, sr, diarizer)
 
-    # Compute L2-normalized 192-D TitaNet centroid per speaker using up to 45s of cleanest speech
-    centroids: Dict[str, np.ndarray] = {}
-    all_spks = sorted({s["speaker_id"] for s in rttm_segs})
-    for spk in all_spks:
-        spans = sorted(clean_spans.get(spk, []), key=lambda x: (x[1] - x[0]), reverse=True)
-        if not spans:
-            # Fallback to any RTTM span for this speaker
-            spans = [(s["start_ms"], s["end_ms"]) for s in rttm_segs if s["speaker_id"] == spk]
-        embs = []
-        slices_for_spk: List[np.ndarray] = []
-        budget_ms = 0
-        for s_ms, e_ms in spans[:12]:
-            s_idx = int(s_ms * sr / 1000)
-            e_idx = min(len(samples), int(e_ms * sr / 1000))
-            if (e_idx - s_idx) >= int(0.4 * sr):
-                slices_for_spk.append(samples[s_idx:e_idx])
-                budget_ms += (e_ms - s_ms)
-                if budget_ms >= 45_000:
-                    break
-        if slices_for_spk:
-            if hasattr(diarizer, "extract_embeddings_batch"):
-                embs = diarizer.extract_embeddings_batch(slices_for_spk)
-            else:
-                embs = [diarizer.extract_embedding(sl) for sl in slices_for_spk]
-        if embs:
-            centroids[spk] = l2_normalize(np.mean(np.stack(embs, axis=0), axis=0))
-
-    # Post-Clustering Centroid Merge: Unify fragmented speaker clusters (cosine similarity >= 0.80)
+    # Post-Clustering Centroid Merge with complete-linkage + anti-collapse guard (cosine >= 0.84)
     rttm_segs, centroids, merge_map = merge_fragmented_speaker_clusters(
         rttm_segments=rttm_segs,
         speaker_centroids=centroids,
-        threshold=0.80,
+        threshold=0.84,
     )
     if merge_map:
         merges_str = ", ".join(f"{old}->{new}" for old, new in merge_map.items() if old != new)
         print(f"      [Centroid Merge] Unified fragmented speakers: {merges_str}", flush=True)
-        # Re-detect overlap windows with merged speaker IDs (600ms threshold)
         overlaps = detect_simultaneous_overlap_windows(
             rttm_segs,
             total_duration_ms=total_ms,
             min_overlap_ms=600,
         )
-        # Re-write the coalesced RTTM file
-        rttm_lines = []
-        for s in rttm_segs:
-            start_s = s["start_ms"] / 1000.0
-            dur_s = (s["end_ms"] - s["start_ms"]) / 1000.0
-            rttm_lines.append(f"SPEAKER {video_id} 1 {start_s:.3f} {dur_s:.3f} <NA> <NA> {s['speaker_id']} <NA> <NA>")
-        rttm_path.write_text("\n".join(rttm_lines) + "\n", encoding="utf-8")
+
+    # Anti-Collapse Automatic Recovery on multi-minute debates
+    retried = False
+    if _is_collapsed_diarization(rttm_segs, total_ms):
+        retry_configs = [
+            (
+                None,
+                {"max_rp_threshold": 0.12, "enhanced_count_thres": 25, "sparse_search_volume": 50, "maj_vote_spk_count": True},
+                "sensitive spectral retry",
+            ),
+            (
+                2,
+                {"oracle_num_speakers": True, "max_rp_threshold": 0.15},
+                "bounded 2-speaker recovery",
+            ),
+        ]
+        for forced_k, clus_ovr, label in retry_configs:
+            cand_rttm = diarizer.run_diarization(
+                leveled_16k_wav,
+                rttm_path,
+                is_short=is_short,
+                forced_num_speakers=forced_k,
+                clustering_overrides=clus_ovr,
+            )
+            cand_segs = parse_rttm_lines(cand_rttm)
+            cand_ov = detect_simultaneous_overlap_windows(cand_segs, total_duration_ms=total_ms)
+            cand_cents = _compute_centroids_for_rttm(cand_segs, cand_ov, samples, sr, diarizer)
+            cand_segs, cand_cents, cand_merge = merge_fragmented_speaker_clusters(
+                rttm_segments=cand_segs,
+                speaker_centroids=cand_cents,
+                threshold=0.84,
+            )
+            if cand_merge:
+                cand_ov = detect_simultaneous_overlap_windows(
+                    cand_segs, total_duration_ms=total_ms, min_overlap_ms=600
+                )
+
+            ranked_cand = _speaker_durations_ms(cand_segs)
+            if len(ranked_cand) >= 2:
+                tot_cand = sum(d for _, d in ranked_cand) or 1
+                s1, s2 = ranked_cand[0][0], ranked_cand[1][0]
+                dur2 = ranked_cand[1][1]
+                share2 = dur2 / tot_cand
+                sim_12 = (
+                    float(np.dot(l2_normalize(cand_cents[s1]), l2_normalize(cand_cents[s2])))
+                    if (s1 in cand_cents and s2 in cand_cents)
+                    else 0.0
+                )
+                # Accept recovered split ONLY if secondary speaker is substantive AND acoustically distinct
+                if dur2 >= 5_000 and share2 >= 0.025 and sim_12 < 0.85:
+                    print(
+                        f"      [Anti-Collapse Recovery] Recovered {len(ranked_cand)} distinct speakers via {label} "
+                        f"(2nd share={share2:.1%}, cos_sim={sim_12:.2f})",
+                        flush=True,
+                    )
+                    rttm_segs, centroids, overlaps = cand_segs, cand_cents, cand_ov
+                    retried = True
+                    break
+
+    if merge_map or retried:
+        _write_rttm_file(video_id, rttm_segs, rttm_path)
 
     np.savez_compressed(str(emb_path), **centroids)
     workspace.atomic_write_json(ov_path, overlaps)

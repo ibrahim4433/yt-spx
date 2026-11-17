@@ -51,6 +51,8 @@ try:
         sanitize_text_field,
         sanitize_arabic_unit_fields,
         resolve_turn_speaker_labels,
+        check_theological_bias as _db_check_theological_bias,
+        canonicalize_speaker_role,
     )
 except (ImportError, ValueError):
     try:
@@ -58,11 +60,15 @@ except (ImportError, ValueError):
             sanitize_text_field,
             sanitize_arabic_unit_fields,
             resolve_turn_speaker_labels,
+            check_theological_bias as _db_check_theological_bias,
+            canonicalize_speaker_role,
         )
     except Exception:
         sanitize_text_field = None
         sanitize_arabic_unit_fields = None
         resolve_turn_speaker_labels = None
+        _db_check_theological_bias = None
+        canonicalize_speaker_role = None
 
 try:
     from tools.card_rating_system.audit_cards import (
@@ -188,15 +194,16 @@ def clean_llm_json_array(raw_text: str) -> List[Dict[str, Any]]:
 
 
 _ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06ff]")
+_ARABIC_LETTERS_ONLY_RE = re.compile(r"[\u0621-\u064a]")
 _FOREIGN_SCRIPT_RE = re.compile(r"[\u0400-\u04ff\u0590-\u05ff\u4e00-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef\ufffd]+")
 
 
 def _is_clean_arabic_text(val: Any) -> bool:
-    """Returns True when `val` is a non-empty string with Arabic script and zero foreign script tokens."""
+    """Returns True when `val` has >=2 real Arabic letters and zero foreign script tokens."""
     if not isinstance(val, str):
         return False
     s = val.strip()
-    return bool(s and _ARABIC_SCRIPT_RE.search(s) and not _FOREIGN_SCRIPT_RE.search(s))
+    return bool(s and len(_ARABIC_LETTERS_ONLY_RE.findall(s)) >= 2 and not _FOREIGN_SCRIPT_RE.search(s))
 
 
 def sanitize_arabic_fields(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -610,6 +617,15 @@ def is_valid_dialectical_question(q_en: str, q_ar: str = "") -> bool:
     if any(re.search(pat, q_en_clean, re.I) for pat in outro_patterns):
         return False
 
+    # Discard pure personal chit-chat, secular statutory trivia & non-theological geopolitics
+    non_theological_patterns = [
+        r"^\s*(?:what\s+converted\s+you\s+to\s+islam|how\s+did\s+you\s+become\s+(?:a\s+)?muslim)\s*$",
+        r"\b(?:palestinian\s+national\s+charter|jordanian\s+law|british\s+tax\s+law|legal\s+age\s+of\s+marriage\s+in\s+(?:uk|britain|jordan))\b",
+        r"^\s*(?:why\s+are\s+you\s+calling\s+me\s+a\s+liar|are\s+you\s+mad|shut\s+up)\s*$",
+    ]
+    if any(re.search(pat, q_en_clean, re.I) for pat in non_theological_patterns):
+        return False
+
     # Discard unnormalized 1st-person confessional inversions
     if CONFESSIONAL_RESIDUAL_REGEX.search(q_en) or CONFESSIONAL_RESIDUAL_REGEX.search(q_ar or ""):
         return False
@@ -938,77 +954,360 @@ def clean_dangling_quote(quote: str) -> str:
     return cleaned if cleaned else quote.strip()
 
 
+def _canon_speaker_role(raw_role: Any, fallback: str = "MAIN_DAEE") -> str:
+    if canonicalize_speaker_role is not None:
+        return canonicalize_speaker_role(raw_role, fallback=fallback)
+    u = str(raw_role or "").strip().upper()
+    if "PEDESTRIAN" in u:
+        return "PEDESTRIAN"
+    if "CO_DAEE" in u or "CO-DAEE" in u:
+        return "CO_DAEE"
+    if "INTERLOCUTOR" in u or "GUEST" in u or "محاور" in str(raw_role or ""):
+        return "INTERLOCUTOR"
+    if "DAEE" in u or "داعية" in str(raw_role or "") or "محاجج" in str(raw_role or ""):
+        return "MAIN_DAEE"
+    return fallback
+
+
+_LOGISTICAL_FILLER_RE = re.compile(
+    r"\b(?:your\s+time|my\s+time|started\s+my\s+time|alright,?\s+good|right,?\s+exactly|"
+    r"thank\s+you,?\s+appreciate|hold\s+on|one\s+second|let\s+me\s+finish)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_logistical_filler_turn(txt: str) -> bool:
+    s = (txt or "").strip()
+    if not s:
+        return True
+    words = s.split()
+    if len(words) >= 18:
+        return False
+    return bool(_LOGISTICAL_FILLER_RE.search(s))
+
+
 def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
-    Theological Guardrail:
-    Detects whether an extracted QA unit or candidate answer turn expresses opponent theological bias
-    (e.g., defending/justifying incest, claiming the Spirit of Truth is the Holy Spirit not Muhammad,
-    asserting biblical laws are void/abolished, or asserting Jesus is God / Trinity as the truth).
-    Returns reason string if rejected, or None if sound.
+    Theological Guardrail: delegates to canonical `db.database.check_theological_bias`
+    so extraction-time and DB-ingestion checks share identical orthodox theological rules.
     """
-    bias_patterns = [
-        # 1. Defending / justifying incest
-        (r'\b(defend(ing|s)?|justif(y|ying|ies)|permit(ting|s)?|allow(ing|s)?)\s+(incest)\b', 'Defending incest', False),
-        (r'\b(incest\s+(is|was)\s+(justified|permissible|allowed|moral|acceptable|necessary))\b', 'Justifying incest', False),
-        (r'(تبرير|إباحة|جواز|الدفاع عن)\s+زنا المحارم', 'تبرير زنا المحارم', False),
-        (r'زنا المحارم\s+(مباح|جائز|حلال|مبرر)', 'زنا المحارم مباح', False),
-
-        # 2. Spirit of Truth is Holy Spirit (denying it is Prophet Muhammad)
-        (r'\b(spirit of truth|comforter|paraclete)\s+(is|means)\s+(the\s+)?holy spirit\b', 'Claiming Spirit of Truth is Holy Spirit', True),
-        (r'\b(spirit of truth|comforter)\s+is\s+not\s+(prophet\s+)?muhammad\b', 'Denying Comforter is Muhammad', False),
-        (r'(روح الحق|المعزي|البارقليط)\s+(هو|يعني)\s+الروح القدس', 'روح الحق هو الروح القدس', True),
-        (r'(روح الحق|المعزي|البارقليط)\s+ليس\s+(هو\s+)?محمد', 'المعزي ليس محمدا', False),
-
-        # 3. Biblical laws are void / abolished
-        (r'\b(biblical|old testament|mosaic)\s+laws?\s+(are|is)\s+(void|abolished|nullified)\b', 'Biblical laws void', True),
-        (r'\b(the\s+law\s+is\s+(void|abolished|null and void))\b', 'Law is void', True),
-        (r'(الناموس|شريعة العهد القديم|الشريعة الموسوية)\s+(باطل|ملغى|منسوخ بالكلية لإسقاط الأخلاق)', 'الناموس باطل', True),
-
-        # 4. Asserting Christ is God or Trinity as the Da'ee's position
-        (r'\b(jesus|christ)\s+is\s+(the\s+)?(true\s+)?god\b', 'Christ is God asserted as truth', True),
-        (r'(المسيح|يسوع|عيسى)\s+هو\s+الله', 'المسيح هو الله', True),
-        (r'(الثالوث|التثليث)\s+حق', 'الثالوث حق', True),
-
-        # 5. Asserting vicarious crucifixion / atonement as the Da'ee's position
-        (r'\b(jesus|christ)\s+died\s+for\s+(our\s+)?sins\b', 'Crucifixion atonement asserted as truth', True),
-        (r'(المسيح|يسوع)\s+مات\s+(تكفيراً|فداءً)\s+عن\s+خطايانا', 'المسيح مات فداء عن خطايانا', True),
-    ]
-
-    texts_to_check = [
-        str(unit.get("core_answer_summary_en") or ""),
-        str(unit.get("core_answer_summary_ar") or ""),
-        str(unit.get("verbatim_quote") or ""),
-        str(unit.get("verbatim_quote_ar") or ""),
-    ]
-
-    for pk in ("logical_premises", "logical_premises_ar"):
-        val = unit.get(pk)
-        if isinstance(val, list):
-            texts_to_check.extend(str(x) for x in val)
-
-    if a_turn:
-        texts_to_check.append(str(a_turn.get("text_original") or ""))
-        texts_to_check.append(str(a_turn.get("text_ar") or ""))
-
-    def _is_refutation(text: str, match_start: int) -> bool:
-        window = text[max(0, match_start - 80):match_start].lower()
-        refutation_markers = [
-            "refut", "reject", "deni", "deny", "false", "fallacy", "misconception",
-            "claim", "dogma", "notion", "myth", "alleg", "argument that", "oppose",
-            "disprov", "counter", "refuting", "rejecting", "denying", "refutation",
-            "زعم", "دعوى", "شبهة", "باطل", "بطلان", "رد", "دحض", "إبطال", "نفي", "إنكار",
-            "ليس", "لا يمكن", "يستحيل", "كيف يكون", "كيف يعقل", "تناقض", "مغالطة"
-        ]
-        return any(marker in window for marker in refutation_markers)
-
-    combined_text = " ".join(texts_to_check)
-    for pattern, reason, check_refutation in bias_patterns:
-        m = re.search(pattern, combined_text, re.IGNORECASE)
-        if m:
-            if check_refutation and _is_refutation(combined_text, m.start()):
-                continue
-            return reason
+    if _db_check_theological_bias is not None:
+        return _db_check_theological_bias(unit, a_turn)
     return None
+
+
+def _word_containment(needle: str, haystack_lower: str) -> float:
+    w_n = set(re.findall(r"\w+", (needle or "").lower()))
+    w_h = set(re.findall(r"\w+", haystack_lower or ""))
+    return (len(w_n & w_h) / len(w_n)) if w_n else 0.0
+
+
+def _build_turn_lookups(
+    scenario: Dict[str, Any],
+    cohesive_turns: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Builds cohesive and raw turn lookup maps keyed by turn_id and merged_turn_ids."""
+    if cohesive_turns is None:
+        cohesive_turns = merge_consecutive_speaker_turns(scenario.get("turns", []))
+    cohesive_turns_by_id: Dict[str, Dict[str, Any]] = {}
+    for ct in cohesive_turns:
+        if "turn_id" in ct:
+            cohesive_turns_by_id[ct["turn_id"]] = ct
+        for mid in ct.get("merged_turn_ids", []):
+            cohesive_turns_by_id[mid] = ct
+    raw_turns_by_id = {t["turn_id"]: t for t in scenario.get("turns", []) if "turn_id" in t}
+    return cohesive_turns, cohesive_turns_by_id, raw_turns_by_id
+
+
+def _is_substantive_daee_turn(cand_t: Optional[Dict[str, Any]], min_ts_ms: int) -> bool:
+    if not cand_t or _canon_speaker_role(cand_t.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
+        return False
+    if int(cand_t.get("start_ms", 0)) < min_ts_ms:
+        return False
+    txt = clean_dangling_quote((cand_t.get("text_original") or "").strip())
+    if _is_logistical_filler_turn(txt):
+        return False
+    return len([w for w in re.split(r"\s+", txt) if w]) >= 8
+
+
+def _recover_substantive_daee_turn(
+    item: Dict[str, Any],
+    q_turn: Optional[Dict[str, Any]],
+    a_turn: Dict[str, Any],
+    a_tid: str,
+    window_start_ms: int,
+    cohesive_turns: List[Dict[str, Any]],
+    cohesive_turns_by_id: Dict[str, Dict[str, Any]],
+    raw_turns_by_id: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """Re-anchors short, logistical-filler, or pre-question answer turns to the first substantive Da'ee reply."""
+    a_cleaned_text = clean_dangling_quote((a_turn.get("text_original") or "").strip())
+    a_orig_words = [w for w in re.split(r"\s+", a_cleaned_text) if w]
+    q_start_ms = int(q_turn["start_ms"]) if q_turn is not None else int(window_start_ms)
+    if (
+        len(a_orig_words) >= 8
+        and not _is_logistical_filler_turn(a_cleaned_text)
+        and not (q_turn is not None and int(a_turn.get("start_ms", 0)) < q_start_ms)
+    ):
+        return a_turn, a_tid
+
+    raw_ex_candidates = item.get("dialogue_exchange") or item.get("dialogue_trajectory") or []
+    replacement_turn = None
+    if isinstance(raw_ex_candidates, list):
+        for ex in raw_ex_candidates:
+            if not isinstance(ex, dict):
+                continue
+            cand_tid = str(ex.get("turn_id") or "").strip()
+            cand_turn = cohesive_turns_by_id.get(cand_tid) or raw_turns_by_id.get(cand_tid)
+            if cand_turn and _is_substantive_daee_turn(cand_turn, q_start_ms):
+                replacement_turn = cand_turn
+                break
+    if replacement_turn is None:
+        for ct in cohesive_turns:
+            if int(ct.get("start_ms", 0)) <= (q_start_ms + 180_000) and _is_substantive_daee_turn(ct, q_start_ms):
+                replacement_turn = ct
+                break
+    if replacement_turn is not None:
+        new_tid = str(replacement_turn.get("turn_id") or a_tid)
+        item["answer_turn_id"] = new_tid
+        return replacement_turn, new_tid
+    return a_turn, a_tid
+
+
+def _ground_dialogue_exchange(
+    raw_exchange: List[Any],
+    cohesive_turns_by_id: Dict[str, Dict[str, Any]],
+    raw_turns_by_id: Dict[str, Dict[str, Any]],
+    daee_name_en: str,
+    daee_name_ar: str,
+    inter_spk_id: str,
+    fallback_ts_sec: int,
+    repair_english_from_turn: bool = True,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Locks turn roles and repairs drifted text_en against matched Stage-1 scenario turns."""
+    enriched_exchange: List[Dict[str, Any]] = []
+    any_diarized_turn_matched = False
+    for ex in raw_exchange[:12]:
+        if not isinstance(ex, dict):
+            continue
+        etid = str(ex.get("turn_id") or "").strip()
+        eturn = cohesive_turns_by_id.get(etid) or raw_turns_by_id.get(etid)
+        if eturn and eturn.get("speaker_role"):
+            any_diarized_turn_matched = True
+            role = _canon_speaker_role(eturn["speaker_role"], fallback="MAIN_DAEE")
+        else:
+            role = _canon_speaker_role(ex.get("role"), fallback="MAIN_DAEE")
+
+        if resolve_turn_speaker_labels is not None:
+            spk_label_en, spk_label_ar = resolve_turn_speaker_labels(role, eturn, daee_name_en, daee_name_ar)
+        else:
+            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+            turn_matches = (eturn is not None and (eturn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE")) == is_daee)
+            spk_label_en = ((eturn.get("speaker_label_en") if turn_matches else None) or (daee_name_en if is_daee else "Interlocutor"))
+            spk_label_ar = ((eturn.get("speaker_label_ar") if turn_matches else None) or (daee_name_ar if is_daee else "المحاور"))
+
+        ex_txt = str(ex.get("text_en") or "").strip()
+        turn_orig = str(eturn.get("text_original") or "").strip() if eturn else ""
+        if repair_english_from_turn and turn_orig:
+            orig_words = set(re.findall(r"\b\w{3,}\b", turn_orig.lower()))
+            ex_words = set(re.findall(r"\b\w{3,}\b", ex_txt.lower()))
+            if not ex_txt:
+                ex_txt = turn_orig
+            elif len(ex_words) >= 4 and len(orig_words) >= 4:
+                if (len(ex_words & orig_words) / len(ex_words)) < 0.28:
+                    ex_txt = turn_orig
+
+        enriched_exchange.append({
+            "turn_id": etid,
+            "role": role,
+            "speaker_label_en": spk_label_en,
+            "speaker_label_ar": spk_label_ar,
+            "timestamp_seconds": int(eturn["start_ms"] // 1000) if eturn else fallback_ts_sec,
+            "timestamp_formatted": eturn["start_fmt"] if eturn else ms_to_fmt(fallback_ts_sec * 1000),
+            "move_type": ex.get("move_type", "Turn"),
+            "text_en": ex_txt,
+            "text_ar": ex.get("text_ar") or (eturn.get("text_ar") if eturn else ""),
+        })
+
+    if len(enriched_exchange) >= 2 and not any_diarized_turn_matched:
+        roles_in_ex = {ex.get("role") for ex in enriched_exchange if ex.get("role")}
+        if len(roles_in_ex) < 2 and inter_spk_id:
+            for ex in enriched_exchange:
+                mv = str(ex.get("move_type") or "").lower()
+                if any(k in mv for k in ["objection", "reaction", "clarification", "inquiry"]):
+                    ex["role"] = "INTERLOCUTOR"
+                    ex["speaker_label_en"] = "Interlocutor"
+                    ex["speaker_label_ar"] = "المحاور"
+                else:
+                    ex["role"] = "MAIN_DAEE"
+                    ex["speaker_label_en"] = daee_name_en
+                    ex["speaker_label_ar"] = daee_name_ar
+    return enriched_exchange, any_diarized_turn_matched
+
+
+def _sync_role_quotes_in_item(
+    item: Dict[str, Any],
+    q_turn: Optional[Dict[str, Any]],
+    q_tid: str,
+    a_turn: Dict[str, Any],
+    a_tid: str,
+    enriched_exchange: List[Dict[str, Any]],
+    cohesive_turns: List[Dict[str, Any]],
+    inter_spk_id: str,
+    sync_arabic: bool = True,
+) -> None:
+    """Enforces role-separated verbatim quotes against Stage-1 turns and clears stale Arabic when EN is replaced."""
+    all_transcript = " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns])
+    all_transcript_lower = all_transcript.lower()
+    daee_transcript = " ".join(
+        [(t.get("text_original") or "").strip() for t in cohesive_turns if _canon_speaker_role(t.get("speaker_role"), "") in ("MAIN_DAEE", "CO_DAEE")]
+    ) or all_transcript
+    inter_transcript = (
+        " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns if _canon_speaker_role(t.get("speaker_role"), "") == "INTERLOCUTOR"])
+        if inter_spk_id
+        else all_transcript
+    ) or all_transcript
+
+    def _sync_single(
+        quote_key: str,
+        quote_ar_key: str,
+        primary_turn: Optional[Dict[str, Any]],
+        primary_tid: str,
+        role_transcript_lower: str,
+        allowed_roles: Tuple[str, ...],
+        allow_exchange_fallback: bool,
+    ) -> None:
+        raw_q = (item.get(quote_key) or "").strip()
+        q_words = [w for w in re.split(r"\s+", raw_q) if w]
+        has_dangling = bool(q_words and q_words[-1].lower().rstrip(".,!?:;\"'؟،") in DANGLING_PREPOSITIONS_EN)
+        is_short = len(q_words) < 8
+        overlap_low = bool(
+            raw_q
+            and raw_q.lower() not in role_transcript_lower
+            and _word_containment(raw_q, role_transcript_lower) < 0.45
+        )
+        sum_en_low = (item.get("core_answer_summary_en") or "").lower()
+        is_summary_prose = bool(
+            raw_q
+            and sum_en_low
+            and raw_q.lower() not in role_transcript_lower
+            and _word_containment(raw_q, sum_en_low) >= 0.72
+        )
+
+        replaced_english = False
+        if (overlap_low or is_summary_prose or is_short or has_dangling) and primary_turn and primary_turn.get("text_original"):
+            p_orig = primary_turn["text_original"].strip()
+            p_words = [w for w in re.split(r"\s+", p_orig) if w]
+            if len(p_words) >= 8 or overlap_low or is_summary_prose:
+                cleaned_p = clean_dangling_quote(p_orig)
+                if cleaned_p and cleaned_p != clean_dangling_quote(raw_q):
+                    item[quote_key] = cleaned_p
+                    replaced_english = True
+                    if sync_arabic:
+                        p_ar = (primary_turn.get("text_ar") or "").strip()
+                        matched_ex_ar = next(
+                            (
+                                clean_dangling_quote(ex["text_ar"].strip())
+                                for ex in enriched_exchange
+                                if str(ex.get("turn_id") or "") == str(primary_tid) and ex.get("text_ar")
+                            ),
+                            "",
+                        )
+                        item[quote_ar_key] = p_ar or matched_ex_ar
+                elif raw_q:
+                    item[quote_key] = clean_dangling_quote(raw_q)
+            elif allow_exchange_fallback:
+                cand_turns = [
+                    ex for ex in enriched_exchange
+                    if ex.get("role") in allowed_roles and len((ex.get("text_en") or "").split()) >= 8
+                ]
+                if cand_turns:
+                    best_ex = max(cand_turns, key=lambda x: len((x.get("text_en") or "").split()))
+                    cleaned_best = clean_dangling_quote(best_ex["text_en"].strip())
+                    if cleaned_best != clean_dangling_quote(raw_q):
+                        item[quote_key] = cleaned_best
+                        replaced_english = True
+                        if sync_arabic:
+                            item[quote_ar_key] = clean_dangling_quote((best_ex.get("text_ar") or "").strip())
+                elif raw_q:
+                    item[quote_key] = clean_dangling_quote(raw_q)
+            elif raw_q:
+                item[quote_key] = clean_dangling_quote(raw_q)
+        elif raw_q:
+            item[quote_key] = clean_dangling_quote(raw_q)
+
+        if sync_arabic and not replaced_english and not item.get(quote_ar_key):
+            for ex in enriched_exchange:
+                if str(ex.get("turn_id") or "") == str(primary_tid) and ex.get("text_ar"):
+                    item[quote_ar_key] = clean_dangling_quote(ex["text_ar"].strip())
+                    break
+            if not item.get(quote_ar_key):
+                for ex in enriched_exchange:
+                    if ex.get("role") in allowed_roles and ex.get("text_ar"):
+                        item[quote_ar_key] = clean_dangling_quote(ex["text_ar"].strip())
+                        break
+
+    _sync_single("verbatim_quote", "verbatim_quote_ar", a_turn, a_tid, daee_transcript.lower(), ("MAIN_DAEE", "CO_DAEE"), True)
+    _sync_single("interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar", q_turn, q_tid, inter_transcript.lower(), ("INTERLOCUTOR",), False)
+
+
+def _preground_round1_unit(
+    raw_unit: Dict[str, Any],
+    scenario: Dict[str, Any],
+    window_start_ms: int,
+    cohesive_turns: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Grounds a Round 1 unit's verbatim quotes, substantive answer_turn_id, and dialogue_exchange
+    against Stage-1 turns BEFORE Round 2 translates them, preventing Round 2 from translating
+    mismatched/summary quotes or swapped speaker roles.
+    """
+    u = dict(raw_unit)
+    cohesive_turns, cohesive_turns_by_id, raw_turns_by_id = _build_turn_lookups(scenario, cohesive_turns)
+    q_tid = str(u.get("question_turn_id") or "").strip()
+    a_tid = str(u.get("answer_turn_id") or "").strip()
+    q_turn = cohesive_turns_by_id.get(q_tid) or raw_turns_by_id.get(q_tid)
+    a_turn = cohesive_turns_by_id.get(a_tid) or raw_turns_by_id.get(a_tid)
+    if a_turn is None or _canon_speaker_role(a_turn.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
+        return u
+
+    speakers = scenario.get("speakers", [])
+    main_daee = next((s for s in speakers if _canon_speaker_role(s.get("role"), "") == "MAIN_DAEE"), None)
+    daee_name_en = (main_daee.get("display_name_en") if main_daee else None) or "Main Da'ee"
+    daee_name_ar = (main_daee.get("display_name_ar") if main_daee else None) or "الداعية المحاور"
+    inter_spk_id = ""
+    if q_turn is not None and _canon_speaker_role(q_turn.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
+        inter_spk_id = q_turn.get("speaker_id", "")
+
+    a_turn, a_tid = _recover_substantive_daee_turn(
+        u, q_turn, a_turn, a_tid, window_start_ms, cohesive_turns, cohesive_turns_by_id, raw_turns_by_id
+    )
+    raw_ex = u.get("dialogue_exchange") if isinstance(u.get("dialogue_exchange"), list) else u.get("dialogue_trajectory")
+    ts_sec = int(q_turn["start_ms"] // 1000) if q_turn is not None else int(window_start_ms // 1000)
+    grounded_ex: List[Dict[str, Any]] = []
+    if isinstance(raw_ex, list) and raw_ex:
+        grounded_ex, _ = _ground_dialogue_exchange(
+            raw_ex, cohesive_turns_by_id, raw_turns_by_id, daee_name_en, daee_name_ar, inter_spk_id, ts_sec
+        )
+        lean_ex = []
+        for idx_g, gx in enumerate(grounded_ex):
+            orig_ex = raw_ex[idx_g] if idx_g < len(raw_ex) and isinstance(raw_ex[idx_g], dict) else {}
+            item_ex = {
+                "turn_id": gx["turn_id"],
+                "role": gx["role"],
+                "move_type": gx.get("move_type", "Turn"),
+                "text_en": gx.get("text_en", ""),
+            }
+            if orig_ex.get("text_ar"):
+                item_ex["text_ar"] = orig_ex["text_ar"]
+            lean_ex.append(item_ex)
+        key_ex = "dialogue_exchange" if isinstance(u.get("dialogue_exchange"), list) else "dialogue_trajectory"
+        u[key_ex] = lean_ex
+
+    _sync_role_quotes_in_item(
+        u, q_turn, q_tid, a_turn, a_tid, grounded_ex, cohesive_turns, inter_spk_id, sync_arabic=False
+    )
+    return u
 
 
 def anchor_and_enrich_extracted_unit(
@@ -1039,19 +1338,9 @@ def anchor_and_enrich_extracted_unit(
     if norm_q_ar:
         item["question_ar"] = norm_q_ar
 
-    if cohesive_turns is None:
-        cohesive_turns = merge_consecutive_speaker_turns(scenario.get("turns", []))
-
-    cohesive_turns_by_id: Dict[str, Dict[str, Any]] = {}
-    for ct in cohesive_turns:
-        if "turn_id" in ct:
-            cohesive_turns_by_id[ct["turn_id"]] = ct
-        for mid in ct.get("merged_turn_ids", []):
-            cohesive_turns_by_id[mid] = ct
-
-    raw_turns_by_id = {t["turn_id"]: t for t in scenario.get("turns", []) if "turn_id" in t}
+    cohesive_turns, cohesive_turns_by_id, raw_turns_by_id = _build_turn_lookups(scenario, cohesive_turns)
     speakers = scenario.get("speakers", [])
-    main_daee = next((s for s in speakers if s.get("role") == "MAIN_DAEE"), None)
+    main_daee = next((s for s in speakers if _canon_speaker_role(s.get("role"), "") == "MAIN_DAEE"), None)
 
     q_tid = str(item.get("question_turn_id") or "").strip()
     a_tid = str(item.get("answer_turn_id") or "").strip()
@@ -1060,7 +1349,7 @@ def anchor_and_enrich_extracted_unit(
 
     if q_turn is not None:
         ts_sec = int(q_turn["start_ms"] // 1000)
-        q_role = q_turn.get("speaker_role", "")
+        q_role = _canon_speaker_role(q_turn.get("speaker_role"), "")
         if q_role in ("MAIN_DAEE", "CO_DAEE"):
             inter_spk_id = ""  # Monologue / anticipated question voiced by Da'ee
         else:
@@ -1069,54 +1358,25 @@ def anchor_and_enrich_extracted_unit(
         ts_sec = max(int(window_start_ms // 1000), int(item.get("timestamp_seconds") or 0))
         inter_spk_id = ""
 
-    if a_turn is None or a_turn.get("speaker_role") not in ("MAIN_DAEE", "CO_DAEE"):
+    if a_turn is None or _canon_speaker_role(a_turn.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
         # Strictly reject / drop unit if candidate answer turn is missing or belongs to interlocutor
         return None
 
-    # Substantive Answer Turn Recovery:
-    # If the LLM selected a tiny filler turn (< 8 cleaned words, e.g. "Can" or "What do you think about that? That deep? Well,")
-    # or a turn before the question turn, re-anchor a_turn to the first substantive MAIN_DAEE/CO_DAEE turn (>= 8 words).
-    a_cleaned_text = clean_dangling_quote((a_turn.get("text_original") or "").strip())
-    a_orig_words = [w for w in re.split(r"\s+", a_cleaned_text) if w]
-    q_start_ms = int(q_turn["start_ms"]) if q_turn is not None else int(window_start_ms)
-    if len(a_orig_words) < 8 or (q_turn is not None and int(a_turn.get("start_ms", 0)) < q_start_ms):
-        raw_ex_candidates = item.get("dialogue_exchange") or item.get("dialogue_trajectory") or []
-        replacement_turn = None
-        if isinstance(raw_ex_candidates, list):
-            for ex in raw_ex_candidates:
-                if not isinstance(ex, dict):
-                    continue
-                cand_tid = str(ex.get("turn_id") or "").strip()
-                cand_turn = cohesive_turns_by_id.get(cand_tid) or raw_turns_by_id.get(cand_tid)
-                if cand_turn and cand_turn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
-                    cand_words = [w for w in re.split(r"\s+", clean_dangling_quote((cand_turn.get("text_original") or "").strip())) if w]
-                    if len(cand_words) >= 8 and int(cand_turn.get("start_ms", 0)) >= q_start_ms:
-                        replacement_turn = cand_turn
-                        break
-        if replacement_turn is None:
-            for ct in cohesive_turns:
-                if ct.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
-                    ct_start = int(ct.get("start_ms", 0))
-                    ct_words = [w for w in re.split(r"\s+", clean_dangling_quote((ct.get("text_original") or "").strip())) if w]
-                    if ct_start >= q_start_ms and (ct_start - q_start_ms) <= 180_000 and len(ct_words) >= 8:
-                        replacement_turn = ct
-                        break
-        if replacement_turn is not None:
-            a_turn = replacement_turn
-            a_tid = str(a_turn.get("turn_id") or a_tid)
-            item["answer_turn_id"] = a_tid
+    a_turn, a_tid = _recover_substantive_daee_turn(
+        item, q_turn, a_turn, a_tid, window_start_ms, cohesive_turns, cohesive_turns_by_id, raw_turns_by_id
+    )
 
     ans_sec = int(a_turn["start_ms"] // 1000)
     daee_spk_id = a_turn.get("speaker_id", main_daee["speaker_id"] if main_daee else "")
 
     # Speaker Role Integrity Guard: daee_speaker_id and interlocutor_speaker_id CANNOT be identical!
     if daee_spk_id and inter_spk_id and daee_spk_id == inter_spk_id:
-        if q_turn and q_turn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE"):
+        if q_turn and _canon_speaker_role(q_turn.get("speaker_role"), "") in ("MAIN_DAEE", "CO_DAEE"):
             inter_spk_id = ""
         else:
             distinct_inter = next(
                 (s["speaker_id"] for s in speakers
-                 if s["speaker_id"] != daee_spk_id and s.get("role") == "INTERLOCUTOR"),
+                 if s["speaker_id"] != daee_spk_id and _canon_speaker_role(s.get("role"), "") == "INTERLOCUTOR"),
                 ""
             )
             inter_spk_id = distinct_inter
@@ -1124,10 +1384,10 @@ def anchor_and_enrich_extracted_unit(
         inter_spk_id = ""
 
     matched_daee = next(
-        (s for s in speakers if s["speaker_id"] == daee_spk_id and s.get("role") in ("MAIN_DAEE", "CO_DAEE")),
+        (s for s in speakers if s["speaker_id"] == daee_spk_id and _canon_speaker_role(s.get("role"), "") in ("MAIN_DAEE", "CO_DAEE")),
         main_daee
     )
-    if not matched_daee or matched_daee.get("role") not in ("MAIN_DAEE", "CO_DAEE"):
+    if not matched_daee or _canon_speaker_role(matched_daee.get("role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
         return None
 
     daee_name_en = matched_daee.get("display_name_en") or (main_daee.get("display_name_en") if main_daee else "Main Da'ee")
@@ -1162,47 +1422,9 @@ def anchor_and_enrich_extracted_unit(
         if cand_id and (cand_id in cohesive_turns_by_id or cand_id in raw_turns_by_id) and cand_id not in src_tids:
             src_tids.append(cand_id)
 
-    enriched_exchange = []
-    for ex in raw_exchange[:12]:
-        if not isinstance(ex, dict):
-            continue
-        etid = str(ex.get("turn_id") or "").strip()
-        eturn = cohesive_turns_by_id.get(etid) or raw_turns_by_id.get(etid)
-        role = ex.get("role") or (eturn.get("speaker_role") if eturn else "MAIN_DAEE")
-        if resolve_turn_speaker_labels is not None:
-            spk_label_en, spk_label_ar = resolve_turn_speaker_labels(role, eturn, daee_name_en, daee_name_ar)
-        else:
-            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
-            turn_matches = (eturn is not None and (eturn.get("speaker_role") in ("MAIN_DAEE", "CO_DAEE")) == is_daee)
-            spk_label_en = ((eturn.get("speaker_label_en") if turn_matches else None) or (daee_name_en if is_daee else "Interlocutor"))
-            spk_label_ar = ((eturn.get("speaker_label_ar") if turn_matches else None) or (daee_name_ar if is_daee else "المحاور"))
-
-        enriched_exchange.append({
-            "turn_id": etid,
-            "role": role,
-            "speaker_label_en": spk_label_en,
-            "speaker_label_ar": spk_label_ar,
-            "timestamp_seconds": int(eturn["start_ms"] // 1000) if eturn else ts_sec,
-            "timestamp_formatted": eturn["start_fmt"] if eturn else ms_to_fmt(ts_sec * 1000),
-            "move_type": ex.get("move_type", "Turn"),
-            "text_en": ex.get("text_en") or (eturn.get("text_original") if eturn else ""),
-            "text_ar": ex.get("text_ar") or (eturn.get("text_ar") if eturn else ""),
-        })
-
-    # Dialogue Trajectory Role Integrity: Require distinct roles in multi-turn debate
-    if len(enriched_exchange) >= 2:
-        roles_in_ex = {ex.get("role") for ex in enriched_exchange if ex.get("role")}
-        if len(roles_in_ex) < 2 and inter_spk_id:
-            for ex in enriched_exchange:
-                mv = str(ex.get("move_type") or "").lower()
-                if any(k in mv for k in ["objection", "reaction", "clarification", "inquiry"]):
-                    ex["role"] = "INTERLOCUTOR"
-                    ex["speaker_label_en"] = "Interlocutor"
-                    ex["speaker_label_ar"] = "المحاور"
-                else:
-                    ex["role"] = "MAIN_DAEE"
-                    ex["speaker_label_en"] = daee_name_en
-                    ex["speaker_label_ar"] = daee_name_ar
+    enriched_exchange, _ = _ground_dialogue_exchange(
+        raw_exchange, cohesive_turns_by_id, raw_turns_by_id, daee_name_en, daee_name_ar, inter_spk_id, ts_sec
+    )
 
     # Analogies: support multiple analogies list + single analogy field
     raw_an = item.get("analogies")
@@ -1236,7 +1458,6 @@ def anchor_and_enrich_extracted_unit(
         item["topic_subcategory"] = raw_cat
     item["topic_category"] = canonical_cat
 
-    # Architectural Acoustic Merge Wiring for Verbatim Quotes:
     all_transcript = " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns])
     all_transcript_lower = all_transcript.lower()
 
@@ -1264,7 +1485,15 @@ def anchor_and_enrich_extracted_unit(
         " ".join(citation_text_parts),
     ]).lower()
     for sig in prompt_leak_signatures:
-        if sig in card_all_text and sig not in all_transcript_lower:
+        if sig == "mark 13:32":
+            if not re.search(r"\bmark\s*(?:chapter\s*)?13[\s:.,]+32\b", card_all_text):
+                continue
+            sig_present = bool(re.search(r"\bmark\s*(?:chapter\s*)?13[\s:.,]+32\b", all_transcript_lower))
+        else:
+            if sig not in card_all_text:
+                continue
+            sig_present = sig in all_transcript_lower
+        if not sig_present:
             return None
 
     # Anti-Noise Gate: Discard cards referencing street incidents, dog petting, or promotional outro pitches
@@ -1288,90 +1517,9 @@ def anchor_and_enrich_extracted_unit(
         if nsig in spoken_and_q_text:
             return None
 
-    # Architectural Acoustic Merge Wiring for Verbatim Quotes:
-    # Read from cohesive_turns instead of raw micro-turns, ensuring >= 8 words and no dangling prepositions.
-    raw_vq = (item.get("verbatim_quote") or "").strip()
-    vq_words = [w for w in re.split(r'\s+', raw_vq) if w]
-    has_dangling_vq = bool(vq_words and vq_words[-1].lower().rstrip(".,!?:;\"'؟،") in DANGLING_PREPOSITIONS_EN)
-    is_short_vq = len(vq_words) < 8
-
-    overlap_low = False
-    if raw_vq and raw_vq not in all_transcript:
-        w_vq = set(re.findall(r'\w+', raw_vq.lower()))
-        w_all = set(re.findall(r'\w+', all_transcript.lower()))
-        overlap = len(w_vq & w_all) / max(len(w_vq), 1) if w_vq else 0.0
-        if overlap < 0.45:
-            overlap_low = True
-
-    if (overlap_low or is_short_vq or has_dangling_vq) and a_turn and a_turn.get("text_original"):
-        a_orig = a_turn["text_original"].strip()
-        a_words = [w for w in re.split(r'\s+', a_orig) if w]
-        if len(a_words) >= 8:
-            item["verbatim_quote"] = clean_dangling_quote(a_orig)
-            if a_turn.get("text_ar"):
-                item["verbatim_quote_ar"] = a_turn["text_ar"].strip()
-        else:
-            # Fallback to the longest substantive Da'ee turn in enriched_exchange
-            daee_ex_turns = [
-                ex for ex in enriched_exchange
-                if ex.get("role") in ("MAIN_DAEE", "CO_DAEE") and len((ex.get("text_en") or "").split()) >= 8
-            ]
-            if daee_ex_turns:
-                best_ex = max(daee_ex_turns, key=lambda x: len((x.get("text_en") or "").split()))
-                item["verbatim_quote"] = clean_dangling_quote(best_ex["text_en"].strip())
-                if best_ex.get("text_ar") and not item.get("verbatim_quote_ar"):
-                    item["verbatim_quote_ar"] = best_ex["text_ar"].strip()
-            elif raw_vq:
-                item["verbatim_quote"] = clean_dangling_quote(raw_vq)
-    elif raw_vq:
-        item["verbatim_quote"] = clean_dangling_quote(raw_vq)
-
-    if not item.get("verbatim_quote_ar"):
-        for ex in enriched_exchange:
-            if str(ex.get("turn_id") or "") == str(a_tid) and ex.get("text_ar"):
-                item["verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
-                break
-        if not item.get("verbatim_quote_ar"):
-            for ex in enriched_exchange:
-                if ex.get("role") in ("MAIN_DAEE", "CO_DAEE") and ex.get("text_ar"):
-                    item["verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
-                    break
-
-    raw_ivq = (item.get("interlocutor_verbatim_quote") or "").strip()
-    ivq_words = [w for w in re.split(r'\s+', raw_ivq) if w]
-    has_dangling_ivq = bool(ivq_words and ivq_words[-1].lower().rstrip(".,!?:;\"'؟،") in DANGLING_PREPOSITIONS_EN)
-    is_short_ivq = len(ivq_words) < 8
-
-    ivq_overlap_low = False
-    if raw_ivq and raw_ivq not in all_transcript:
-        w_ivq = set(re.findall(r'\w+', raw_ivq.lower()))
-        w_all = set(re.findall(r'\w+', all_transcript.lower()))
-        ivq_overlap = len(w_ivq & w_all) / max(len(w_ivq), 1) if w_ivq else 0.0
-        if ivq_overlap < 0.45:
-            ivq_overlap_low = True
-
-    if (ivq_overlap_low or is_short_ivq or has_dangling_ivq) and q_turn and q_turn.get("text_original"):
-        q_orig = q_turn["text_original"].strip()
-        q_words = [w for w in re.split(r'\s+', q_orig) if w]
-        if len(q_words) >= 8:
-            item["interlocutor_verbatim_quote"] = clean_dangling_quote(q_orig)
-            if q_turn.get("text_ar"):
-                item["interlocutor_verbatim_quote_ar"] = q_turn["text_ar"].strip()
-        elif raw_ivq:
-            item["interlocutor_verbatim_quote"] = clean_dangling_quote(raw_ivq)
-    elif raw_ivq:
-        item["interlocutor_verbatim_quote"] = clean_dangling_quote(raw_ivq)
-
-    if not item.get("interlocutor_verbatim_quote_ar"):
-        for ex in enriched_exchange:
-            if str(ex.get("turn_id") or "") == str(q_tid) and ex.get("text_ar"):
-                item["interlocutor_verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
-                break
-        if not item.get("interlocutor_verbatim_quote_ar"):
-            for ex in enriched_exchange:
-                if ex.get("role") == "INTERLOCUTOR" and ex.get("text_ar"):
-                    item["interlocutor_verbatim_quote_ar"] = clean_dangling_quote(ex["text_ar"].strip())
-                    break
+    _sync_role_quotes_in_item(
+        item, q_turn, q_tid, a_turn, a_tid, enriched_exchange, cohesive_turns, inter_spk_id, sync_arabic=True
+    )
 
     # Topical Grounding Guard: reject fleeting <=5-word remarks whose topic was never actually answered by the Da'ee
     final_ivq_words = (item.get("interlocutor_verbatim_quote") or "").split()
@@ -1491,26 +1639,36 @@ def merge_round1_and_round2_units(
                     best_r2_idx = r2_idx
                     break
 
-        # 3. Match by question text similarity / containment
+        # 3. Match by question text similarity / containment / Jaccard
         if best_r2_idx is None and r1_qen:
+            r1_qwords = set(re.findall(r"\b\w{3,}\b", r1_qen))
+            best_q_score = 0.0
             for r2_idx, r2_cand in enumerate(r2_units):
                 if r2_idx in used_r2_indices:
                     continue
                 r2_qen = (r2_cand.get("question_en") or "").strip().lower()
-                if r2_qen and (r2_qen == r1_qen or r1_qen in r2_qen or r2_qen in r1_qen):
+                if not r2_qen:
+                    continue
+                if r2_qen == r1_qen or r1_qen in r2_qen or r2_qen in r1_qen:
                     best_r2_idx = r2_idx
                     break
+                r2_qwords = set(re.findall(r"\b\w{3,}\b", r2_qen))
+                if r1_qwords and r2_qwords:
+                    jacc = len(r1_qwords & r2_qwords) / len(r1_qwords | r2_qwords)
+                    if jacc >= 0.55 and jacc > best_q_score:
+                        best_q_score = jacc
+                        best_r2_idx = r2_idx
 
-        # 4. Positional fallback if index exists and is unused
-        if best_r2_idx is None and r1_idx < len(r2_units) and r1_idx not in used_r2_indices:
-            best_r2_idx = r1_idx
-
-        # 5. Any first unused r2 candidate
-        if best_r2_idx is None:
-            for r2_idx in range(len(r2_units)):
-                if r2_idx not in used_r2_indices:
-                    best_r2_idx = r2_idx
-                    break
+        # 4. Positional fallback ONLY for 1-to-1 single-unit calls without conflicting turn IDs
+        # Prevents cross-card Arabic contamination when Round 2 drops/reorders cards in multi-unit batches.
+        if best_r2_idx is None and len(r1_units) == 1 and len(r2_units) == 1 and 0 not in used_r2_indices:
+            cand0 = r2_units[0]
+            c_qtid = str(cand0.get("question_turn_id") or "").strip()
+            c_atid = str(cand0.get("answer_turn_id") or "").strip()
+            q_ok = (not r1_qtid) or (not c_qtid) or (r1_qtid == c_qtid)
+            a_ok = (not r1_atid) or (not c_atid) or (r1_atid == c_atid)
+            if q_ok and a_ok:
+                best_r2_idx = 0
 
         if best_r2_idx is not None:
             used_r2_indices.add(best_r2_idx)
@@ -1659,6 +1817,40 @@ def merge_round1_and_round2_units(
         # Preserve or conditionally update analogies
         if r2_u.get("analogies_ar"):
             merged["analogies_ar"] = r2_u["analogies_ar"]
+            if not str(merged.get("analogy_or_metaphor_ar") or "").strip() and isinstance(r2_u["analogies_ar"], list):
+                first_an_ar = str(r2_u["analogies_ar"][0] or "").strip()
+                if first_an_ar:
+                    merged["analogy_or_metaphor_ar"] = first_an_ar
+
+        # Mirror verified dialogue_exchange Arabic turn text into verbatim_quote_ar before Step 3B check
+        if not str(merged.get("verbatim_quote_ar") or "").strip():
+            ex_list = merged.get("dialogue_exchange") or merged.get("dialogue_trajectory") or []
+            if isinstance(ex_list, list):
+                atid_str = str(merged.get("answer_turn_id") or "").strip()
+                cand_vq_ar = next(
+                    (
+                        str(ex.get("text_ar") or "").strip()
+                        for ex in ex_list
+                        if isinstance(ex, dict)
+                        and atid_str
+                        and str(ex.get("turn_id") or "").strip() == atid_str
+                        and _is_clean_arabic_text(str(ex.get("text_ar") or ""))
+                    ),
+                    "",
+                )
+                if not cand_vq_ar:
+                    cand_vq_ar = next(
+                        (
+                            str(ex.get("text_ar") or "").strip()
+                            for ex in ex_list
+                            if isinstance(ex, dict)
+                            and _canon_speaker_role(ex.get("role"), "") in ("MAIN_DAEE", "CO_DAEE")
+                            and _is_clean_arabic_text(str(ex.get("text_ar") or ""))
+                        ),
+                        "",
+                    )
+                if cand_vq_ar:
+                    merged["verbatim_quote_ar"] = cand_vq_ar
 
         final_merged.append(merged)
 
@@ -1690,6 +1882,15 @@ def has_valid_arabic_localization(unit: Dict[str, Any]) -> bool:
     ):
         val = str(unit.get(f) or "").strip()
         if val and not _is_clean_arabic_text(val):
+            return False
+
+    # 2b. When verbatim_quote or analogy_or_metaphor is populated in English, require its Arabic translation
+    if str(unit.get("verbatim_quote") or "").strip():
+        if not _is_clean_arabic_text(str(unit.get("verbatim_quote_ar") or "")):
+            return False
+    en_analogy = str(unit.get("analogy_or_metaphor") or "").strip()
+    if en_analogy and en_analogy.lower() not in ("none", "none used", "n/a"):
+        if not _is_clean_arabic_text(str(unit.get("analogy_or_metaphor_ar") or "")):
             return False
 
     # 3. Populated Arabic premises / analogies must contain clean Arabic script
@@ -1981,6 +2182,9 @@ class Stage2ScenarioExtractor:
 
         all_units: List[Dict[str, Any]] = []
         completed_win_ids = []
+        gatekeeper_skipped_windows = 0
+        r1_total_candidates = 0
+        dropped_gate_counts: Dict[str, int] = {}
 
         for w in windows:
             w_idx = w["window_index"]
@@ -1995,6 +2199,7 @@ class Stage2ScenarioExtractor:
                 total_windows=len(windows),
             )
             if not is_substantive:
+                gatekeeper_skipped_windows += 1
                 if verbose:
                     print(f"      [Gatekeeper Window {w_idx}] Skipping non-apologetic window: {gate_reason}", flush=True)
                 self.workspace.atomic_write_json(partial_file, [])
@@ -2039,7 +2244,7 @@ class Stage2ScenarioExtractor:
                 completed_win_ids.append(w_idx)
                 continue
 
-            main_daee = next((s for s in scenario.get("speakers", []) if s.get("role") == "MAIN_DAEE"), None)
+            main_daee = next((s for s in scenario.get("speakers", []) if _canon_speaker_role(s.get("role"), "") == "MAIN_DAEE"), None)
             target_name = (main_daee.get("display_name_en") if main_daee else "Main Da'ee") or "Main Da'ee"
             target_id = (main_daee.get("speaker_id") if main_daee else "SPK_00") or "SPK_00"
 
@@ -2127,8 +2332,16 @@ class Stage2ScenarioExtractor:
                         u_clean["question_en"] = norm_en
                         if norm_ar:
                             u_clean["question_ar"] = norm_ar
-                        r1_units.append(u_clean)
+                        r1_units.append(_preground_round1_unit(u_clean, scenario, w["start_ms"], cohesive_turns))
                 self.workspace.atomic_write_json(partial_en_file, r1_units)
+            else:
+                r1_units = [
+                    _preground_round1_unit(u, scenario, w["start_ms"], cohesive_turns)
+                    for u in r1_units
+                    if isinstance(u, dict)
+                ]
+
+            r1_total_candidates += len(r1_units)
 
             if not r1_units:
                 self.workspace.atomic_write_json(partial_file, [])
@@ -2296,12 +2509,27 @@ class Stage2ScenarioExtractor:
                 if not has_valid_arabic_localization(enriched):
                     continue
                 if audit_single_card is not None:
-                    card_audit = audit_single_card(enriched, w.get("turns") or [], require_arabic=True)
-                    hf_gate = card_audit.get("hard_fail_triggered")
-                    if hf_gate in ("[GATE-LEAK]", "[GATE-NOISE]", "[GATE-ROLE]"):
+                    scen_metrics = scenario.get("metrics") if isinstance(scenario.get("metrics"), dict) else {}
+                    video_meta_audit = {
+                        "speakers_count": int(scen_metrics.get("speakers_count") or len(scenario.get("speakers") or [])),
+                        "duration_sec": float(scen_metrics.get("duration_sec") or scenario.get("duration_sec") or 0.0),
+                    }
+                    card_audit = audit_single_card(
+                        enriched, w.get("turns") or [], video_meta=video_meta_audit, require_arabic=True
+                    )
+                    all_gates = list(card_audit.get("hard_fails_all") or [])
+                    if not all_gates and card_audit.get("hard_fail_triggered"):
+                        all_gates = [card_audit["hard_fail_triggered"]]
+                    blocking_gates = [
+                        g for g in all_gates
+                        if g in ("[GATE-LEAK]", "[GATE-NOISE]", "[GATE-ROLE]", "[GATE-PERSPECTIVE]", "[GATE-DIARIZATION]")
+                    ]
+                    if blocking_gates:
+                        for bg in blocking_gates:
+                            dropped_gate_counts[bg] = dropped_gate_counts.get(bg, 0) + 1
                         logger.warning(
                             "Card %s dropped by final Rubric Audit hard-fail %s: %s",
-                            enriched.get("id", ""), hf_gate, card_audit.get("root_cause", ""),
+                            enriched.get("id", ""), ",".join(blocking_gates), card_audit.get("root_cause", ""),
                         )
                         continue
                     tier_short = card_audit["tier"].split(":")[0]
@@ -2373,12 +2601,23 @@ class Stage2ScenarioExtractor:
         for p in self.workspace.partial_extractions_dir.glob(f"{video_id}_win*.json"):
             p.unlink(missing_ok=True)
 
+        zero_card_reason = ""
+        if len(all_units) == 0 and windows:
+            gate_summary = ", ".join(f"{k}:{v}" for k, v in sorted(dropped_gate_counts.items())) or "none"
+            zero_card_reason = (
+                f"windows={len(windows)} gatekeeper_skipped={gatekeeper_skipped_windows} "
+                f"r1_candidates={r1_total_candidates} dropped_gates=[{gate_summary}]"
+            )
+            logger.warning("Video %s extracted 0 Q&A cards (%s)", video_id, zero_card_reason)
+            if verbose:
+                print(f"   [ZERO-CARD DIAGNOSTIC] Video {video_id} produced 0 cards ({zero_card_reason})", flush=True)
+
         self.workspace.advance_micro_step(
             video_id,
             "M6_LLM_EXTRACTED",
             artifacts={"qa_json": str(qa_shard_path)},
             metrics={"qa_count": len(all_units)},
-            extra_updates={"db_qa_synced": False},
+            extra_updates={"db_qa_synced": False, "zero_card_reason": zero_card_reason},
         )
 
         if verbose:
@@ -2391,16 +2630,66 @@ class Stage2ScenarioExtractor:
         return all_units
 
 
+_DUP_STOPWORDS_EN = frozenset({
+    "what", "when", "where", "which", "whom", "whose", "why", "how", "does", "did",
+    "the", "and", "for", "with", "are", "was", "were", "that", "this", "from", "can",
+    "could", "would", "should", "will", "you", "your", "about", "into", "have", "has",
+    "had", "not", "but", "they", "their", "them", "then", "than", "also", "just",
+    "all", "any", "even", "make", "made",
+})
+_DUP_STOPWORDS_AR = frozenset({
+    "في", "من", "على", "إلى", "عن", "هل", "ما", "لماذا", "كيف", "متى", "أين",
+    "أن", "إن", "ان", "لا", "هذا", "هذه", "التي", "الذي", "هو", "هي", "مع", "بين",
+    "عند", "أو", "ثم", "بل", "كل", "قد", "كان", "تكون", "يكون",
+})
+
+
+def _content_tokens_en(text: str) -> set:
+    return {
+        t for t in re.findall(r"\b[a-z]{3,}\b", (text or "").lower())
+        if t not in _DUP_STOPWORDS_EN
+    }
+
+
+def _content_tokens_ar(text: str) -> set:
+    return {
+        t for t in re.findall(r"[\u0621-\u064a]{2,}", text or "")
+        if t not in _DUP_STOPWORDS_AR
+    }
+
+
 def _is_duplicate_qa(candidate: Dict[str, Any], existing_list: List[Dict[str, Any]]) -> bool:
+    """Video-wide deduplication using exact substring match and semantic token Jaccard similarity."""
     q_en = (candidate.get("question_en") or "").strip().lower()
     q_ar = (candidate.get("question_ar") or "").strip()
-    ts = int(candidate.get("timestamp_seconds", 0))
+    cand_nums = re.findall(r"\d+", q_en)
+    cand_en_toks = _content_tokens_en(q_en)
+    cand_ar_toks = _content_tokens_ar(q_ar)
+
     for ex in existing_list:
-        if abs(int(ex.get("timestamp_seconds", 0)) - ts) <= 75:
-            ex_en = (ex.get("question_en") or "").strip().lower()
-            ex_ar = (ex.get("question_ar") or "").strip()
-            if (q_en and ex_en and (q_en == ex_en or q_en in ex_en or ex_en in q_en)) or (
-                q_ar and ex_ar and (q_ar == ex_ar or q_ar in ex_ar or ex_ar in q_ar)
-            ):
-                return True
+        ex_en = (ex.get("question_en") or "").strip().lower()
+        ex_ar = (ex.get("question_ar") or "").strip()
+        if (q_en and ex_en and (q_en == ex_en or q_en in ex_en or ex_en in q_en)) or (
+            q_ar and ex_ar and (q_ar == ex_ar or q_ar in ex_ar or ex_ar in q_ar)
+        ):
+            return True
+
+        ex_nums = re.findall(r"\d+", ex_en)
+        if cand_nums and ex_nums and cand_nums != ex_nums:
+            continue
+
+        if len(cand_en_toks) >= 3:
+            ex_en_toks = _content_tokens_en(ex_en)
+            if len(ex_en_toks) >= 3:
+                en_jacc = len(cand_en_toks & ex_en_toks) / len(cand_en_toks | ex_en_toks)
+                if en_jacc >= 0.50:
+                    return True
+
+        if len(cand_ar_toks) >= 3:
+            ex_ar_toks = _content_tokens_ar(ex_ar)
+            if len(ex_ar_toks) >= 3:
+                ar_jacc = len(cand_ar_toks & ex_ar_toks) / len(cand_ar_toks | ex_ar_toks)
+                if ar_jacc >= 0.58:
+                    return True
+
     return False

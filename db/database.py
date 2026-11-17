@@ -746,21 +746,105 @@ _SCRIPT_REPLACEMENTS = [
 ]
 
 
-def _is_refutation_context(text: str, match_start: int) -> bool:
-    """Checks whether a matched theological statement is quoted as a refutation target or is negated."""
-    window = text[max(0, match_start - 80):match_start].lower()
+_PREFIX_MAP = {
+    "وال": ("و", "وال"),
+    "فال": ("ف", "فال"),
+    "بال": ("ب", "بال"),
+    "كال": ("ك", "كال"),
+    "ال": ("", "ال"),
+    "و": ("و", "و"),
+    "ف": ("ف", "ف"),
+    "ب": ("ب", "ب"),
+    "ك": ("ك", "ك"),
+    "ل": ("ل", "ل"),
+}
+
+
+def _compile_vocab_replacer():
+    vocab_map = {}
+    for eng_term, ar_term in _PHILOSOPHICAL_VOCABULARY:
+        has_al = ar_term.startswith(("ال", "الأ", "الإ", "الآ"))
+        vocab_map[eng_term.lower()] = (ar_term, has_al)
+
+    sorted_terms = sorted((t for t, _ in _PHILOSOPHICAL_VOCABULARY), key=len, reverse=True)
+    sorted_prefixes = sorted(_PREFIX_MAP.keys(), key=len, reverse=True)
+    pattern = (
+        r"(?<![\w\u0600-\u06ff])("
+        + "|".join(re.escape(p) for p in sorted_prefixes)
+        + r")?("
+        + "|".join(re.escape(t) for t in sorted_terms)
+        + r")\b"
+    )
+    return re.compile(pattern, flags=re.IGNORECASE), vocab_map
+
+
+_VOCAB_REGEX, _VOCAB_MAP = _compile_vocab_replacer()
+
+_ARABIC_COMPOUND_REPLACEMENTS = [
+    (re.compile(r"بيرمINGTON", flags=re.IGNORECASE), "برمنغهام"),
+    (re.compile(r"فutility", flags=re.IGNORECASE), "عبثية وعدم جدوى"),
+    (re.compile(r"(القرن\s+(?:السادس|السابع)(?:\s+الميلادي)?\s+في\s+)عربة\b"), r"\1الجزيرة العربية"),
+    (re.compile(r"\b(في\s+)?عربة\s+في\s+القرن\s+(السادس|السابع)\b"), r"في الجزيرة العربية في القرن \2"),
+    (re.compile(r"\bفي\s+عربة\s+القرن\s+(السادس|السابع)\b"), r"في الجزيرة العربية في القرن \1"),
+    (re.compile(r"\bعربة\s+في\s+القرن\s+(السادس|السابع)\b"), r"الجزيرة العربية في القرن \1"),
+    (re.compile(r"(الصدف\s+و)ال(?:مؤ|مو)امرات\b"), r"\1التزامنات"),
+    (re.compile(r"\bال(?:مؤ|مو)امرات(\s+(?:النفسية|غير السببية))"), r"التزامنات\1"),
+    (re.compile(r"\b(مذهب|فلسفة|ديانة|الديانة)\s+الطائفة\b"), r"\1 الطاوية"),
+    (re.compile(r"\b(البوذية|الهندوسية|الكونفوشيوسية|الشنتوية)(\s+و\s*)الطائفة\b"), r"\1\2الطاوية"),
+    (re.compile(r"\bالطائفة(\s+و\s*(?:البوذية|الهندوسية|الكونفوشيوسية|الشنتوية))"), r"الطاوية\1"),
+    (re.compile(r"\bالرسول\s+بول\b"), "بولس الرسول"),
+    (re.compile(r"\bبول\s+الرسول\b"), "بولس الرسول"),
+    (re.compile(r"\b(شهادة|كلام|رسالة|رسائل|تعاليم|التركيز\s+على|قبل|عن|مع|على|من|باسم|مثل)\s+بول\b"), r"\1 بولس"),
+    (re.compile(r"(?<![\w\u0600-\u06ff])([وفبكل]?)ماتيو\b"), r"\1متى"),
+    (re.compile(r"\bإنجيل\s+ماتيو\b"), "إنجيل متى"),
+    (re.compile(r"\bإنجيل\s+مارك\b"), "إنجيل مرقس"),
+    (re.compile(r"\bإنجيل\s+لوك\b"), "إنجيل لوقا"),
+    (re.compile(r"\bإنجيل\s+جون\b"), "إنجيل يوحنا"),
+    (re.compile(r"\bالقديس\s+بيتر\b"), "القديس بطرس"),
+]
+_ARABIC_GOSPEL_CTX_TERMS = ("الإنجيل", "العهد الجديد", "متى", "مرقس", "لوقا", "يوحنا", "المسيح", "يسوع", "شاهد")
+_ARABIC_PAUL_CTX_RE = re.compile(r"(?<![\w\u0600-\u06ff])([وفبكل]?)بول\b")
+_ARABIC_ORPHAN_PREFIX_RE = re.compile(r"(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])")
+_LATIN_WORDS_RE = re.compile(r"[A-Za-z]+")
+_EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
+_EMPTY_BRACKETS_RE = re.compile(r"\[\s*\]")
+_PUNCT_DEBRIS_SEQ_RE = re.compile(r"(?:^|\s)[،,.?؟:;]+(?=\s|$)")
+_MULTI_PUNCT_RUN_RE = re.compile(r"([،,.?؟])(?:\s*[،,.?؟])+")
+_MULTI_SPACE_RE = re.compile(r"[ \t]+")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([،.؟!:;])")
+_ARABIC_LETTERS_RE = re.compile(r"[\u0621-\u064a]")
+_ARABIC_CHAR_PRESENT_RE = re.compile(r"[\u0600-\u06ff]")
+
+
+def _is_refutation_context(text: str, match_start: int, match_end: Optional[int] = None) -> bool:
+    """Checks whether a matched theological statement is framed as an opponent claim or refutation target."""
+    pre_win = text[max(0, match_start - 95):match_start].lower()
+    post_win = text[match_end:min(len(text), match_end + 60)].lower() if match_end is not None else ""
     refutation_markers = [
         "refut", "reject", "deni", "deny", "false", "fallacy", "misconception",
         "claim", "dogma", "notion", "myth", "alleg", "argument that", "oppose",
         "disprov", "counter", "refuting", "rejecting", "denying", "refutation",
+        "opponent", "christian doctrine", "christian theology", "critics argue", "atheists argue",
         "زعم", "دعوى", "شبهة", "باطل", "بطلان", "رد", "دحض", "إبطال", "نفي", "إنكار",
-        "ليس", "لا يمكن", "يستحيل", "كيف يكون", "كيف يعقل", "تناقض", "مغالطة"
+        "ليس", "لا يمكن", "يستحيل", "كيف يكون", "كيف يعقل", "تناقض", "مغالطة",
     ]
-    return any(marker in window for marker in refutation_markers)
+    return any(marker in pre_win for marker in refutation_markers) or any(
+        marker in post_win for marker in ("refut", "reject", "false", "fallacy", "deni", "ينفي", "يدحض", "يبطل", "باطل")
+    )
+
+
+def _vocab_sub_callback(m: re.Match) -> str:
+    prefix = m.group(1) or ""
+    term_lower = m.group(2).lower()
+    ar_term, has_al = _VOCAB_MAP[term_lower]
+    if not prefix:
+        return ar_term
+    with_al, without_al = _PREFIX_MAP[prefix]
+    return (with_al + ar_term) if has_al else (without_al + ar_term)
 
 
 def clean_latin_tokens_in_arabic(text: str) -> str:
-    """Replaces leaked Latin/English words in Arabic fields using philosophical vocabulary and cleans artifacts."""
+    """Replaces leaked Latin/English words in Arabic fields using pre-compiled vocabulary & cleans artifacts."""
     if not text:
         return ""
     val = text
@@ -770,72 +854,27 @@ def clean_latin_tokens_in_arabic(text: str) -> str:
         if old_s in val:
             val = val.replace(old_s, new_s)
 
-    # 2. Arabic prefix mapping: (prefix_if_ar_term_has_al, prefix_if_ar_term_lacks_al)
-    prefix_map = {
-        "وال": ("و", "وال"),
-        "فال": ("ف", "فال"),
-        "بال": ("ب", "بال"),
-        "كال": ("ك", "كال"),
-        "ال": ("", "ال"),
-        "و": ("و", "و"),
-        "ف": ("ف", "ف"),
-        "ب": ("ب", "ب"),
-        "ك": ("ك", "ك"),
-        "ل": ("ل", "ل"),
-    }
+    # 2. Single-pass pre-compiled bilingual vocabulary + Arabic prefix replacement
+    if _LATIN_WORDS_RE.search(val):
+        val = _VOCAB_REGEX.sub(_vocab_sub_callback, val)
 
-    for eng_term, ar_term in _PHILOSOPHICAL_VOCABULARY:
-        has_al = (
-            ar_term.startswith("ال")
-            or ar_term.startswith("الأ")
-            or ar_term.startswith("الإ")
-            or ar_term.startswith("الآ")
-        )
+    # 3. Targeted pre-compiled replacements for historical/apologetic terms
+    for rx, repl in _ARABIC_COMPOUND_REPLACEMENTS:
+        val = rx.sub(repl, val)
+    if any(ctx in val for ctx in _ARABIC_GOSPEL_CTX_TERMS):
+        val = _ARABIC_PAUL_CTX_RE.sub(r"\1بولس", val)
 
-        # Handle prefixed Latin terms (e.g., والInstinctive -> والفطري, والcausality -> والسببية)
-        for p_ar, (with_al, without_al) in prefix_map.items():
-            pattern_pre = r'(?<![\w\u0600-\u06ff])' + re.escape(p_ar) + re.escape(eng_term) + r'\b'
-            replacement = (with_al + ar_term) if has_al else (without_al + ar_term)
-            val = re.sub(pattern_pre, replacement, val, flags=re.IGNORECASE)
-
-        # Standalone term
-        pattern = r'\b' + re.escape(eng_term) + r'\b'
-        val = re.sub(pattern, ar_term, val, flags=re.IGNORECASE)
-
-    # 3. Handle known compound Latin-Arabic splices
-    val = re.sub(r'بيرمINGTON', 'برمنغهام', val, flags=re.IGNORECASE)
-    val = re.sub(r'فutility', 'عبثية وعدم جدوى', val, flags=re.IGNORECASE)
-
-    # 3B. Targeted regex replacements for historical/apologetic terms
-    val = re.sub(r'(القرن\s+(?:السادس|السابع)(?:\s+الميلادي)?\s+في\s+)عربة\b', r'\1الجزيرة العربية', val)
-    val = re.sub(r'\b(في\s+)?عربة\s+في\s+القرن\s+(السادس|السابع)\b', r'في الجزيرة العربية في القرن \2', val)
-    val = re.sub(r'\bفي\s+عربة\s+القرن\s+(السادس|السابع)\b', r'في الجزيرة العربية في القرن \1', val)
-    val = re.sub(r'\bعربة\s+في\s+القرن\s+(السادس|السابع)\b', r'الجزيرة العربية في القرن \1', val)
-    val = re.sub(r'(الصدف\s+و)ال(?:مؤ|مو)امرات\b', r'\1التزامنات', val)
-    val = re.sub(r'\bال(?:مؤ|مو)امرات(\s+(?:النفسية|غير السببية))', r'التزامنات\1', val)
-    val = re.sub(r'\b(مذهب|فلسفة|ديانة|الديانة)\s+الطائفة\b', r'\1 الطاوية', val)
-    val = re.sub(r'\b(البوذية|الهندوسية|الكونفوشيوسية|الشنتوية)(\s+و\s*)الطائفة\b', r'\1\2الطاوية', val)
-    val = re.sub(r'\bالطائفة(\s+و\s*(?:البوذية|الهندوسية|الكونفوشيوسية|الشنتوية))', r'الطاوية\1', val)
-    val = re.sub(r'\bالرسول\s+بول\b', 'بولس الرسول', val)
-    val = re.sub(r'\bبول\s+الرسول\b', 'بولس الرسول', val)
-    val = re.sub(r'\b(شهادة|كلام|رسالة|رسائل|تعاليم|التركيز\s+على|قبل|عن|مع|على|من|باسم|مثل)\s+بول\b', r'\1 بولس', val)
-    val = re.sub(r'(?<![\w\u0600-\u06ff])([وفبكل]?)ماتيو\b', r'\1متى', val)
-    val = re.sub(r'\bإنجيل\s+ماتيو\b', 'إنجيل متى', val)
-    val = re.sub(r'\bإنجيل\s+مارك\b', 'إنجيل مرقس', val)
-    val = re.sub(r'\bإنجيل\s+لوك\b', 'إنجيل لوقا', val)
-    val = re.sub(r'\bإنجيل\s+جون\b', 'إنجيل يوحنا', val)
-    val = re.sub(r'\bالقديس\s+بيتر\b', 'القديس بطرس', val)
-    if any(ctx in val for ctx in ("الإنجيل", "العهد الجديد", "متى", "مرقس", "لوقا", "يوحنا", "المسيح", "يسوع", "شاهد")):
-        val = re.sub(r'(?<![\w\u0600-\u06ff])([وفبكل]?)بول\b', r'\1بولس', val)
-
-    # 4. Purge any remaining stray Latin/English tokens and Hebrew/CJK/Cyrillic from Arabic fields
-    val = re.sub(r'(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])', ' ', val)
-    val = re.sub(r'[A-Za-z]+', '', val)
-    val = _HEBREW_RE.sub('', val)
-    val = re.sub(r'\(\s*\)', '', val)
-    val = re.sub(r'\[\s*\]', '', val)
-    val = re.sub(r'[ \t]+', ' ', val).strip()
-    val = re.sub(r'\s+([،.؟!:;])', r'\1', val)
+    # 4. Purge any remaining stray Latin/English tokens, Hebrew/CJK/Cyrillic, and orphaned punctuation debris
+    if _LATIN_WORDS_RE.search(val):
+        val = _ARABIC_ORPHAN_PREFIX_RE.sub(" ", val)
+        val = _LATIN_WORDS_RE.sub("", val)
+    val = _HEBREW_RE.sub("", val)
+    val = _EMPTY_PARENS_RE.sub("", val)
+    val = _EMPTY_BRACKETS_RE.sub("", val)
+    val = _PUNCT_DEBRIS_SEQ_RE.sub(" ", val)
+    val = _MULTI_PUNCT_RUN_RE.sub(r"\1", val)
+    val = _MULTI_SPACE_RE.sub(" ", val).strip()
+    val = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", val)
 
     return val
 
@@ -860,14 +899,34 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
         (r'\b(the\s+law\s+is\s+(void|abolished|null and void))\b', 'Law is void', True),
         (r'(الناموس|شريعة العهد القديم|الشريعة الموسوية)\s+(باطل|ملغى|منسوخ بالكلية لإسقاط الأخلاق)', 'الناموس باطل', True),
 
-        # 4. Asserting Christ is God or Trinity as the Da'ee's position
-        (r'\b(jesus|christ)\s+is\s+(the\s+)?(true\s+)?god\b', 'Christ is God asserted as truth', True),
+        # 4. Asserting Christ is God, Sonship, hypostatic divinity, or Trinity as the Da'ee's position
+        (r'\b(jesus|christ)\s+is\s+(?:(?:fully|truly|literally)\s+)?(?:the\s+)?(?:true\s+)?god\b', 'Christ is God asserted as truth', True),
+        (r'\b(?:unique|begotten|eternal)\s+son\s+of\s+god\b', 'Divine Sonship asserted as truth', True),
+        (r'\b(?:hypostatic\s+union|part\s+of\s+the\s+trinity|second\s+person\s+of\s+the\s+trinity|god\s+the\s+son\s+(?:is|became))\b', 'Trinitarian hypostatic union asserted as truth', True),
+        (r'\bjesus\b.{0,45}\b(?:fully\s+divine\s+and\s+fully\s+human|fully\s+god\s+and\s+fully\s+man)\b', 'Trinitarian hypostatic union asserted as truth', True),
+        (r'\b(?:father\s+and\s+(?:the\s+)?son\s+are\s+(?:both\s+)?god|jesus\s+(?:also\s+)?possess(?:es|ed)?\s+divinity)\b', 'Divinity of Jesus asserted as truth', True),
         (r'(المسيح|يسوع|عيسى)\s+هو\s+الله', 'المسيح هو الله', True),
         (r'(الثالوث|التثليث)\s+حق', 'الثالوث حق', True),
+        (r'(?:الابن\s+الوحيد\s+لله|طبيعة\s+إلهية\s+وبشرية\s+كاملة|يسوع\s+(?:إله\s+كامل|يمتلك\s+الطبيعة\s+الإلهية))', 'تقرير عقيدة التثليث أو ألوهية المسيح', True),
 
         # 5. Asserting vicarious crucifixion / atonement as the Da'ee's position
         (r'\b(jesus|christ)\s+died\s+for\s+(our\s+)?sins\b', 'Crucifixion atonement asserted as truth', True),
         (r'(المسيح|يسوع)\s+مات\s+(تكفيراً|فداءً)\s+عن\s+خطايانا', 'المسيح مات فداء عن خطايانا', True),
+
+        # 6. Defending / justifying killing or punishing innocent children / infants / Amalekites
+        (r'\b(?:punish(?:ing|ed)?|kill(?:ing)?|slaughter(?:ing)?|execut(?:ing|e))\s+(?:the\s+)?(?:innocent\s+)?(?:children|infants|babies|amalekites)\b.{0,35}\b(?:was|is)\s+(?:morally\s+)?(?:just|justified|righteous|moral|good|permissible|necessary|not\s+(?:cruel|cruelty|an\s+act\s+of\s+cruelty))', 'Defending killing/punishing innocent children', False),
+        (r'\b(?:killing|slaying|slaughter)\s+(?:of\s+)?(?:innocent\s+)?(?:children|infants|amalekites)\s+(?:was|is)\s+(?:morally\s+)?(?:just|justified|righteous|moral|good|not\s+(?:cruel|an\s+act\s+of\s+cruelty))\b', 'Justifying slaughter of children/infants', False),
+        (r'\bnot\s+an\s+act\s+of\s+cruelty\b.{0,80}\b(?:child|children|infant|infants|kill|slaughter)\b', 'Justifying cruelty against children', False),
+        (r'(?:قتل|عقاب|إعدام|ذبح)\s+(?:الأطفال\s+الأبرياء|الرضع|الأطفال)\s+(?:مبرر|عادل|حكم\s+أخلاقي|ليس\s+قسوة|بسبب\s+خطايا)', 'تبرير قتل أو عقاب الأطفال الأبرياء', False),
+
+        # 7. Pantheistic union / unity with the divine
+        (r'\b(?:becom(?:e|ing)\s+one\s+with\s+the\s+divine|union\s+with\s+the\s+divine|achieving\s+(?:divine\s+)?unity\s+with\s+god|fusion\s+with\s+god)\b', 'Pantheistic union with the divine asserted as truth', True),
+        (r'(?:الاتحاد\s+(?:مع\s+الذات\s+الإلهية|بالله)|الحلول\s+والاتحاد\s+الإلهي)', 'تقرير عقيدة الحلول والاتحاد الإلهي', True),
+
+        # 8. Secular postmodern distortion (endorsing non-binary / same-sex acts as Islamic)
+        (r'\b(?:islam|quran)\s+(?:affirms|accepts|endorses|recognizes)\s+(?:non-binary|multiple\s+genders|same-sex\s+marriage)\b', 'Secular gender/marriage distortion attributed to Islam', False),
+        (r'\bnon-binary\s+(?:gender\s+)?identity\s+is\s+(?:islamic|affirmed|valid\s+in\s+islam)\b', 'Non-binary identity endorsed as Islamic', True),
+        (r'(?:الإسلام|القرآن)\s+(?:يقر|يؤيد|يعترف\s+بـ?)\s*(?:الهوية\s+اللاجندرية|تعدد\s+الأجناس|الزواج\s+المثلي)', 'نسبة الهوية اللاجندرية أو الزواج المثلي إلى الإسلام', False),
     ]
 
     texts_to_check = [
@@ -890,7 +949,7 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
     for pattern, reason, check_refutation in bias_patterns:
         m = re.search(pattern, combined, re.IGNORECASE)
         if m:
-            if check_refutation and _is_refutation_context(combined, m.start()):
+            if check_refutation and _is_refutation_context(combined, m.start(), m.end()):
                 continue
             return reason
     return None
@@ -1018,7 +1077,7 @@ def sanitize_text_field(text: Optional[str], is_arabic: Optional[bool] = None) -
     if not text or not isinstance(text, str):
         return ""
     val = text
-    has_arabic = bool(re.search(r"[\u0600-\u06ff]", val))
+    has_arabic = bool(_ARABIC_CHAR_PRESENT_RE.search(val))
     apply_arabic_cleaning = is_arabic if is_arabic is not None else has_arabic
 
     if apply_arabic_cleaning:
@@ -1037,7 +1096,7 @@ def sanitize_text_field(text: Optional[str], is_arabic: Optional[bool] = None) -
 
     val = _CYRILLIC_RE.sub("", val)
     val = _CJK_RE.sub("", val)
-    return re.sub(r"[ \t]{2,}", " ", val).strip()
+    return _MULTI_SPACE_RE.sub(" ", val).strip()
 
 
 ARABIC_UNIT_SCALAR_KEYS = (
@@ -1052,9 +1111,32 @@ ARABIC_UNIT_SCALAR_KEYS = (
 
 
 def _clean_arabic_unit_str(val: str) -> str:
-    """Sanitizes an Arabic unit string and clears non-Arabic punctuation leftovers (e.g. 'N/A' -> '/')."""
+    """Sanitizes an Arabic unit string and clears degenerate punctuation leftovers."""
     cleaned = sanitize_text_field(val, is_arabic=True)
-    return cleaned if (cleaned and re.search(r"[\u0600-\u06ff]", cleaned)) else ""
+    if not cleaned or len(_ARABIC_LETTERS_RE.findall(cleaned)) < 2:
+        return ""
+    return cleaned
+
+
+def canonicalize_speaker_role(raw_role: Any, fallback: str = "MAIN_DAEE") -> str:
+    """Normalizes free-form/decorated speaker role strings to canonical V2 enum values."""
+    r = str(raw_role or "").strip()
+    if not r:
+        return fallback
+    u = r.upper()
+    if "PEDESTRIAN" in u or "عابرة" in r or "مارة" in r:
+        return "PEDESTRIAN"
+    if "CO_DAEE" in u or "CO-DAEE" in u:
+        return "CO_DAEE"
+    if "INTERLOCUTOR" in u or "GUEST" in u or "السائل" in r or "المستفهم" in r:
+        return "INTERLOCUTOR"
+    # "المحاور" alone is ambiguous/interlocutor unless paired with Da'ee markers
+    r_plain = re.sub(r"[\u064b-\u065f\u0670\u0640]", "", r)
+    if "DAEE" in u or "الداعية" in r_plain or "داعية" in r_plain or "المحاجج" in r_plain:
+        return "MAIN_DAEE"
+    if "المحاور" in r_plain:
+        return "INTERLOCUTOR"
+    return fallback
 
 
 def sanitize_arabic_unit_fields(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1229,7 +1311,10 @@ def _sanitize_and_validate_qa_unit(conn: sqlite3.Connection, unit: Dict[str, Any
                 (tid,)
             ).fetchone() if tid else None
 
-            role = ex_copy.get("role") or (turn["speaker_role"] if turn else "MAIN_DAEE")
+            if turn and _row_field(turn, "speaker_role"):
+                role = canonicalize_speaker_role(_row_field(turn, "speaker_role"), fallback="MAIN_DAEE")
+            else:
+                role = canonicalize_speaker_role(ex_copy.get("role"), fallback="MAIN_DAEE")
             ex_copy["role"] = role
             lbl_en, lbl_ar = resolve_turn_speaker_labels(
                 role=role,
@@ -1379,13 +1464,16 @@ def ingest_extraction_payload(video_id: str, units: List[Dict[str, Any]], db_pat
         conn.execute("DELETE FROM qa_units WHERE video_id = ?", (video_id,))
         for u in units:
             _insert_qa_unit_in_tx(conn, u)
+        actual_count = conn.execute(
+            "SELECT COUNT(*) FROM qa_units WHERE video_id = ?", (video_id,)
+        ).fetchone()[0]
         conn.execute(
             """
             UPDATE videos
             SET qa_count = ?, stage2_status = 'completed', status = 'completed', updated_at = CURRENT_TIMESTAMP
             WHERE video_id = ?
             """,
-            (len(units), video_id),
+            (actual_count, video_id),
         )
     conn.close()
 
@@ -1393,6 +1481,8 @@ def ingest_extraction_payload(video_id: str, units: List[Dict[str, Any]], db_pat
 # ----------------------------------------------------------------------
 # Bilingual Concept Expansion & Search Engine
 # ----------------------------------------------------------------------
+
+_QUERY_PUNCT_STRIP_RE = re.compile(r'[*":^()\[\]{}~/\-?؟.!،,;]+')
 
 BILINGUAL_CONCEPT_SYNONYMS = {
     "حجاب": ["حجاب", "الحجاب", "لباس", "ستر", "المرأة", "نساء", "شريعة", "hijab", "modesty", "women"],
@@ -1461,7 +1551,7 @@ def _extract_meaningful_tokens(cleaned_query: str, min_len: int = 2) -> List[str
 
 
 def sanitize_fts_query(query: str) -> str:
-    cleaned = re.sub(r'[*":^()\[\]{}~/-]', " ", query)
+    cleaned = _QUERY_PUNCT_STRIP_RE.sub(" ", query)
     raw_tokens = _extract_meaningful_tokens(cleaned, min_len=2)
     if not raw_tokens:
         return ""
@@ -1484,7 +1574,7 @@ def _build_search_where(
     params = []
 
     if query and query.strip():
-        cleaned = re.sub(r'[*":^()\[\]{}~/-]', " ", query.strip())
+        cleaned = _QUERY_PUNCT_STRIP_RE.sub(" ", query.strip())
         raw_tokens = _extract_meaningful_tokens(cleaned, min_len=2) or [query.strip()]
 
         all_variants = []
@@ -1630,7 +1720,7 @@ def _hydrate_qa_row(row: sqlite3.Row, serial_num: int) -> Dict[str, Any]:
             d["daee_name_en"] = "Sheikh Uthman Ibn Farooq"
             d["daee_profile_id"] = "daee_uthman"
 
-    # Dynamic dialogue exchange enrichment: ensure localized names and proper timestamps
+    # Dynamic dialogue exchange enrichment: ensure canonical roles, localized names and proper timestamps
     exchanges = d.get("dialogue_exchange") or []
     if isinstance(exchanges, list) and exchanges:
         enriched_ex = []
@@ -1638,12 +1728,19 @@ def _hydrate_qa_row(row: sqlite3.Row, serial_num: int) -> Dict[str, Any]:
             if not isinstance(ex, dict):
                 continue
             ex_copy = dict(ex)
-            role = ex_copy.get("role") or ""
-            is_daee = "DAEE" in role.upper()
-            if not ex_copy.get("speaker_label_ar") or ex_copy.get("speaker_label_ar") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
-                ex_copy["speaker_label_ar"] = (d.get("daee_name_ar") or "الداعية المحاور") if is_daee else "المحاور"
-            if not ex_copy.get("speaker_label_en") or ex_copy.get("speaker_label_en") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
-                ex_copy["speaker_label_en"] = (d.get("daee_name_en") or "Main Da'ee") if is_daee else "Interlocutor"
+            role = canonicalize_speaker_role(ex_copy.get("role") or "", fallback="INTERLOCUTOR")
+            ex_copy["role"] = role
+            is_daee = role in ("MAIN_DAEE", "CO_DAEE")
+            if is_daee:
+                if not ex_copy.get("speaker_label_ar") or ex_copy.get("speaker_label_ar") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE", "المحاور", "المحاور 1", "المحاور 2"):
+                    ex_copy["speaker_label_ar"] = d.get("daee_name_ar") or "الداعية المحاور"
+                if not ex_copy.get("speaker_label_en") or ex_copy.get("speaker_label_en") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE", "Interlocutor", "Interlocutor 1", "Interlocutor 2"):
+                    ex_copy["speaker_label_en"] = d.get("daee_name_en") or "Main Da'ee"
+            else:
+                if not ex_copy.get("speaker_label_ar") or ex_copy.get("speaker_label_ar") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
+                    ex_copy["speaker_label_ar"] = "المحاور"
+                if not ex_copy.get("speaker_label_en") or ex_copy.get("speaker_label_en") in ("MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"):
+                    ex_copy["speaker_label_en"] = "Interlocutor"
             if not ex_copy.get("timestamp_formatted"):
                 ex_copy["timestamp_formatted"] = d.get("timestamp_formatted", "00:00")
             enriched_ex.append(ex_copy)
@@ -1709,12 +1806,18 @@ def get_categories_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, A
 
     ordered_pillars = [
         "Comparative Religion & Christianity",
+        "Textual Preservation & Manuscripts",
         "Theology & God's Existence",
         "Prophethood & Quran",
         "Shariah & Social Inquiries",
         "Problem of Evil & Suffering",
         "Epistemology & Science",
-        "Objective Morality & Ethics"
+        "Objective Morality & Ethics",
+        "Comparative Religion & Judaism",
+        "Comparative Religion & Eastern Traditions",
+        "Hadith & Sunnah Preservation",
+        "Islamic History & Civilizations",
+        "Eschatology & Free Will",
     ]
 
     res = []
@@ -1752,7 +1855,7 @@ def get_interlocutor_breakdown(db_path: Optional[Path] = None) -> List[Dict[str,
 def get_speakers_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Returns identified Da'ee speaker breakdown across extracted Q&As and diarized videos."""
     conn = get_db_connection(db_path)
-    rows = conn.execute("""
+    qa_rows = conn.execute("""
         SELECT
             COALESCE(NULLIF(daee_profile_id, ''), daee_name_en) AS speaker_key,
             MAX(daee_name_en) AS name_en,
@@ -1766,10 +1869,39 @@ def get_speakers_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, Any
         ORDER BY qa_count DESC
     """).fetchall()
 
-    results = [dict(r) for r in rows]
+    vs_rows = conn.execute("""
+        SELECT
+            COALESCE(NULLIF(profile_id, ''), display_name_en) AS speaker_key,
+            MAX(display_name_en) AS name_en,
+            MAX(display_name_ar) AS name_ar,
+            0 AS qa_count,
+            COUNT(DISTINCT video_id) AS videos_count
+        FROM video_speakers
+        WHERE role IN ('MAIN_DAEE', 'CO_DAEE')
+          AND ((profile_id IS NOT NULL AND profile_id != '') OR (display_name_en != '' AND display_name_en != 'Main Da''ee'))
+        GROUP BY speaker_key
+        ORDER BY videos_count DESC
+    """).fetchall()
+
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for r in qa_rows:
+        d = dict(r)
+        by_key[d["speaker_key"]] = d
+    for r in vs_rows:
+        d = dict(r)
+        k = d["speaker_key"]
+        if k in by_key:
+            by_key[k]["videos_count"] = max(int(by_key[k]["videos_count"] or 0), int(d["videos_count"] or 0))
+            if not by_key[k].get("name_en"):
+                by_key[k]["name_en"] = d["name_en"]
+            if not by_key[k].get("name_ar"):
+                by_key[k]["name_ar"] = d["name_ar"]
+        else:
+            by_key[k] = d
+
+    results = sorted(by_key.values(), key=lambda x: (int(x.get("qa_count") or 0), int(x.get("videos_count") or 0)), reverse=True)
     if not results:
-        # Fallback to stage-1 diarized video_speakers if stage-2 hasn't populated qa_units yet
-        vs_rows = conn.execute("""
+        fallback_rows = conn.execute("""
             SELECT
                 COALESCE(NULLIF(profile_id, ''), display_name_en) AS speaker_key,
                 MAX(display_name_en) AS name_en,
@@ -1782,7 +1914,7 @@ def get_speakers_breakdown(db_path: Optional[Path] = None) -> List[Dict[str, Any
             GROUP BY speaker_key
             ORDER BY videos_count DESC
         """).fetchall()
-        results = [dict(r) for r in vs_rows]
+        results = [dict(r) for r in fallback_rows]
 
     conn.close()
     return results
@@ -1819,19 +1951,26 @@ def list_videos(
     total = conn.execute(f"SELECT COUNT(*) FROM videos v WHERE {where_sql}", params).fetchone()[0]
 
     sql = f"""
-        SELECT v.*
+        SELECT
+            v.*,
+            (SELECT COUNT(*) FROM qa_units q WHERE q.video_id = v.video_id) AS live_qa_count
         FROM videos v
         WHERE {where_sql}
         ORDER BY
             CASE WHEN v.stage1_status = 'completed' THEN 0 ELSE 1 END ASC,
-            v.qa_count DESC,
+            live_qa_count DESC,
             v.priority_score DESC,
             v.catalog_order ASC
         LIMIT ? OFFSET ?
     """
     rows = conn.execute(sql, params + [limit, offset]).fetchall()
     conn.close()
-    return {"videos": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
+    videos_out = []
+    for r in rows:
+        vd = dict(r)
+        vd["qa_count"] = int(vd.pop("live_qa_count", vd.get("qa_count", 0)) or 0)
+        videos_out.append(vd)
+    return {"videos": videos_out, "total": total, "limit": limit, "offset": offset}
 
 
 def get_video_scenario(
@@ -1875,8 +2014,11 @@ def get_video_scenario(
     qas = [_hydrate_qa_row(r, idx + 1) for idx, r in enumerate(qa_rows)]
     conn.close()
 
+    v_dict = dict(v_row)
+    v_dict["qa_count"] = len(qas)
+
     return {
-        "video": dict(v_row),
+        "video": v_dict,
         "speakers": speakers,
         "turns": turns,
         "qa_units": qas,
@@ -1949,7 +2091,7 @@ def get_stats(db_path: Optional[Path] = None) -> Dict[str, Any]:
     total_turns = conn.execute("SELECT COUNT(*) FROM scenario_turns").fetchone()[0]
     total_spoken_words = conn.execute("SELECT COALESCE(SUM(spoken_words_count), 0) FROM videos").fetchone()[0]
     total_duration_sec = conn.execute("SELECT COALESCE(SUM(duration_sec), 0) FROM videos WHERE stage1_status = 'completed'").fetchone()[0]
-    overlaps_resolved = conn.execute("SELECT COUNT(DISTINCT overlap_group_id) FROM scenario_turns WHERE is_overlap = 1 AND overlap_group_id != ''").fetchone()[0]
+    overlaps_resolved = conn.execute("SELECT COUNT(DISTINCT video_id || ':' || overlap_group_id) FROM scenario_turns WHERE is_overlap = 1 AND overlap_group_id != ''").fetchone()[0]
     pedestrian_isolated = conn.execute("SELECT COUNT(*) FROM scenario_turns WHERE is_pedestrian_interruption = 1").fetchone()[0]
     speakers_identified = conn.execute("SELECT COUNT(DISTINCT COALESCE(NULLIF(profile_id, ''), video_id || ':' || speaker_id)) FROM video_speakers WHERE role != 'PEDESTRIAN'").fetchone()[0]
     conn.close()

@@ -29,6 +29,9 @@ from core.vocal_cleaner import (
     WarmDemucsCleaner,
     clean_vocals_m2,
     ensure_local_leveled_16k_wav,
+    ensure_local_diarization_16k_wav,
+    maybe_restore_diarization_wav,
+    ensure_local_asr_16k_wav,
     read_wav_float32,
 )
 from core.overlap_resolver import (
@@ -342,11 +345,14 @@ def build_turns_from_aligned_words(
         prev = cur_words[-1]
         speaker_changed = w["speaker_id"] != prev["speaker_id"]
         gap_ms = w["start_ms"] - prev["end_ms"]
-        ended_sentence = prev["word"].rstrip().endswith(sent_ends)
+        prev_stripped = prev["word"].rstrip()
+        ended_sentence = prev_stripped.endswith(sent_ends)
+        ended_question = prev_stripped.endswith(("?", "؟"))
 
         should_split = (
             speaker_changed
-            or (ended_sentence and gap_ms >= pause_split_ms and len(cur_words) >= 12)
+            or (ended_question and gap_ms >= 800 and len(cur_words) >= 5)
+            or (ended_sentence and gap_ms >= pause_split_ms and len(cur_words) >= 10)
             or (ended_sentence and len(cur_words) >= max_turn_words)
             or len(cur_words) >= (max_turn_words + 30)
         )
@@ -559,13 +565,32 @@ class WarmASRAlignmentEngine:
             return [], forced_language or "en"
         audio_dur_s = float(len(audio_waveform)) / 16000.0
 
-        # Detect language on first 45s if not forced
+        # Detect language using multi-window majority vote (start, middle, end) so Arabic intros
+        # in English street debates never flip the entire transcript into Arabic Whisper hallucinations.
         lang = forced_language
         if not lang:
             try:
-                probe_audio = audio_waveform[: min(len(audio_waveform), 16000 * 45)]
-                _, info_probe = self._whisper.transcribe(probe_audio, vad_filter=True)
-                lang = info_probe.language or "en"
+                sr_len = len(audio_waveform)
+                win_len = 16000 * 30
+                probe_slices: List[Tuple[np.ndarray, float]] = []
+                if sr_len <= 16000 * 50:
+                    probe_slices.append((audio_waveform, 1.0))
+                elif sr_len < 16000 * 90:
+                    probe_slices.append((audio_waveform[:win_len], 1.0))
+                    probe_slices.append((audio_waveform[max(0, sr_len - win_len):], 1.2))
+                else:
+                    mid = sr_len // 2
+                    probe_slices.append((audio_waveform[:win_len], 1.0))
+                    probe_slices.append((audio_waveform[max(0, mid - win_len // 2):min(sr_len, mid + win_len // 2)], 1.3))
+                    probe_slices.append((audio_waveform[max(0, sr_len - int(16000 * 45)):max(0, sr_len - int(16000 * 15))], 1.2))
+
+                lang_scores: Dict[str, float] = {}
+                for p_wave, base_w in probe_slices:
+                    _, info_probe = self._whisper.transcribe(p_wave, vad_filter=True)
+                    p_lang = getattr(info_probe, "language", None) or "en"
+                    p_prob = float(getattr(info_probe, "language_probability", 1.0) or 1.0)
+                    lang_scores[p_lang] = lang_scores.get(p_lang, 0.0) + (base_w * max(0.2, p_prob))
+                lang = max(lang_scores.items(), key=lambda x: x[1])[0] if lang_scores else "en"
             except Exception as e:
                 print(f"   [!] Language probe note ({e}); defaulting to 'en'", flush=True)
                 lang = "en"
@@ -686,17 +711,12 @@ class WarmASRAlignmentEngine:
         if not full_text:
             return [], lang
 
-        # Run CTC Forced Aligner for exact phonetic word boundaries
+        # Run CTC Forced Aligner for exact phonetic word boundaries.
+        # C++ forced_align indexes backPtr_seek with signed 32-bit int; long audio (>900s or >1800 words)
+        # is split into <=135s / <=260-word windows at natural speech pauses so every debate gets
+        # exact phonetic alignment with zero int32 overflow.
         iso3 = LANG_ISO3.get(lang)
-        # C++ forced_align (align_ops) safety guard:
-        # In ctc_forced_aligner's C++ dynamic programming implementation (main.cpp), backPtr_seek
-        # is indexed using a 32-bit signed integer (`int backPtr_idx`).
-        # On long audio (> 15 minutes or > 1800 words), (2*L + 1) * (T - L) reaches billions of cells,
-        # overflowing 32-bit signed integer indexing and causing an uncatchable C++ SIGSEGV segfault that crashes Python.
-        # For long audio, Faster-Whisper's native DTW cross-attention word timestamps are already 100% complete,
-        # high-precision (~50ms), anchored to VAD segment boundaries, and completely immune to memory/overflow crashes.
-        too_long_for_monolithic_ctc = bool(audio_dur_s > 900.0 or len(full_text.split()) > 1800)
-        if use_ctc_aligner and iso3 and not too_long_for_monolithic_ctc:
+        if use_ctc_aligner and iso3:
             try:
                 from ctc_forced_aligner import (
                     generate_emissions,
@@ -712,235 +732,252 @@ class WarmASRAlignmentEngine:
                 except (TypeError, ValueError):
                     ratio = 320
                 # postprocess_results() expects the frame stride in MILLISECONDS (20 ms for wav2vec2/MMS)
-                # and divides by 1000 internally to return seconds.
                 stride = float(ratio) * 1000.0 / 16000.0
-                emissions = None
 
-                if hasattr(self._align_model, "run"):
-                    try:
-                        wav_tensor = torch.from_numpy(audio_waveform).to(self._align_model.dtype).to(self._align_model.device)
-                        emissions, stride = generate_emissions(
-                            self._align_model,
-                            wav_tensor,
-                            batch_size=max(8, min(16, self.batch_size)),
-                        )
-                        del wav_tensor
-                    except Exception:
+                def _ctc_align_slice(
+                    slice_wave: np.ndarray,
+                    slice_text: str,
+                    time_offset_s: float = 0.0,
+                ) -> Optional[List[Dict[str, Any]]]:
+                    slice_dur_s = float(len(slice_wave)) / 16000.0
+                    emissions = None
+
+                    if hasattr(self._align_model, "run"):
                         try:
-                            emissions, stride = generate_emissions(
+                            wav_tensor = torch.from_numpy(slice_wave).to(self._align_model.dtype).to(self._align_model.device)
+                            emissions, _ = generate_emissions(
                                 self._align_model,
-                                audio_waveform,
+                                wav_tensor,
                                 batch_size=max(8, min(16, self.batch_size)),
                             )
+                            del wav_tensor
                         except Exception:
-                            emissions = None
+                            try:
+                                emissions, _ = generate_emissions(
+                                    self._align_model,
+                                    slice_wave,
+                                    batch_size=max(8, min(16, self.batch_size)),
+                                )
+                            except Exception:
+                                emissions = None
 
-                if emissions is None:
-                    # HuggingFace AutoModelForCTC (Wav2Vec2ForCTC) chunked/batched PyTorch forward pass
-                    # Chunk into 30s segments (480,000 samples) and batch up to 8 full chunks per GPU forward pass
-                    chunk_size = 16000 * 30
-                    total_len = len(audio_waveform)
-                    if total_len <= chunk_size:
-                        wav_tensor = torch.from_numpy(audio_waveform)
-                        if hasattr(self._align_model, "dtype"):
-                            wav_tensor = wav_tensor.to(self._align_model.dtype)
-                        if hasattr(self._align_model, "device"):
-                            wav_tensor = wav_tensor.to(self._align_model.device)
-                        if hasattr(wav_tensor, "ndim") and wav_tensor.ndim == 1 and hasattr(wav_tensor, "unsqueeze"):
-                            wav_tensor = wav_tensor.unsqueeze(0)
-                        with torch.inference_mode():
-                            logits = self._align_model(wav_tensor).logits
-                            emissions = torch.log_softmax(logits, dim=-1)
-                        del wav_tensor
-                    else:
-                        emissions_list = []
-                        ctc_chunk_batch = min(8, max(1, self.batch_size // 2)) if (self.batch_size > 1 and self.device == "cuda") else 1
-                        offsets = list(range(0, total_len, chunk_size))
-                        idx_off = 0
-                        while idx_off < len(offsets):
-                            # Batch multiple full-length 30s chunks together when ctc_chunk_batch > 1
-                            full_batch_chunks = []
-                            while (
-                                ctc_chunk_batch > 1
-                                and len(full_batch_chunks) < ctc_chunk_batch
-                                and idx_off < len(offsets)
-                                and (offsets[idx_off] + chunk_size) <= total_len
-                            ):
-                                off = offsets[idx_off]
-                                # +80 trailing samples so wav2vec2's 400-sample receptive field yields exactly
-                                # chunk_size/320 = 1500 frames (otherwise 1499 -> 20 ms drift per 30 s chunk).
-                                full_batch_chunks.append(np.pad(audio_waveform[off : off + chunk_size], (0, _CTC_RF_PAD)))
-                                idx_off += 1
-
-                            if len(full_batch_chunks) > 1:
-                                stacked_np = np.stack(full_batch_chunks, axis=0)
-                                b_tensor = torch.from_numpy(stacked_np)
-                                if hasattr(self._align_model, "dtype"):
-                                    b_tensor = b_tensor.to(self._align_model.dtype)
-                                if hasattr(self._align_model, "device"):
-                                    b_tensor = b_tensor.to(self._align_model.device)
-                                with torch.inference_mode():
-                                    b_logits = self._align_model(b_tensor).logits
-                                    b_em = torch.log_softmax(b_logits, dim=-1)
-                                    if hasattr(b_em, "reshape") and hasattr(b_em, "shape") and len(b_em.shape) == 3:
-                                        b_em = b_em.reshape(1, b_em.shape[0] * b_em.shape[1], b_em.shape[2])
-                                    if hasattr(b_em, "cpu"):
-                                        b_em = b_em.cpu()
-                                emissions_list.append(b_em)
-                                del b_tensor, b_logits, stacked_np, full_batch_chunks
-                                continue
-
-                            # Single chunk path (either ctc_chunk_batch == 1, or 1 full chunk, or trailing partial chunk)
-                            if full_batch_chunks:
-                                chunk = full_batch_chunks[0]  # already receptive-field padded
-                            else:
-                                offset = offsets[idx_off]
-                                idx_off += 1
-                                chunk = audio_waveform[offset : min(offset + chunk_size, total_len)]
-                                rem = len(chunk) % 320
-                                if rem != 0:
-                                    chunk = np.pad(chunk, (0, 320 - rem))
-                                # Pad receptive field so frames == len(chunk) / 320 exactly (no cumulative drift)
-                                chunk = np.pad(chunk, (0, _CTC_RF_PAD))
-                            c_tensor = torch.from_numpy(chunk)
+                    if emissions is None:
+                        chunk_size = 16000 * 30
+                        total_len = len(slice_wave)
+                        if total_len <= chunk_size:
+                            wav_tensor = torch.from_numpy(slice_wave)
                             if hasattr(self._align_model, "dtype"):
-                                c_tensor = c_tensor.to(self._align_model.dtype)
+                                wav_tensor = wav_tensor.to(self._align_model.dtype)
                             if hasattr(self._align_model, "device"):
-                                c_tensor = c_tensor.to(self._align_model.device)
-                            if hasattr(c_tensor, "ndim") and c_tensor.ndim == 1 and hasattr(c_tensor, "unsqueeze"):
-                                c_tensor = c_tensor.unsqueeze(0)
+                                wav_tensor = wav_tensor.to(self._align_model.device)
+                            if hasattr(wav_tensor, "ndim") and wav_tensor.ndim == 1 and hasattr(wav_tensor, "unsqueeze"):
+                                wav_tensor = wav_tensor.unsqueeze(0)
                             with torch.inference_mode():
-                                c_logits = self._align_model(c_tensor).logits
-                                c_em = torch.log_softmax(c_logits, dim=-1)
-                                if hasattr(c_em, "cpu"):
-                                    c_em = c_em.cpu()
-                            emissions_list.append(c_em)
-                            del c_tensor, c_logits
-                        if hasattr(torch, "cat") and emissions_list:
-                            emissions = torch.cat(emissions_list, dim=1)
-                            if total_len % 320 != 0 and hasattr(emissions, "__getitem__"):
-                                emissions = emissions[:, : (total_len // 320), :]
-                        elif emissions_list:
-                            emissions = emissions_list[0]
-                        del emissions_list
+                                logits = self._align_model(wav_tensor).logits
+                                emissions = torch.log_softmax(logits, dim=-1)
+                            del wav_tensor
+                        else:
+                            emissions_list = []
+                            ctc_chunk_batch = min(8, max(1, self.batch_size // 2)) if (self.batch_size > 1 and self.device == "cuda") else 1
+                            offsets = list(range(0, total_len, chunk_size))
+                            idx_off = 0
+                            while idx_off < len(offsets):
+                                full_batch_chunks = []
+                                while (
+                                    ctc_chunk_batch > 1
+                                    and len(full_batch_chunks) < ctc_chunk_batch
+                                    and idx_off < len(offsets)
+                                    and (offsets[idx_off] + chunk_size) <= total_len
+                                ):
+                                    off = offsets[idx_off]
+                                    full_batch_chunks.append(np.pad(slice_wave[off : off + chunk_size], (0, _CTC_RF_PAD)))
+                                    idx_off += 1
 
-                del audio_waveform
+                                if len(full_batch_chunks) > 1:
+                                    stacked_np = np.stack(full_batch_chunks, axis=0)
+                                    b_tensor = torch.from_numpy(stacked_np)
+                                    if hasattr(self._align_model, "dtype"):
+                                        b_tensor = b_tensor.to(self._align_model.dtype)
+                                    if hasattr(self._align_model, "device"):
+                                        b_tensor = b_tensor.to(self._align_model.device)
+                                    with torch.inference_mode():
+                                        b_logits = self._align_model(b_tensor).logits
+                                        b_em = torch.log_softmax(b_logits, dim=-1)
+                                        if hasattr(b_em, "reshape") and hasattr(b_em, "shape") and len(b_em.shape) == 3:
+                                            b_em = b_em.reshape(1, b_em.shape[0] * b_em.shape[1], b_em.shape[2])
+                                        if hasattr(b_em, "cpu"):
+                                            b_em = b_em.cpu()
+                                    emissions_list.append(b_em)
+                                    del b_tensor, b_logits, stacked_np, full_batch_chunks
+                                    continue
 
-                # Normalize emissions to a CPU float32 NumPy (T, C) array. The installed PyPI
-                # `ctc-forced-aligner` (ONNX fork) asserts `emissions.dtype == numpy.float32`, so passing a
-                # torch.Tensor ALWAYS failed with "log_probs must be float32" and silently fell back to
-                # Whisper DTW word timestamps.
-                if isinstance(emissions, (list, tuple)):
-                    emissions = [e.cpu().float() if hasattr(e, "cpu") and hasattr(e, "float") else e for e in emissions]
-                else:
-                    emissions = _ctc_emissions_to_numpy_f32(emissions)
+                                if full_batch_chunks:
+                                    chunk = full_batch_chunks[0]
+                                else:
+                                    offset = offsets[idx_off]
+                                    idx_off += 1
+                                    chunk = slice_wave[offset : min(offset + chunk_size, total_len)]
+                                    rem = len(chunk) % 320
+                                    if rem != 0:
+                                        chunk = np.pad(chunk, (0, 320 - rem))
+                                    chunk = np.pad(chunk, (0, _CTC_RF_PAD))
+                                c_tensor = torch.from_numpy(chunk)
+                                if hasattr(self._align_model, "dtype"):
+                                    c_tensor = c_tensor.to(self._align_model.dtype)
+                                if hasattr(self._align_model, "device"):
+                                    c_tensor = c_tensor.to(self._align_model.device)
+                                if hasattr(c_tensor, "ndim") and c_tensor.ndim == 1 and hasattr(c_tensor, "unsqueeze"):
+                                    c_tensor = c_tensor.unsqueeze(0)
+                                with torch.inference_mode():
+                                    c_logits = self._align_model(c_tensor).logits
+                                    c_em = torch.log_softmax(c_logits, dim=-1)
+                                    if hasattr(c_em, "cpu"):
+                                        c_em = c_em.cpu()
+                                emissions_list.append(c_em)
+                                del c_tensor, c_logits
+                            if hasattr(torch, "cat") and emissions_list:
+                                emissions = torch.cat(emissions_list, dim=1)
+                                if total_len % 320 != 0 and hasattr(emissions, "__getitem__"):
+                                    emissions = emissions[:, : (total_len // 320), :]
+                            elif emissions_list:
+                                emissions = emissions_list[0]
+                            del emissions_list
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-                tokens_starred, text_starred = preprocess_text(
-                    full_text,
-                    romanize=True,
-                    language=iso3,
-                )
-
-                # Ensure `<star>` column is appended to emissions when produced by direct AutoModelForCTC forward pass:
-                # mms-300m-1130-forced-aligner outputs 31 classes (0..30), and get_alignments maps `<star>` to index 31.
-                def _append_star_column(em_obj):
-                    try:
-                        if isinstance(em_obj, np.ndarray):
-                            em_obj = em_obj.astype(np.float32, copy=False)
-                            if em_obj.ndim == 2:
-                                star_col = np.zeros((em_obj.shape[0], 1), dtype=np.float32)
-                                return np.ascontiguousarray(np.concatenate([em_obj, star_col], axis=-1))
-                        elif isinstance(em_obj, torch.Tensor):
-                            em_obj = em_obj.float()
-                            if em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
-                                star_col = torch.zeros((em_obj.size(0), 1), dtype=torch.float32, device=em_obj.device)
-                                return torch.cat([em_obj, star_col], dim=-1)
-                    except Exception:
-                        pass
-                    return em_obj
-
-                if "<star>" in tokens_starred:
-                    vocab_dict = None
-                    if isinstance(self._align_tokenizer, dict):
-                        vocab_dict = self._align_tokenizer
-                    elif hasattr(self._align_tokenizer, "get_vocab"):
-                        try:
-                            vocab_dict = self._align_tokenizer.get_vocab()
-                        except Exception:
-                            vocab_dict = None
-                    if isinstance(vocab_dict, dict) and "<star>" not in vocab_dict:
-                        em_cols = emissions.shape[-1] if hasattr(emissions, "shape") and len(emissions.shape) >= 2 else None
-                        if em_cols == len(vocab_dict):
-                            emissions = _append_star_column(emissions)
-
-                def _run_alignment(em_obj):
-                    """
-                    Calls get_alignments with NumPy float32 first (PyPI ONNX fork API); if the installed package is
-                    the upstream torch API (`emissions.is_cpu`), retries with a float32 torch.Tensor view.
-                    """
-                    try:
-                        return get_alignments(em_obj, tokens_starred, self._align_tokenizer)
-                    except AttributeError as ae:
-                        if "is_cpu" in str(ae) and isinstance(em_obj, np.ndarray) and hasattr(torch, "from_numpy"):
-                            return get_alignments(torch.from_numpy(em_obj), tokens_starred, self._align_tokenizer)
-                        raise
-
-                # Secondary safety check before invoking C++ align_sequences:
-                T_frames = int(emissions.shape[0]) if (hasattr(emissions, "shape") and len(emissions.shape) >= 1) else 0
-                L_tokens = len(tokens_starred)
-                S_states = 2 * L_tokens + 1
-                matrix_cells = (S_states + 1) * max(1, T_frames - L_tokens)
-                if matrix_cells > 25_000_000:
-                    return fallback_words, lang
-
-                try:
-                    segments, scores, blank_token = _run_alignment(emissions)
-                except Exception as align_err:
-                    err_msg = str(align_err).lower()
-                    if "within [0," in err_msg or "targets" in err_msg:
-                        emissions = _append_star_column(emissions)
-                        segments, scores, blank_token = _run_alignment(emissions)
-                    elif "float32" in err_msg or "log_probs" in err_msg:
-                        if hasattr(emissions, "float"):
-                            emissions = emissions.float()
-                        elif isinstance(emissions, np.ndarray):
-                            emissions = np.ascontiguousarray(emissions, dtype=np.float32)
-                        segments, scores, blank_token = _run_alignment(emissions)
+                    if isinstance(emissions, (list, tuple)):
+                        emissions = [e.cpu().float() if hasattr(e, "cpu") and hasattr(e, "float") else e for e in emissions]
                     else:
-                        raise
+                        emissions = _ctc_emissions_to_numpy_f32(emissions)
 
-                if hasattr(scores, "cpu"):
-                    scores = scores.cpu()
-                if hasattr(scores, "numpy"):
-                    scores = scores.numpy()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-                spans = get_spans(tokens_starred, segments, blank_token)
-                word_timestamps = postprocess_results(text_starred, spans, stride, scores)
-                # Normalize to the {'word','text','start','end'} (seconds) schema used downstream
-                normalized_words: List[Dict[str, Any]] = []
-                for w in word_timestamps or []:
-                    if not isinstance(w, dict):
-                        continue
-                    w_txt = str(w.get("word") or w.get("text") or "").strip()
-                    if not w_txt:
-                        continue
-                    nw = dict(w)
-                    nw["word"] = w_txt
-                    nw["text"] = w_txt
-                    nw["start"] = float(w.get("start", 0.0))
-                    nw["end"] = float(w.get("end", nw["start"]))
-                    normalized_words.append(nw)
-                if not normalized_words:
-                    raise RuntimeError("CTC aligner returned no words")
-                # Sanity guard: aligned timeline must fit inside the audio (catches stride/unit regressions)
-                if normalized_words[-1]["end"] > audio_dur_s * 1.05 + 1.0:
-                    raise RuntimeError(
-                        f"CTC timestamps exceed audio length ({normalized_words[-1]['end']:.1f}s > {audio_dur_s:.1f}s)"
+                    tokens_starred, text_starred = preprocess_text(
+                        slice_text,
+                        romanize=True,
+                        language=iso3,
                     )
-                return normalized_words, lang
+
+                    def _append_star_column(em_obj):
+                        try:
+                            if isinstance(em_obj, np.ndarray):
+                                em_obj = em_obj.astype(np.float32, copy=False)
+                                if em_obj.ndim == 2:
+                                    star_col = np.zeros((em_obj.shape[0], 1), dtype=np.float32)
+                                    return np.ascontiguousarray(np.concatenate([em_obj, star_col], axis=-1))
+                            elif isinstance(em_obj, torch.Tensor):
+                                em_obj = em_obj.float()
+                                if em_obj.ndim == 2 and hasattr(torch, "zeros") and hasattr(torch, "cat"):
+                                    star_col = torch.zeros((em_obj.size(0), 1), dtype=torch.float32, device=em_obj.device)
+                                    return torch.cat([em_obj, star_col], dim=-1)
+                        except Exception:
+                            pass
+                        return em_obj
+
+                    if "<star>" in tokens_starred:
+                        vocab_dict = None
+                        if isinstance(self._align_tokenizer, dict):
+                            vocab_dict = self._align_tokenizer
+                        elif hasattr(self._align_tokenizer, "get_vocab"):
+                            try:
+                                vocab_dict = self._align_tokenizer.get_vocab()
+                            except Exception:
+                                vocab_dict = None
+                        if isinstance(vocab_dict, dict) and "<star>" not in vocab_dict:
+                            em_cols = emissions.shape[-1] if hasattr(emissions, "shape") and len(emissions.shape) >= 2 else None
+                            if em_cols == len(vocab_dict):
+                                emissions = _append_star_column(emissions)
+
+                    def _run_alignment(em_obj):
+                        try:
+                            return get_alignments(em_obj, tokens_starred, self._align_tokenizer)
+                        except AttributeError as ae:
+                            if "is_cpu" in str(ae) and isinstance(em_obj, np.ndarray) and hasattr(torch, "from_numpy"):
+                                return get_alignments(torch.from_numpy(em_obj), tokens_starred, self._align_tokenizer)
+                            raise
+
+                    T_frames = int(emissions.shape[0]) if (hasattr(emissions, "shape") and len(emissions.shape) >= 1) else 0
+                    L_tokens = len(tokens_starred)
+                    S_states = 2 * L_tokens + 1
+                    matrix_cells = (S_states + 1) * max(1, T_frames - L_tokens)
+                    if matrix_cells > 25_000_000:
+                        return None
+
+                    try:
+                        segments, scores, blank_token = _run_alignment(emissions)
+                    except Exception as align_err:
+                        err_msg = str(align_err).lower()
+                        if "within [0," in err_msg or "targets" in err_msg:
+                            emissions = _append_star_column(emissions)
+                            segments, scores, blank_token = _run_alignment(emissions)
+                        elif "float32" in err_msg or "log_probs" in err_msg:
+                            if hasattr(emissions, "float"):
+                                emissions = emissions.float()
+                            elif isinstance(emissions, np.ndarray):
+                                emissions = np.ascontiguousarray(emissions, dtype=np.float32)
+                            segments, scores, blank_token = _run_alignment(emissions)
+                        else:
+                            raise
+
+                    if hasattr(scores, "cpu"):
+                        scores = scores.cpu()
+                    if hasattr(scores, "numpy"):
+                        scores = scores.numpy()
+
+                    spans = get_spans(tokens_starred, segments, blank_token)
+                    word_timestamps = postprocess_results(text_starred, spans, stride, scores)
+                    normalized_words: List[Dict[str, Any]] = []
+                    for w in word_timestamps or []:
+                        if not isinstance(w, dict):
+                            continue
+                        w_txt = str(w.get("word") or w.get("text") or "").strip()
+                        if not w_txt:
+                            continue
+                        nw = dict(w)
+                        nw["word"] = w_txt
+                        nw["text"] = w_txt
+                        nw["start"] = float(w.get("start", 0.0)) + time_offset_s
+                        nw["end"] = float(w.get("end", float(w.get("start", 0.0)))) + time_offset_s
+                        normalized_words.append(nw)
+                    if not normalized_words:
+                        return None
+                    if (normalized_words[-1]["end"] - time_offset_s) > slice_dur_s * 1.05 + 1.0:
+                        raise RuntimeError(
+                            f"CTC timestamps exceed audio slice ({normalized_words[-1]['end'] - time_offset_s:.1f}s > {slice_dur_s:.1f}s)"
+                        )
+                    return normalized_words
+
+                too_long_for_monolithic_ctc = bool(audio_dur_s > 900.0 or len(full_text.split()) > 1800)
+                if not too_long_for_monolithic_ctc:
+                    single_aligned = _ctc_align_slice(audio_waveform, full_text, 0.0)
+                    if single_aligned:
+                        return single_aligned, lang
+
+                if fallback_words:
+                    # Pause-aware chunked CTC alignment across long debates (<=135s / <=260 words per window)
+                    chunked_results: List[Dict[str, Any]] = []
+                    cur_batch: List[Dict[str, Any]] = []
+                    for wi, fw in enumerate(fallback_words):
+                        cur_batch.append(fw)
+                        batch_dur = float(cur_batch[-1]["end"]) - float(cur_batch[0]["start"])
+                        next_gap = (float(fallback_words[wi + 1]["start"]) - float(fw["end"])) if (wi + 1) < len(fallback_words) else 9.9
+                        hit_pause = len(cur_batch) >= 160 and next_gap >= 0.35
+                        hit_cap = len(cur_batch) >= 260 or batch_dur >= 135.0
+                        if hit_pause or hit_cap or wi == len(fallback_words) - 1:
+                            t_start_s = max(0.0, float(cur_batch[0]["start"]) - 0.25)
+                            t_end_s = min(audio_dur_s, float(cur_batch[-1]["end"]) + 0.25)
+                            s_i = int(t_start_s * 16000)
+                            e_i = min(len(audio_waveform), int(t_end_s * 16000))
+                            sub_text = " ".join(x["word"] for x in cur_batch).strip()
+                            sub_aligned = None
+                            if (e_i - s_i) >= 3200 and sub_text:
+                                try:
+                                    sub_aligned = _ctc_align_slice(audio_waveform[s_i:e_i], sub_text, time_offset_s=t_start_s)
+                                except Exception:
+                                    sub_aligned = None
+                            chunked_results.extend(sub_aligned if sub_aligned else cur_batch)
+                            cur_batch = []
+                    if chunked_results:
+                        return chunked_results, lang
             except Exception as e:
                 print(f"   [!] CTC alignment fallback note ({lang}): {e}")
 
@@ -1059,12 +1096,13 @@ class Stage1AudioPipeline:
 
         local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_pb_{vid}_"))
         try:
-            leveled_wav, _ = ensure_local_leveled_16k_wav(vid, self.workspace, local_tmp)
+            base_wav, rms_timeline = ensure_local_leveled_16k_wav(vid, self.workspace, local_tmp)
+            diar_wav, _ = maybe_restore_diarization_wav(vid, base_wav, rms_timeline, self.workspace, local_tmp)
 
             print(f"   [3/5] NeMo MSDD Diarization & TitaNet (M3)....... ", end="", flush=True)
             rttm_segs, centroids, overlaps = run_diarization_m3(
                 video_id=vid,
-                leveled_16k_wav=leveled_wav,
+                leveled_16k_wav=diar_wav,
                 workspace=self.workspace,
                 diarizer=self.diarizer,
                 is_short=bool(video_record.get("is_short")),
@@ -1076,7 +1114,7 @@ class Stage1AudioPipeline:
             print(f"   [4/5] MossFormer2 Overlap Separation (M4)........ ", end="", flush=True)
             sep_manifest = run_overlap_separation_m4(
                 video_id=vid,
-                leveled_16k_wav=leveled_wav,
+                leveled_16k_wav=diar_wav,
                 overlaps=overlaps,
                 centroids=centroids,
                 workspace=self.workspace,
@@ -1120,9 +1158,10 @@ class Stage1AudioPipeline:
         local_tmp = Path(tempfile.mkdtemp(prefix=f"yt_spx_s1_pc_{vid}_"))
         try:
             leveled_wav, rms_timeline = ensure_local_leveled_16k_wav(vid, self.workspace, local_tmp)
+            diar_wav, norm_mode = maybe_restore_diarization_wav(vid, leveled_wav, rms_timeline, self.workspace, local_tmp)
             rttm_segs, centroids, overlaps = run_diarization_m3(
                 video_id=vid,
-                leveled_16k_wav=leveled_wav,
+                leveled_16k_wav=diar_wav,
                 workspace=self.workspace,
                 diarizer=self.diarizer,
                 is_short=bool(video_record.get("is_short")),
@@ -1157,7 +1196,7 @@ class Stage1AudioPipeline:
                 self.asr.unload()
                 sep_manifest = run_overlap_separation_m4(
                     video_id=vid,
-                    leveled_16k_wav=leveled_wav,
+                    leveled_16k_wav=diar_wav,
                     overlaps=overlaps,
                     centroids=centroids,
                     workspace=self.workspace,
@@ -1169,8 +1208,9 @@ class Stage1AudioPipeline:
                 self.separator.unload()
 
             print(f"   [5/5] Whisper ASR & Scenario Assembly (M5)....... ", end="", flush=True)
+            asr_wav = ensure_local_asr_16k_wav(leveled_wav, local_tmp, vid, norm_mode)
             word_ts, detected_lang = self.asr.transcribe_and_align_wav(
-                leveled_wav,
+                asr_wav,
                 forced_language=None,
                 use_ctc_aligner=True,
             )

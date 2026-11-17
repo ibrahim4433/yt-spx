@@ -188,7 +188,8 @@ def classify_speakers_and_episodes(
     def _daee_score(s: Dict[str, Any]) -> float:
         spk = s["speaker_id"]
         rms_bonus = max(0.0, 1.0 - (max_rms - s["mean_rms_db"]) / 15.0) * 0.25
-        vp_bonus = 0.45 if spk in voice_matches else 0.0
+        # Guard against cameo hijack (e.g., passing registered Da'ee greeting for <15% share)
+        vp_bonus = 0.45 if (spk in voice_matches and s["speech_share"] >= 0.15) else 0.0
         return s["speech_share"] * 0.65 + rms_bonus + vp_bonus
 
     main_daee_spk = max(spk_stats.values(), key=_daee_score)["speaker_id"]
