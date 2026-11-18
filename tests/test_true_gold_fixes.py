@@ -29,20 +29,25 @@ from unittest.mock import patch
 
 import numpy as np
 
-from core.audio_diarizer import WarmASRAlignmentEngine
+from core.audio_diarizer import WarmASRAlignmentEngine, _collapse_turn_repetition_loops
 from core.drive_sync import SharedWorkspace
+from core.extractor_prompt import ROUND2_ARABIC_VERIFICATION_PROMPT
 from core.overlap_resolver import (
     WarmNeMoDiarizer,
+    _is_collapsed_diarization,
     merge_fragmented_speaker_clusters,
     run_diarization_m3,
 )
 from core.scenario_extractor import (
     Stage2ScenarioExtractor,
+    _ground_dialogue_exchange,
     _is_duplicate_qa,
+    _lookup_turn,
     anchor_and_enrich_extracted_unit,
+    diagnose_missing_arabic_fields,
     merge_round1_and_round2_units,
 )
-from core.smart_bot import SmartDialecticBot
+from core.smart_bot import SmartDialecticBot, _stem_token, normalize_text
 from core.speaker_roles import classify_speakers_and_episodes
 from db.database import (
     _clean_arabic_unit_str,
@@ -56,7 +61,7 @@ from db.database import (
     list_videos,
     sanitize_fts_query,
 )
-from tools.card_rating_system.audit_cards import audit_single_card
+from tools.card_rating_system.audit_cards import DAEE_CROSS_EXAM_REGEX, audit_single_card
 import tools.reset_stage2 as reset_stage2_mod
 
 
@@ -675,6 +680,437 @@ class TestStage2GroundingAuditAndResetFixes(unittest.TestCase):
             self.assertEqual(r1, (0, "pending", "stage1_done"))
             self.assertEqual(r2, (0, "pending", "queued"))
             self.assertEqual(cnt, 0)
+
+
+class TestV31RootCauseRegressions(unittest.TestCase):
+    def test_m3_retry_does_not_poison_rttm_and_catches_90pct_collapse(self):
+        # 90.6% top-speaker dominance on >= 300s video must trigger collapse detection
+        segs_90pct = [
+            {"speaker_id": "SPK_00", "start_ms": 0, "end_ms": 453_000},
+            {"speaker_id": "SPK_01", "start_ms": 453_000, "end_ms": 500_000},
+        ]
+        self.assertTrue(_is_collapsed_diarization(segs_90pct, total_ms=500_000))
+
+        # Edge-only secondary speaker (confined to first 12% intro even with >10% share) triggers recovery
+        segs_edge = [
+            {"speaker_id": "SPK_01", "start_ms": 0, "end_ms": 55_000},
+            {"speaker_id": "SPK_00", "start_ms": 60_000, "end_ms": 500_000},
+        ]
+        self.assertTrue(_is_collapsed_diarization(segs_edge, total_ms=500_000))
+
+        # Genuine balanced 2-speaker debate must NOT trigger collapse detection
+        segs_ok = [
+            {"speaker_id": "SPK_00", "start_ms": 0, "end_ms": 260_000},
+            {"speaker_id": "SPK_01", "start_ms": 260_000, "end_ms": 500_000},
+        ]
+        self.assertFalse(_is_collapsed_diarization(segs_ok, total_ms=500_000))
+
+        # Rejected retry must NOT overwrite accepted RTTM on disk or leave .retry.rttm behind
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = SharedWorkspace(root_dir=root, worker_name="test_rttm_atomic")
+            wav_p = root / "debate.wav"
+            _write_silent_wav(wav_p, duration_sec=120.0)
+
+            collapsed_rttm = "SPEAKER V_DISK 1 0.00 120.00 <NA> <NA> SPK_00 <NA> <NA>\n"
+            bad_retry_rttm = (
+                "SPEAKER V_DISK 1 0.00 80.00 <NA> <NA> SPK_00 <NA> <NA>\n"
+                "SPEAKER V_DISK 1 81.00 39.00 <NA> <NA> SPK_01 <NA> <NA>\n"
+            )
+            emb_0 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            emb_1_same = np.array([0.96, float(np.sqrt(1 - 0.96**2)), 0.0], dtype=np.float32)
+
+            class RetryRejectDiarizer(WarmNeMoDiarizer):
+                def __init__(self):
+                    super().__init__(device="cpu")
+                    self.calls = 0
+                    self.emb_calls = 0
+                    self.paths_written = []
+
+                def run_diarization(self, wav_16k_path, out_rttm_path, is_short=False, forced_num_speakers=None, clustering_overrides=None):
+                    self.calls += 1
+                    self.emb_calls = 0
+                    self.paths_written.append(out_rttm_path.name)
+                    txt = collapsed_rttm if self.calls == 1 else bad_retry_rttm
+                    out_rttm_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_rttm_path.write_text(txt, encoding="utf-8")
+                    return txt
+
+                def extract_embeddings_batch(self, slices_16k, batch_size=16):
+                    self.emb_calls += 1
+                    vec = emb_0 if self.emb_calls == 1 else emb_1_same
+                    return [vec for _ in slices_16k]
+
+            diarizer = RetryRejectDiarizer()
+            segs_final, _, _ = run_diarization_m3("V_DISK", wav_p, ws, diarizer)
+            self.assertEqual({s["speaker_id"] for s in segs_final}, {"SPK_00"})
+            rttm_path = ws.diarization_dir / "V_DISK" / "V_DISK.rttm"
+            retry_path = rttm_path.with_suffix(".retry.rttm")
+            self.assertFalse(retry_path.exists())
+            disk_text = rttm_path.read_text(encoding="utf-8")
+            self.assertIn("SPK_00", disk_text)
+            self.assertNotIn("SPK_01", disk_text)
+            self.assertIn("V_DISK.retry.rttm", diarizer.paths_written)
+
+    def test_stage1_turn_repetition_loop_collapsed(self):
+        looped = "Why " + " ".join(["hath"] * 14) + " not the scripture addressed this clearly?"
+        collapsed = _collapse_turn_repetition_loops(looped)
+        self.assertEqual(collapsed.lower().count("hath"), 1)
+        self.assertIn("not the scripture addressed this clearly?", collapsed)
+
+        normal = "This is a completely normal spoken sentence with no repetition loops."
+        self.assertEqual(_collapse_turn_repetition_loops(normal), normal)
+
+    def test_arabic_dangling_proclitic_and_expanded_theological_bias(self):
+        dirty_ar = "هذا يوافق المنطق لل. ويدل لل الإسلامي كما ورد في إشعياء 18:20 عن الأرحيم ونَزَرَثَ في غاليلية."
+        cleaned = clean_latin_tokens_in_arabic(dirty_ar)
+        self.assertNotIn("لل.", cleaned)
+        self.assertNotIn(" لل ", cleaned)
+        self.assertIn("حزقيال 18:20", cleaned)
+        self.assertIn("الرحيم", cleaned)
+        self.assertIn("الناصرة في الجليل", cleaned)
+
+        self.assertIsNotNone(check_theological_bias({
+            "question_en": "Are Father and Son equal?",
+            "core_answer_summary_en": "The Son is one of the co-equal persons of the Trinity in divine essence.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "question_en": "Is only Islam acceptable?",
+            "core_answer_summary_en": "Surah 3:85 does not mean that all other religions are invalid or rejected.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "question_en": "Does God know the outcome?",
+            "core_answer_summary_en": "Even God cannot know the final outcome of human free choices ahead of time.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "question_en": "Is God one?",
+            "core_answer_summary_ar": "هذا لا يعني أن الله واحداً لا يولد له أبناء ولا ينفي ذلك.",
+        }))
+
+    def test_turn_id_leading_underscore_recovery_and_dialogue_text_grounding(self):
+        t1 = {
+            "turn_id": "_moXN_uYN1A_T0001",
+            "speaker_role": "INTERLOCUTOR",
+            "speaker_label_en": "Interlocutor",
+            "speaker_label_ar": "المحاور",
+            "start_ms": 10_000,
+            "start_fmt": "00:10",
+            "text_original": "Why does the Quran speak in parables about cosmic origins and truth?",
+        }
+        t2 = {
+            "turn_id": "_moXN_uYN1A_T0002",
+            "speaker_role": "MAIN_DAEE",
+            "speaker_label_en": "Hashim",
+            "speaker_label_ar": "هاشم",
+            "start_ms": 25_000,
+            "start_fmt": "00:25",
+            "text_original": "Rational necessity establishes a transcendent Eternal Creator beyond all created matter.",
+        }
+        by_id = {"_moXN_uYN1A_T0001": t1, "_moXN_uYN1A_T0002": t2}
+
+        self.assertIs(_lookup_turn("moXN_uYN1A_T0001", by_id, by_id), t1)
+        self.assertIs(_lookup_turn("T0002", by_id, by_id), t2)
+
+        raw_ex = [
+            {
+                "turn_id": "moXN_uYN1A_T0002",
+                "role": "MAIN_DAEE",
+                "text_en": "Completely wrong shifted sentence talking about unrelated historical manuscripts and councils.",
+                "text_ar": "الضرورة العقلية تثبت وجود خالق أزلي متعالٍ.",
+            },
+            {
+                "turn_id": "moXN_uYN1A_T0001",
+                "role": "INTERLOCUTOR",
+                "text_en": "Why does the Quran speak in parables about cosmic origins and truth?",
+                "text_ar": "لماذا يتحدث القرآن بالأمثال عن أصل الكون والحق؟",
+            },
+        ]
+        grounded, matched = _ground_dialogue_exchange(
+            raw_ex, by_id, by_id, "Hashim", "هاشم", "SPK_01", 10, repair_english_from_turn=True
+        )
+        self.assertTrue(matched)
+        self.assertEqual([g["turn_id"] for g in grounded], ["_moXN_uYN1A_T0001", "_moXN_uYN1A_T0002"])
+        self.assertEqual(grounded[1]["text_en"], t2["text_original"])
+
+    def test_round2_retry_escalates_with_missing_field_diagnostics_and_drop_accounting(self):
+        clean_unit_sentinel = {
+            "question_ar": "لماذا يفتقر الكون الحادث إلى خالق أزلي واجب الوجود؟",
+            "core_answer_summary_ar": "كل ما له بداية وممكن الوجود يفتقر بالضرورة العقلية إلى خالق أزلي واجب الوجود غير مخلوق.",
+            "core_answer_summary_en": "Whatever begins to exist requires a Creator by rational necessity.",
+            "fallacy_or_misconception_exposed_ar": "مغالطة التسلسل اللانهائي",
+            "socratic_question_ar": "هل يمكن للممكن أن يوجد نفسه من العدم؟",
+            "verbatim_quote": "An uncaused First Cause must exist.",
+            "verbatim_quote_ar": "لا بد من وجود سبب أول غير مخلوق.",
+            "analogy_or_metaphor": "No analogy was used in this exchange.",
+            "analogy_or_metaphor_ar": "",
+        }
+        self.assertEqual(diagnose_missing_arabic_fields(clean_unit_sentinel), [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(root_dir=Path(tmp), worker_name="test_r2_escalation")
+            scen = {
+                "video_id": "V_ESC",
+                "title_ar": "اختبار التصعيد العربي",
+                "youtube_url": "https://www.youtube.com/watch?v=V_ESC",
+                "duration_sec": 300,
+                "metrics": {"speakers_count": 2, "duration_sec": 300},
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "display_name_en": "Skeptic", "display_name_ar": "المحاور"},
+                ],
+                "turns": [
+                    {
+                        "turn_id": "V_ESC_T0001",
+                        "episode_index": 1,
+                        "speaker_id": "SPK_01",
+                        "speaker_role": "INTERLOCUTOR",
+                        "start_ms": 5000,
+                        "end_ms": 15000,
+                        "start_fmt": "00:05",
+                        "end_fmt": "00:15",
+                        "text_original": "If God caused the cosmos, why cannot the material universe simply exist infinitely without an eternal Creator?",
+                    },
+                    {
+                        "turn_id": "V_ESC_T0002",
+                        "episode_index": 1,
+                        "speaker_id": "SPK_00",
+                        "speaker_role": "MAIN_DAEE",
+                        "start_ms": 16000,
+                        "end_ms": 38000,
+                        "start_fmt": "00:16",
+                        "end_fmt": "00:38",
+                        "text_original": "Infinite regress of contingent events is impossible; an eternal Necessary Creator must terminate the chain.",
+                    },
+                ],
+            }
+            ws.atomic_write_json(ws.scenarios_dir / "V_ESC.json", scen)
+            ws.advance_micro_step("V_ESC", "M5_SCENARIO_BUILT")
+
+            class EscalatingRetryMockLLM:
+                def __init__(self, succeed_attempt=3):
+                    self.succeed_attempt = succeed_attempt
+                    self.r2_prompts = []
+                    self.r2_kwargs = []
+
+                def extract_round1_english(self, prompt):
+                    return json.dumps([
+                        {
+                            "question_turn_id": "V_ESC_T0001",
+                            "answer_turn_id": "V_ESC_T0002",
+                            "question_en": "Why cannot the material universe exist infinitely without a Creator?",
+                            "core_answer_summary_en": "An infinite regress of dependent events is rationally impossible, so an eternal Necessary Creator must exist.",
+                            "logical_premises": ["Contingent things depend on causes.", "Infinite regress cannot complete.", "A Necessary Creator exists."],
+                            "fallacy_or_misconception_exposed": "Infinite regress fallacy.",
+                            "socratic_question": "Can an infinite chain of dependent links ever stand without an anchor?",
+                            "interlocutor_verbatim_quote": scen["turns"][0]["text_original"],
+                            "verbatim_quote": scen["turns"][1]["text_original"],
+                            "dialogue_exchange": [
+                                {"turn_id": "V_ESC_T0001", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": scen["turns"][0]["text_original"]},
+                                {"turn_id": "V_ESC_T0002", "role": "MAIN_DAEE", "move_type": "Deductive Proof", "text_en": scen["turns"][1]["text_original"]},
+                            ],
+                        }
+                    ])
+
+                def extract_round2_arabic(self, r1_json_str, prompt, enable_thinking=False, max_thinking_tokens=0):
+                    self.r2_prompts.append(prompt)
+                    self.r2_kwargs.append((enable_thinking, max_thinking_tokens))
+                    attempt_num = len(self.r2_prompts) - 1  # 0=initial, 1=retry1, 2=retry2, 3=retry3
+                    if attempt_num < self.succeed_attempt:
+                        return json.dumps([{"question_turn_id": "V_ESC_T0001", "question_ar": "لماذا لا يكون الكون أزلياً؟"}], ensure_ascii=False)
+                    return json.dumps([
+                        {
+                            "question_turn_id": "V_ESC_T0001",
+                            "question_ar": "لماذا لا يمكن للكون المادي أن يوجد أزلياً بلا خالق؟",
+                            "core_answer_summary_ar": "تسلسل الممكنات والمعتمدات إلى غير نهاية ممتنع عقلاً ولذا وجب وجود خالق أزلي واجب الوجود.",
+                            "logical_premises_ar": ["الممكن يفتقر لعلة.", "التسلسل اللانهائي باطل.", "واجب الوجود ثابت عقلاً."],
+                            "fallacy_or_misconception_exposed_ar": "مغالطة التسلسل اللانهائي",
+                            "socratic_question_ar": "هل تقوم سلسلة لا نهائية من الحلقات المفتقرة بلا أصل مستقل؟",
+                            "interlocutor_verbatim_quote_ar": "لماذا لا يوجد الكون المادي أزلياً بدون خالق؟",
+                            "verbatim_quote_ar": "التسلسل اللانهائي للممكنات مستحيل ولذا لا بد من خالق واجب الوجود.",
+                            "dialogue_exchange": [
+                                {"turn_id": "V_ESC_T0001", "role": "INTERLOCUTOR", "text_ar": "لماذا لا يوجد الكون المادي أزلياً بدون خالق؟"},
+                                {"turn_id": "V_ESC_T0002", "role": "MAIN_DAEE", "text_ar": "التسلسل اللانهائي للممكنات مستحيل ولذا لا بد من خالق واجب الوجود."},
+                            ],
+                        }
+                    ], ensure_ascii=False)
+
+            mock_ok = EscalatingRetryMockLLM(succeed_attempt=3)
+            units_ok = Stage2ScenarioExtractor(workspace=ws, llm_client=mock_ok).extract_video_m6("V_ESC", verbose=False)
+            self.assertEqual(len(units_ok), 1)
+            self.assertEqual(len(mock_ok.r2_prompts), 4)  # initial + 3 retries
+            self.assertIn("RETRY DIAGNOSTIC:", mock_ok.r2_prompts[1])
+            self.assertIn("core_answer_summary_ar", mock_ok.r2_prompts[1])
+            self.assertNotIn('"core_answer_summary_ar"', mock_ok.r2_prompts[1])
+            self.assertEqual(mock_ok.r2_kwargs[3], (True, 384))
+            self.assertIn("RUBRIC VERIFICATION", mock_ok.r2_prompts[3].upper())
+            self.assertNotIn("/no_think", mock_ok.r2_prompts[3])
+
+            # Full drop accounting check when all retries fail Arabic localization
+            ws.atomic_write_json(ws.scenarios_dir / "V_DROP.json", dict(scen, video_id="V_DROP", turns=[
+                dict(scen["turns"][0], turn_id="V_DROP_T0001"),
+                dict(scen["turns"][1], turn_id="V_DROP_T0002"),
+            ]))
+            ws.advance_micro_step("V_DROP", "M5_SCENARIO_BUILT")
+
+            class AlwaysFailR2(EscalatingRetryMockLLM):
+                def extract_round1_english(self, prompt):
+                    return super().extract_round1_english(prompt).replace("V_ESC_T", "V_DROP_T")
+
+            units_fail = Stage2ScenarioExtractor(workspace=ws, llm_client=AlwaysFailR2(succeed_attempt=99)).extract_video_m6("V_DROP", verbose=False)
+            self.assertEqual(len(units_fail), 0)
+            st_drop = ws.get_video_state("V_DROP")
+            self.assertIn("[DROP-AR-RETRY]:1", st_drop.get("zero_card_reason", ""))
+            self.assertNotIn("[none]", st_drop.get("zero_card_reason", ""))
+
+    def test_smart_bot_arabic_punctuation_morphological_stemming_and_intent_guard(self):
+        norm = normalize_text("من خلق الله؟ وهل الإسلام، حق؛")
+        for punct in ("؟", "،", "؛"):
+            self.assertNotIn(punct, norm)
+
+        for form in ("خالق", "مخلوق", "مخلوقات", "يخلق", "خلقه"):
+            self.assertEqual(_stem_token(form, "ar"), "خلق")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "bot_test.db"
+            init_db(db_path)
+            with closing(sqlite3.connect(db_path)) as conn:
+                with conn:
+                    conn.execute("INSERT INTO videos (video_id, title_ar, status) VALUES ('VB1', 'فيديو اختباري', 'completed')")
+            payload = [
+                {
+                    "id": "VB1_001",
+                    "video_id": "VB1",
+                    "episode_index": 1,
+                    "timestamp_seconds": 120,
+                    "timestamp_formatted": "02:00",
+                    "answer_timestamp_seconds": 135,
+                    "answer_timestamp_formatted": "02:15",
+                    "topic_category": "Textual Preservation & Manuscripts",
+                    "topic_subcategory": "Preservation of Scripture",
+                    "question_en": "Has the Bible been preserved without scribal changes across manuscripts?",
+                    "question_ar": "هل حُفظ الإنجيل من التحريف عبر المخطوطات القديمة؟",
+                    "core_answer_summary_en": "New Testament manuscripts show thousands of variants whereas the Quran has continuous oral and written chains.",
+                    "core_answer_summary_ar": "تظهر مخطوطات العهد الجديد آلاف الاختلافات بخلاف القرآن المحفوظ بأسانيد متواترة.",
+                    "tags": ["تحريف الإنجيل", "حفظ القرآن", "manuscripts"],
+                },
+                {
+                    "id": "VB1_002",
+                    "video_id": "VB1",
+                    "episode_index": 1,
+                    "timestamp_seconds": 240,
+                    "timestamp_formatted": "04:00",
+                    "topic_category": "Theology & God's Existence",
+                    "topic_subcategory": "Sun Worship",
+                    "question_en": "Why do people worship the sun instead of God?",
+                    "question_ar": "لماذا يعبد الناس الشمس بدلاً من الله؟",
+                    "core_answer_summary_en": "Humans fall into idolatry when they venerate physical celestial objects.",
+                    "core_answer_summary_ar": "يقع الناس في الشرك حين يعظمون الأجرام السماوية.",
+                    "tags": ["idolatry", "sun worship"],
+                },
+            ]
+            ingest_extraction_payload("VB1", payload, db_path=db_path)
+
+            bot = SmartDialecticBot()
+            pres_ans = bot.answer_query("تحريف الإنجيل؟", db_path=db_path)
+            self.assertIn(pres_ans["status"], ("success", "partial_match"))
+            self.assertEqual(pres_ans["matched_qa"]["id"], "VB1_001")
+            self.assertEqual(pres_ans["response_package"]["timestamp_seconds"], 120)
+            self.assertEqual(pres_ans["response_package"]["answer_timestamp_seconds"], 135)
+
+            off_topic = bot.answer_query("Who created God?", db_path=db_path)
+            self.assertEqual(off_topic["status"], "no_match")
+
+    def test_audit_cards_v31_catches_shifted_turns_topic_drift_functional_collapse_and_tier3_fail(self):
+        self.assertIsNotNone(DAEE_CROSS_EXAM_REGEX.search("If the Father is the only true God, how can Christians claim the Trinity?"))
+        self.assertIsNone(DAEE_CROSS_EXAM_REGEX.search("Does the Bible affirm that Jesus is a prophet, or does it claim he is divine?"))
+
+        turns = [
+            {"turn_id": "V31_T01", "speaker_role": "MAIN_DAEE", "start_ms": 0, "end_ms": 60_000, "text_original": " ".join(["quantum cosmology fine tuning entropy expansion universe mathematical probability"] * 28)},
+            {"turn_id": "V31_T02", "speaker_role": "MAIN_DAEE", "start_ms": 61_000, "end_ms": 120_000, "text_original": "The teleological arrangement of constants demonstrates an All-Wise Designer beyond blind chance."},
+            {"turn_id": "V31_T03", "speaker_role": "INTERLOCUTOR", "start_ms": 121_000, "end_ms": 125_000, "text_original": "Interesting point about cosmic constants."},
+            {"turn_id": "V31_T04", "speaker_role": "MAIN_DAEE", "start_ms": 126_000, "end_ms": 185_000, "text_original": "Every calibrated physical law points away from random chaotic materialism toward purposeful creation."},
+        ]
+        bad_card = {
+            "id": "V31_001",
+            "video_id": "V31",
+            "daee_speaker_id": "SPK_00",
+            "interlocutor_speaker_id": "SPK_01",
+            "question_turn_id": "V31_T03",
+            "answer_turn_id": "V31_T02",
+            "timestamp_seconds": 60,
+            "question_en": "Why should anyone trust ancient inheritance decrees regarding property distribution?",
+            "question_ar": "لماذا يوثق بقوانين المواريث القديمة المتعلقة بتوزيع الممتلكات؟",
+            "core_answer_summary_en": (
+                "Classical jurisprudence regulates probate estates, agrarian taxation, testamentary witnesses, "
+                "commercial contracts, guild apprenticeships, municipal water canals, and feudal obligations across "
+                "medieval provinces using detailed legal registries and arbitral tribunals to settle boundary disputes "
+                "and commercial debts fairly for merchants and landowners throughout rural kingdoms. Furthermore, "
+                "customary statutory courts inspect boundary charters, heraldic deeds, maritime customs duties, "
+                "livestock tithes, apprenticeship indentures, orchard leases, silver coinage standards, and borough "
+                "charters whenever heirs contest ancestral estates before regional magistrates under traditional "
+                "civil codes governing provincial succession, guild inheritance privileges, and agrarian tenancy rights."
+            ),
+            "core_answer_summary_ar": "يتناول الفقه تنظيم المواريث والعقود والديون لل.",
+            "logical_premises": ["Probate registries record land.", "Guild tribunals arbitrate debts.", "Statutes bind landowners."],
+            "logical_premises_ar": ["السجلات توثق الأراضي.", "المحاكم تفصل الديون.", "القوانين تلزم الملاك."],
+            "fallacy_or_misconception_exposed": "Anachronism fallacy.",
+            "fallacy_or_misconception_exposed_ar": "مغالطة الإسقاط الزمني",
+            "socratic_question": "How could oral customs alone settle commercial debt registries without witnesses?",
+            "socratic_question_ar": "كيف تحسم الأعراف وحدها الديون التجارية بلا شهود؟",
+            "interlocutor_verbatim_quote": "Interesting point about cosmic constants.",
+            "interlocutor_verbatim_quote_ar": "نقطة مثيرة حول الثوابت الكونية لل.",
+            "verbatim_quote": "The teleological arrangement of constants demonstrates an All-Wise Designer beyond blind chance.",
+            "verbatim_quote_ar": "انتظام الثوابت الكونية يدل على مصمم حكيم يتجاوز الصدفة العمياء.",
+            "dialogue_exchange": [
+                {"turn_id": "V31_T03", "role": "INTERLOCUTOR", "timestamp_seconds": 121, "text_en": "Interesting point about cosmic constants.", "text_ar": "نقطة مثيرة."},
+                {"turn_id": "V31_T02", "role": "MAIN_DAEE", "timestamp_seconds": 61, "text_en": "Unrelated fabricated probate commercial registries guilds and feudal obligations text here.", "text_ar": "نص غير مطابق لل."},
+            ],
+        }
+        report = audit_single_card(bad_card, turns, require_arabic=True, video_meta={"duration_sec": 300.0, "speakers_count": 2, "turns_count": 4})
+        codes = {d["code"] for d in report["defects"]}
+        self.assertIn("FUNCTIONAL_DIARIZATION_COLLAPSE", codes)
+        self.assertIn("DIALOGUE_TURN_TEXT_SHIFTED", codes)
+        self.assertIn("NON_MONOTONIC_DIALOGUE_TIMESTAMPS", codes)
+        self.assertIn("UNGROUNDED_DOSSIER_SUMMARY", codes)
+        self.assertIn("CORRUPTED_ARABIC_PREPOSITION", codes)
+        self.assertIn("TRUNCATED_ARABIC_SUMMARY", codes)
+        self.assertIn("[GATE-DIARIZATION]", report["hard_fails_all"])
+        self.assertIn("[GATE-UNGROUNDED]", report["hard_fails_all"])
+
+        # Tier 3 card (50-74 score without hard-fail gates) must be marked FAIL in v3.1
+        tier3_card = {
+            "id": "T3_001",
+            "video_id": "T3",
+            "daee_speaker_id": "SPK_00",
+            "interlocutor_speaker_id": "SPK_01",
+            "question_turn_id": "T3_T01",
+            "answer_turn_id": "T3_T02",
+            "timestamp_seconds": 10,
+            "question_en": "Why does morality require God",  # missing '?' (-4)
+            "question_ar": "لماذا تحتاج الأخلاق إلى الله",  # missing '؟' (-2)
+            "core_answer_summary_en": "The Da'ee explains that morality is objective.",  # meta narrator (-4) + <60w (-3) = -7
+            "core_answer_summary_ar": "الأخلاق الموضوعية تستلزم خالقاً متعالياً.",
+            "logical_premises": ["Only one premise"],  # <2 premises (-6)
+            "logical_premises_ar": ["مقدمة واحدة"],
+            "fallacy_or_misconception_exposed": "",  # (-3)
+            "fallacy_or_misconception_exposed_ar": "",
+            "socratic_question": "",  # (-3)
+            "socratic_question_ar": "",
+            "interlocutor_verbatim_quote": "",  # (-2)
+            "interlocutor_verbatim_quote_ar": "",
+            "verbatim_quote": "",  # (-5)
+            "verbatim_quote_ar": "",
+            "dialogue_exchange": [],  # (-4)
+        }
+        t3_turns = [
+            {"turn_id": "T3_T01", "speaker_role": "INTERLOCUTOR", "start_ms": 10_000, "end_ms": 15_000, "text_original": "Why does morality require God?"},
+            {"turn_id": "T3_T02", "speaker_role": "MAIN_DAEE", "start_ms": 16_000, "end_ms": 30_000, "text_original": "Objective morality presupposes a Lawgiver."},
+        ]
+        t3_report = audit_single_card(tier3_card, t3_turns, require_arabic=False)
+        self.assertIsNone(t3_report["hard_fail_triggered"])
+        self.assertGreaterEqual(t3_report["score_pct"], 50)
+        self.assertLess(t3_report["score_pct"], 75)
+        self.assertEqual(t3_report["status"], "FAIL")
 
 
 if __name__ == "__main__":

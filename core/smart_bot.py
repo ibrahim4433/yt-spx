@@ -45,12 +45,36 @@ _UBIQUITOUS_TOKENS = {
 }
 
 
+_AR_CREATION_STEM_FORMS = frozenset({
+    "خلق", "خالق", "مخلوق", "مخلوقه", "مخلوقات", "مخلوقون", "مخلوقين",
+    "يخلق", "تخلق", "نخلق", "اخلق", "خلقت", "خلقوا", "خالقه", "خالقهم",
+    "خلقه", "خلقها", "خلقهم", "خلقك", "خلقكم", "خلقني", "مخلوقاته",
+})
+
+
 def _stem_token(tok: str, lang: str) -> str:
     if lang == "ar":
-        for pref in ("وال", "فال", "بال", "كال", "لال", "ال"):
-            if tok.startswith(pref) and len(tok) - len(pref) >= 2:
-                return tok[len(pref):]
-        return tok
+        if tok in _AR_CREATION_STEM_FORMS:
+            return "خلق"
+        stemmed = tok
+        for pref in ("وال", "فال", "بال", "كال", "لال", "لل", "ال"):
+            if stemmed.startswith(pref) and len(stemmed) - len(pref) >= 2:
+                stemmed = stemmed[len(pref):]
+                break
+        if stemmed in _AR_CREATION_STEM_FORMS:
+            return "خلق"
+        if len(stemmed) >= 4 and stemmed[0] in ("و", "ف", "ب", "ل") and stemmed[1:] in _AR_CREATION_STEM_FORMS:
+            return "خلق"
+        for suf in ("ات", "ون", "ين", "هم", "ها", "كم"):
+            if stemmed.endswith(suf) and len(stemmed) - len(suf) >= 3:
+                candidate = stemmed[:-len(suf)]
+                if candidate in _AR_CREATION_STEM_FORMS:
+                    return "خلق"
+                stemmed = candidate
+                break
+        if len(stemmed) >= 5 and stemmed.endswith("ه") and stemmed[:-1] in _AR_CREATION_STEM_FORMS:
+            return "خلق"
+        return "خلق" if stemmed in _AR_CREATION_STEM_FORMS else stemmed
     if len(tok) > 4:
         if tok.endswith("ies"):
             return tok[:-3] + "y"
@@ -109,7 +133,7 @@ THEOLOGICAL_INTENT_MAP = [
         ],
     },
     {
-        "category": "Comparative Religion & Christianity",
+        "category": "Textual Preservation & Manuscripts",
         "subcategory": "Textual Preservation: Quran vs Bible",
         "keywords_en": [
             "bible changed", "quran preserved", "manuscripts",
@@ -187,6 +211,8 @@ def normalize_text(text: str) -> str:
         return ""
     t = text.strip().lower()
     t = re.sub(r"[\u064B-\u065F\u0670]", "", t)
+    t = t.replace("\u0640", "")
+    t = re.sub(r"[\u060C\u061B\u061F\u066A-\u066D\u06D4]+", " ", t)
     t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ء", "")
     t = t.replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي")
     t = re.sub(r"[^\w\s\u0600-\u06FF]", " ", t)
@@ -286,10 +312,35 @@ class SmartDialecticBot:
             if intent_category:
                 break
 
+        stopwords = ARABIC_STOPWORDS if query_lang == "ar" else ENGLISH_STOPWORDS
+        q_toks, _ = _tokenize_with_stems(user_query, stopwords, query_lang)
+        specific_query_stems = {
+            _stem_token(t, query_lang)
+            for t in q_toks
+            if t not in _UBIQUITOUS_TOKENS and _stem_token(t, query_lang) not in _UBIQUITOUS_TOKENS
+        }
+
+        def _has_specific_token_overlap(cand: Dict[str, Any]) -> bool:
+            if not specific_query_stems:
+                return True
+            cand_text = " ".join([
+                cand.get("question_ar" if query_lang == "ar" else "question_en") or "",
+                cand.get("core_answer_summary_ar" if query_lang == "ar" else "core_answer_summary_en") or "",
+                cand.get("topic_subcategory") or "",
+                " ".join(str(tg) for tg in (cand.get("tags") or [])),
+            ])
+            _, cand_stems = _tokenize_with_stems(cand_text, stopwords, query_lang)
+            return bool(specific_query_stems & cand_stems)
+
         scored_candidates = []
         for c in candidates:
             sc = compute_match_score(query_norm, c, query_lang)
-            if intent_category and c.get("topic_category") == intent_category and sc >= 10.0:
+            if (
+                intent_category
+                and c.get("topic_category") == intent_category
+                and sc >= 10.0
+                and _has_specific_token_overlap(c)
+            ):
                 sc += 15.0
             scored_candidates.append((sc, c))
 
@@ -357,16 +408,8 @@ class SmartDialecticBot:
                 "Try searching the Scenario Transcripts tab or exploring topics such as God's existence, textual preservation, or the Trinity."
             )
 
-        return {
-            "status": "no_match",
-            "query": user_query,
-            "language": query_lang,
-            "confidence_score": 0.0,
-            "message": msg,
-            "matched_qa": None,
-            "response_package": None,
-            "scenario_matches": scen_hits,
-            "related_questions": [
+        related_list = (
+            [
                 {
                     "id": c["id"],
                     "question": c["question_ar"] if query_lang == "ar" else c["question_en"],
@@ -378,7 +421,21 @@ class SmartDialecticBot:
                 }
                 for sc, c in scored_candidates[:3]
                 if sc >= 12.0
-            ] if scored_candidates else [],
+            ]
+            if scored_candidates
+            else []
+        )
+
+        return {
+            "status": "no_match",
+            "query": user_query,
+            "language": query_lang,
+            "confidence_score": round(top_score, 2) if related_list else 0.0,
+            "message": msg,
+            "matched_qa": None,
+            "response_package": None,
+            "scenario_matches": scen_hits,
+            "related_questions": related_list,
         }
 
     def _format_response_package(self, qa: Dict[str, Any], lang: str) -> Dict[str, Any]:
@@ -463,7 +520,13 @@ class SmartDialecticBot:
             "source_turn_ids": qa.get("source_turn_ids") or [],
             "video_title": qa.get("video_title_ar"),
             "timestamp": qa.get("timestamp_formatted"),
+            "timestamp_seconds": qa.get("timestamp_seconds") or 0,
             "answer_timestamp": qa.get("answer_timestamp_formatted") or qa.get("timestamp_formatted"),
+            "answer_timestamp_seconds": (
+                qa.get("answer_timestamp_seconds")
+                if qa.get("answer_timestamp_seconds") is not None
+                else (qa.get("timestamp_seconds") or 0)
+            ),
             "timestamp_url": qa.get("timestamp_url"),
         }
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 tools/card_rating_system/audit_cards.py
-Universal Apologetics Card Audit & Rating Engine (v3.0) for Dawah Dialectics (yt-spx).
+Universal Apologetics Card Audit & Rating Engine (v3.1) for Dawah Dialectics (yt-spx).
 
 Evaluates cards in `qa_units` against ground-truth spoken turns in `scenario_turns`,
 `video_speakers`, and `videos`. Enforces the 5 Core Rubric Dimensions (100 Pts) and
-6 Hard-Fail Gates, detects defects, and outputs structured JSON & CLI reports.
+7 Hard-Fail Gates, detects defects, and outputs structured JSON & CLI reports.
 
 Usage:
     python tools/card_rating_system/audit_cards.py
@@ -15,12 +15,17 @@ Usage:
 """
 
 import re
+import sys
 import json
 import sqlite3
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
+
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 try:
     from db.database import canonicalize_speaker_role as _db_canon_role
@@ -107,7 +112,17 @@ DAEE_CROSS_EXAM_REGEX = re.compile(
     r'|\bif\s+jesus\s+had\s+two\s+natures\b'
     r'|\bif\s+the\s+term\s+[\'"]?son\s+of\s+god[\'"]?\s+in\s+the\s+bible\b'
     r'|\bif\s+god\s+is\s+both\s+the\s+most\s+just\s+and\s+the\s+most\s+loving[^?]*why\s+does\s+christianity\b'
-    r'|\b(?:why\s+trust\s+the\s+bible|paul\s+disagrees?\s+with\s+james|biblical\s+(?:authors?|writers?)\s+(?:disagree|contradict))\b)',
+    r'|\b(?:why\s+trust\s+the\s+bible|paul\s+disagrees?\s+with\s+james|biblical\s+(?:authors?|writers?)\s+(?:disagree|contradict))\b'
+    r'|\bhow\s+can\s+christians?\s+claim\b'
+    r'|\bif\s+the\s+father\s+is\s+the\s+only\s+true\s+god\b'
+    r'|\bif\s+the\s+father\s+and\s+(?:the\s+)?son\s+are\s+co-?equal\b'
+    r'|\bas\s+suggested\s+by\s+the\s+interlocutor\b'
+    r'|\baccording\s+to\s+your\s+belief\b'
+    r'|\bif\s+the\s+bible\s+is\s+the\s+word\s+of\s+god\b'
+    r'|\bhow\s+can\s+jesus\s+be\s+considered\s+the\s+[\'"]?son\s+of\s+god[\'"]?\b'
+    r'|\bhow\s+can\s+the\s+doctrine\s+of\s+original\s+sin\b'
+    r'|\bwill\s+i\s+still\s+be\s+saved\s+if\s+i\s+leave\s+christianity\b'
+    r'|\bif\s+the\s+bible\s+commands\s+the\s+killing\b)',
     re.IGNORECASE,
 )
 
@@ -116,6 +131,7 @@ CYRILLIC_REGEX = re.compile(r'[\u0400-\u04FF]')
 HEBREW_REGEX = re.compile(r'[\u0590-\u05FF]')
 CJK_REGEX = re.compile(r'[\u4E00-\u9FFF\u3000-\u303F]')
 LATIN_IN_ARABIC_REGEX = re.compile(r'\b[A-Za-z]{4,}\b')
+_DANGLING_PROCLITIC_RE = re.compile(r'(?:^|[\s،(«])(?:[وف]?لل)(?:[\s.،؛؟!\)»]|$)|(?:^|\s)لل\s+ال')
 
 META_NARRATOR_REGEX = re.compile(
     r'(?:\b(?:the\s+(?:da\'?ee|speaker|apologist|scholar|muslim|debater|narrator|presenter)'
@@ -172,12 +188,16 @@ def _question_token_set(q: str) -> set:
 
 
 def _detect_opponent_bias(card: Dict[str, Any], a_turn: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Lazily invokes core.scenario_extractor.check_theological_bias without module import cycles."""
+    """Lazily invokes db.database.check_theological_bias (with extractor fallback) without import cycles."""
     try:
-        from core.scenario_extractor import check_theological_bias
+        from db.database import check_theological_bias
+        return check_theological_bias(card, a_turn)
     except ImportError:
-        return None
-    return check_theological_bias(card, a_turn)
+        try:
+            from core.scenario_extractor import check_theological_bias
+            return check_theological_bias(card, a_turn)
+        except ImportError:
+            return None
 
 
 def audit_single_card(
@@ -457,7 +477,7 @@ def audit_single_card(
                 recommendations.append("Replace interlocutor_verbatim_quote with the actual INTERLOCUTOR turn voicing the objection.")
 
     # -------------------------------------------------------------
-    # 6. HARD-FAIL GATE: [GATE-DIARIZATION] Stage 1 Single-Speaker Collapse
+    # 6. HARD-FAIL GATE: [GATE-DIARIZATION] Stage 1 Single-Speaker or Functional Collapse
     # -------------------------------------------------------------
     if video_meta and int(video_meta.get("speakers_count") or 0) == 1 and float(video_meta.get("duration_sec") or 0) > 180.0:
         _add_gate(
@@ -470,6 +490,24 @@ def audit_single_card(
             "description": f"Video {vid} has speakers_count=1 across {video_meta.get('turns_count')} turns, fusing Da'ee and interlocutor into SPK_00.",
         })
         recommendations.append("Re-run Stage 1 M3 diarization with minimum-speaker separation guard for multi-speaker debates.")
+    elif video_meta and float(video_meta.get("duration_sec") or 0) > 180.0 and turns:
+        total_words = sum(len((t.get("text_original") or "").split()) for t in turns)
+        inter_words = sum(
+            len((t.get("text_original") or "").split())
+            for t in turns
+            if _canon_role(t.get("speaker_role")) == "INTERLOCUTOR"
+        )
+        if total_words >= 200 and (inter_words < 40 or (inter_words / total_words) < 0.035):
+            _add_gate(
+                "[GATE-DIARIZATION]",
+                f"Video {vid} ({video_meta.get('duration_sec')}s) functionally collapsed INTERLOCUTOR turns ({inter_words}/{total_words} words = {(inter_words / total_words):.1%}).",
+            )
+            defects.append({
+                "code": "FUNCTIONAL_DIARIZATION_COLLAPSE",
+                "severity": "CRITICAL",
+                "description": f"Video {vid} INTERLOCUTOR speech is only {inter_words}/{total_words} words ({(inter_words / total_words):.1%}), indicating fused speakers in M3.",
+            })
+            recommendations.append("Re-run Stage 1 M3 diarization to separate the interlocutor voice from MAIN_DAEE.")
 
     # -------------------------------------------------------------
     # DIMENSIONAL SCORING (20 + 25 + 20 + 20 + 15 = 100)
@@ -569,6 +607,49 @@ def audit_single_card(
                         defects.append({"code": "UNGROUNDED_DIALOGUE_TURN", "severity": "HIGH", "description": f"Dialogue turn '{ex.get('turn_id', '?')}' appears ungrounded against transcript ({t_ratio:.0%} overlap)."})
                         recommendations.append("Ground every dialogue_exchange turn in actual transcript utterances.")
                         break
+        if turns_by_id:
+            for ex in ex_turns:
+                if not isinstance(ex, dict):
+                    continue
+                ex_tid = str(ex.get("turn_id") or "").strip()
+                if ex_tid in turns_by_id:
+                    txt_en = (ex.get("text_en") or "").strip()
+                    turn_txt = (turns_by_id[ex_tid].get("text_original") or "").lower()
+                    sample_tokens = [w for w in re.findall(r'\b\w{4,}\b', txt_en.lower()) if w not in _OVERLAP_STOPWORDS]
+                    if len(sample_tokens) >= 4:
+                        turn_ratio = _quote_transcript_overlap(txt_en, turn_txt)
+                        if turn_ratio is not None and turn_ratio < 0.35:
+                            dim_scores["grounding_fidelity"] -= 5
+                            defects.append({
+                                "code": "DIALOGUE_TURN_TEXT_SHIFTED",
+                                "severity": "HIGH",
+                                "description": f"Dialogue turn '{ex_tid}' text_en matches its ground-truth scenario_turn at only {turn_ratio:.0%}.",
+                            })
+                            recommendations.append("Populate dialogue_exchange[i].text_en directly from turns_by_id[turn_id]['text_original'].")
+                            break
+        prev_ts: Optional[float] = None
+        for ex in ex_turns:
+            if not isinstance(ex, dict):
+                continue
+            ex_tid = str(ex.get("turn_id") or "").strip()
+            ts_val = ex.get("timestamp_seconds")
+            if ts_val is None and ex_tid in turns_by_id and turns_by_id[ex_tid].get("start_ms") is not None:
+                ts_val = turns_by_id[ex_tid].get("start_ms") / 1000.0
+            if ts_val is not None:
+                try:
+                    ts_f = float(ts_val)
+                except (TypeError, ValueError):
+                    continue
+                if prev_ts is not None and ts_f < prev_ts - 5.0:
+                    dim_scores["attribution_timestamps"] -= 3
+                    defects.append({
+                        "code": "NON_MONOTONIC_DIALOGUE_TIMESTAMPS",
+                        "severity": "MEDIUM",
+                        "description": f"dialogue_exchange turn '{ex_tid or '?'}' regresses chronologically ({ts_f:.1f}s < {prev_ts:.1f}s).",
+                    })
+                    recommendations.append("Sort dialogue_exchange turns in chronological timestamp order.")
+                    break
+                prev_ts = ts_f
         if turn_roles_by_id:
             for ex in ex_turns:
                 if not isinstance(ex, dict):
@@ -597,6 +678,52 @@ def audit_single_card(
                     "severity": "MEDIUM",
                     "description": "dialogue_exchange collapsed into a single speaker role despite multi-speaker turns.",
                 })
+
+    # Topical Grounding Check: [GATE-UNGROUNDED]
+    if len(turns) >= 4:
+        card_ts = card.get("timestamp_seconds")
+        anchor_ts_ms: Optional[int] = None
+        if card_ts is not None:
+            try:
+                anchor_ts_ms = int(float(card_ts) * 1000)
+            except (TypeError, ValueError):
+                anchor_ts_ms = None
+        if anchor_ts_ms is None and a_tid in turns_by_id:
+            anchor_ts_ms = int(turns_by_id[a_tid].get("start_ms", 0))
+        if anchor_ts_ms is not None:
+            local_text = " ".join(
+                (t.get("text_original") or "")
+                for t in turns
+                if int(t.get("end_ms", 0)) >= anchor_ts_ms - 60_000 and int(t.get("start_ms", 0)) <= anchor_ts_ms + 120_000
+            ).lower()
+            local_stems = {w[:5] for w in re.findall(r"[a-z]{5,}", local_text)}
+            if len(local_stems) >= 25:
+                broad_stopwords = {
+                    "islam", "islamic", "muslim", "muslims", "quran", "quranic", "bible", "biblical",
+                    "christian", "christians", "christianity", "allah", "jesus", "christ", "prophet",
+                    "believe", "belief", "people", "claim", "claims", "objection", "because", "through",
+                    "their", "there", "which", "about", "would", "could", "should", "against", "without",
+                    "human", "world", "truth", "proof", "divine", "moral", "rational", "logic", "logical",
+                }
+                card_stems = {
+                    w[:5]
+                    for w in re.findall(r"[a-z]{5,}", f"{q_en} {card.get('core_answer_summary_en') or ''}".lower())
+                    if w not in broad_stopwords
+                }
+                if len(card_stems) >= 6:
+                    topic_ratio = len(card_stems & local_stems) / len(card_stems)
+                    if topic_ratio < 0.09:
+                        dim_scores["grounding_fidelity"] -= 12
+                        _add_gate(
+                            "[GATE-UNGROUNDED]",
+                            f"Dossier '{card_id}' exhibits severe topical drift from its local transcript window ({len(card_stems & local_stems)}/{len(card_stems)} stems = {topic_ratio:.1%}).",
+                        )
+                        defects.append({
+                            "code": "UNGROUNDED_DOSSIER_SUMMARY",
+                            "severity": "CRITICAL",
+                            "description": f"Question/summary shares only {topic_ratio:.1%} topical stems with local transcript window around {anchor_ts_ms/1000:.0f}s.",
+                        })
+                        recommendations.append("Drop or regenerate dossier strictly from its local scenario_turns window.")
 
     # Dim 3: Dialectical Depth (Max 20)
     premises_en = premises_raw if isinstance(premises_raw, list) else []
@@ -649,6 +776,49 @@ def audit_single_card(
                     dim_scores["bilingual_symmetry"] -= 3
                     defects.append({"code": "LATIN_LEAKAGE_IN_ARABIC", "severity": "MEDIUM", "description": f"Untranslated Latin words detected in '{k}'"})
                     break
+            for k in ar_check_keys:
+                val = card.get(k) or ""
+                if _DANGLING_PROCLITIC_RE.search(val):
+                    dim_scores["bilingual_symmetry"] -= 4
+                    defects.append({
+                        "code": "CORRUPTED_ARABIC_PREPOSITION",
+                        "severity": "HIGH",
+                        "description": f"Dangling Arabic proclitic ('لل.' / 'لل ') detected in '{k}' from stripped Latin word.",
+                    })
+                    recommendations.append("Re-translate or clean dangling Arabic proclitics after removing Latin tokens.")
+                    break
+            ivq_ar = (card.get("interlocutor_verbatim_quote_ar") or "").strip()
+            if (
+                len(ivq_ar.split()) >= 6
+                and q_ar
+                and (ivq_ar == q_ar or ivq_ar in q_ar or q_ar in ivq_ar)
+                and inter_quote
+                and q_en
+            ):
+                _dup_stop = {
+                    "that", "this", "what", "when", "where", "which", "does", "only",
+                    "those", "with", "from", "they", "their", "have", "about", "would",
+                    "could", "should", "then",
+                }
+                q_stems = {w[:5] for w in re.findall(r"[a-z]{4,}", q_en.lower()) if w not in _dup_stop}
+                ivq_stems = {w[:5] for w in re.findall(r"[a-z]{4,}", inter_quote.lower()) if w not in _dup_stop}
+                if q_stems and ivq_stems and (len(q_stems & ivq_stems) / min(len(q_stems), len(ivq_stems))) < 0.50:
+                    dim_scores["bilingual_symmetry"] -= 4
+                    defects.append({
+                        "code": "DUPLICATE_ARABIC_QUOTE_QUESTION",
+                        "severity": "HIGH",
+                        "description": "interlocutor_verbatim_quote_ar copied question_ar instead of translating interlocutor_verbatim_quote.",
+                    })
+                    recommendations.append("Translate interlocutor_verbatim_quote faithfully into interlocutor_verbatim_quote_ar.")
+            sum_ar = (card.get("core_answer_summary_ar") or "").strip()
+            if len(sum_en.split()) >= 90 and len(sum_ar.split()) < max(35, int(len(sum_en.split()) * 0.36)):
+                dim_scores["bilingual_symmetry"] -= 5
+                defects.append({
+                    "code": "TRUNCATED_ARABIC_SUMMARY",
+                    "severity": "HIGH",
+                    "description": f"core_answer_summary_ar ({len(sum_ar.split())} words) is severely truncated compared to core_answer_summary_en ({len(sum_en.split())} words).",
+                })
+                recommendations.append("Expand core_answer_summary_ar to match the full proof detail of core_answer_summary_en.")
             if any(not (isinstance(ex, dict) and (ex.get("text_ar") or "").strip()) for ex in ex_turns):
                 dim_scores["bilingual_symmetry"] -= 3
                 defects.append({"code": "MISSING_DIALOGUE_TEXT_AR", "severity": "MEDIUM", "description": "One or more dialogue_exchange turns lack text_ar."})
@@ -682,7 +852,7 @@ def audit_single_card(
         status = "FAIL"
         tier = "Tier 4: Critical Failure / Rejected (Red)"
     else:
-        status = "PASS" if score_pct >= 50 else "FAIL"
+        status = "PASS" if score_pct >= 75 else "FAIL"
         if score_pct >= 90:
             tier = "Tier 1: Production Ready (Gold)"
         elif score_pct >= 75:

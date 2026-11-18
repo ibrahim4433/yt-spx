@@ -324,8 +324,8 @@ CRITICAL RULES FOR ROUND 1:
      * STRICT BAN ON DA'EE DEFENSIVE REJOINDERS: In debates, when a skeptic implies [Premise X] is objectionable and the Da'ee replies "What is the problem with that?" or "What's wrong with that?", NEVER splice the Da'ee's defensive comeback into "question_en"!
        - BAD (Da'ee counter-ask): "If [Islamic Premise X] holds, what is the problem with that?" / "... what's wrong with that?" / "... why would that be bad?"
        - GOOD (Seeker objection): "If [Islamic Premise X] holds, isn't that a bad thing / unfair / problematic?" or "Why does Islam allow [Premise X]?"
-     * STRICT BAN ON DA'EE OFFENSIVE CROSS-EXAMINATIONS IN "question_en": When the Da'ee attacks the opponent's scripture or worldview (e.g. Old Testament warfare passages like 1 Samuel 15:3 / 2 Samuel 12, Luke 19:27, John 10:30, Acts 3:13, Trinitarian verses, "If [Figure X] is subordinate to the Father, can he still be God?" or "Should God love a rapist...?"), NEVER put the Da'ee's challenge in "question_en" — put it in "socratic_question". Instead, EITHER frame "question_en" around the opponent's underlying claim or counter-defense explicitly naming Christian/skeptic theology (e.g. "How can Christian theology reconcile Jesus's command to love with Old Testament passages like 1 Samuel 15:3?" or "Can [Figure X] still be fully divine even while praying or submitting to the Father?"), OR skip the window if no Islamic proof is delivered.
-     * STRICT THEOLOGICAL FIDELITY BAN ON CHRISTIAN / OPPONENT DOGMA INVERSIONS: NEVER affirm Christian Trinity ("Jesus is fully divine and fully human", "unique Son of God"), vicarious atonement, Old Testament infant slaughter, non-binary gender claims, or pantheistic "union with the divine" as Islamic truth in `core_answer_summary_en` or `logical_premises`! Keep the Da'ee's Islamic Tawheed and prophetic justice unmistakable.
+     * DA'EE OFFENSIVE CROSS-EXAMINATION CONVERSION RULE (CRITICAL): When the Da'ee initiates an offensive cross-examination against Christian/skeptic scripture or doctrine (e.g. Old Testament warfare passages like 1 Samuel 15:3 / 2 Samuel 12 / Numbers 31, Biblical divorce in Matthew 5:32 / 19:9, Original Sin in Ezekiel 18:20, Trinity, or `"Son of God"`), DO NOT skip a rich theological debate and DO NOT put the Da'ee's attack in "question_en" — put it in "socratic_question". Instead, ALWAYS frame "question_en" around the opponent's underlying theological claim being refuted (explicitly naming Christian/Bible/skeptic doctrine, e.g. "Does Biblical law establish a superior standard for divorce and moral justice compared to Islamic Shariah?" or "Does Jesus's title 'Son of God' in the Bible prove divine sonship or prophetic messiahship?"), and make `core_answer_summary_en` + `logical_premises` strictly reflect the Da'ee's Islamic refutation (NEVER role-play or preach the opponent's Christian or pluralist apologetics!).
+     * STRICT THEOLOGICAL FIDELITY BAN ON CHRISTIAN / OPPONENT DOGMA INVERSIONS: NEVER affirm Christian Trinity ("Jesus is fully divine and fully human", "co-equal persons", "does not negate His divine status", "unique Son of God"), vicarious atonement, Old Testament infant slaughter, religious pluralism negating Surah 3:85 ("does not mean all other religions are invalid"), non-binary gender claims, or pantheistic "union with the divine" as Islamic truth in `core_answer_summary_en` or `logical_premises`! Also NEVER invent Aqidah errors such as denying Allah's foreknowledge ("God cannot know the final outcome until Judgment Day"). Keep the Da'ee's Islamic Tawheed, omniscience, and prophetic justice unmistakable.
    - STRICT BAN ON 1ST/2ND-PERSON STREET CONVERSATION PHRASING & PERSONAL CHAT:
      * NEVER write 1st/2nd-person street banter ("How can I know...?", "Why can't I believe...?", "Do you agree that...?", "Why do I oppose Islam...?", "What converted you to Islam?") — convert theological inquiries to standalone 3rd-person inquiry syntax ending with '?'.
      * EXCLUDE non-theological geopolitics (Israel-Palestine conflicts, Palestinian National Charter, Jordanian law), UK statutory trivia (legal marriage age), street insults, and personal biography.
@@ -351,17 +351,18 @@ CRITICAL RULES FOR ROUND 1:
    - "socratic_question": The Da'ee's clincher counter-question that turns the table on the debater and exposes their self-contradiction.
 
 6. SCRIPTURAL CITATIONS (STRICTLY TRANSCRIPT-GROUNDED):
-   - "scriptural_citations": An array of scriptural or historical references EXPLICITLY quoted or directly named in the spoken exchange. NEVER fabricate or guess unmentioned chapter:verse numbers (e.g., Al-Baqarah 2:255, Al-Anbiya 21:107, or unmentioned Hadith numbers) if they were not discussed here! Return [] if none were cited.
+   - "scriptural_citations": An array of scriptural or historical references EXPLICITLY quoted or directly named in the spoken exchange. NEVER fabricate, guess, or import unmentioned chapter:verse numbers (e.g., Al-Baqarah 2:255, Al-Anbiya 21:30 for universe expansion, Al-Anbiya 21:107, John 1:1-3, John 3:16, Hebrews 11:6) if they were not discussed in this exact dialogue! Verify accurate Surah:Ayah meanings (e.g. 51:47 is universe expansion; 21:30 is heavens/earth joined & water). Return [] if none were cited.
    - Each entry must be an object: {"source": "Bible / Quran / Hadith / Torah", "reference": "Book Chapter:Verse", "significance": "Brief explanation of how this text disproves the objection"}.
 
 7. 100% VERBATIM SPOKEN QUOTES, ROLE LOCK & ZERO OUTSIDE FABRICATION:
    - "verbatim_quote" MUST be copied word-for-word from a [MAIN_DAEE]/[CO_DAEE] turn; "interlocutor_verbatim_quote" MUST be copied word-for-word from an [INTERLOCUTOR] turn (unless genuine solo monologue). NEVER swap Da'ee and interlocutor quotes, and NEVER copy `core_answer_summary_en` prose into `verbatim_quote` or `dialogue_exchange`!
-   - CRITICAL ANTI-LEAKAGE MANDATE:
-     * NEVER import stock apologetics illustrations, syllogisms, or scriptural verses from outside this transcript!
-     * Every quote, analogy, citation, and premise MUST be strictly grounded in the spoken words in the provided episode transcript. Importing ungrounded external templates triggers an automatic hard-fail rejection score of 0.
+   - CRITICAL ANTI-LEAKAGE & TOPICAL GROUNDING MANDATE:
+     * NEVER import stock apologetics illustrations, syllogisms, or scriptural verses from outside this transcript! Never invent an unrelated topic (like Quranic manuscript preservation) out of a brief passing remark.
+     * Every quote, analogy, citation, and premise MUST be strictly grounded in the spoken words around `question_turn_id` / `answer_turn_id` in the provided episode transcript. Importing ungrounded external templates triggers an automatic hard-fail rejection score of 0.
 
 8. EXPANDED DIALOGUE TRAJECTORY & CANONICAL ROLES (6 TO 12 TURNS):
-   - "dialogue_exchange" MUST capture the chronological progression of the debate across 6 to 12 turns (or all available turns in the exchange if fewer than 6).
+   - "dialogue_exchange" MUST capture the chronological progression of the debate across 6 to 12 turns (or all available turns in the exchange if fewer than 6) in strictly increasing chronological order.
+   - STRICT TURN-ID FIDELITY: Every entry's `text_en` MUST match the EXACT `turn_id` cited — NEVER copy speech from another turn onto a different `turn_id`, and never mix utterances from separate passersby!
    - CRITICAL ROLE ENUM: `"role"` MUST strictly be `"INTERLOCUTOR"`, `"MAIN_DAEE"`, or `"CO_DAEE"` — NEVER attach speaker names or Arabic text inside `"role"` (e.g., NEVER `"MAIN_DAEE (Hashim)"` or `"المُحاجج"`).
    - Show the dynamic arc: the initial objection, the Da'ee's Socratic probing, the interlocutor's clarification or reaction, the deductive refutation, and the concluding proof.
    - Each item in "dialogue_exchange":
@@ -676,16 +677,37 @@ Translate and localize the provided Round 1 English Dialectical Dossiers into pu
 MANDATORY GLOSSARY:
 - Geography: "6th/7th century Arabia" -> "الجزيرة العربية في القرن السادس/السابع الميلادي" (NEVER عربة!), "Bedouin" -> "بدو / أعراب", "Mecca" -> "مكة المكرمة", "Medina" -> "المدينة المنورة", "Quraysh" -> "قريش".
 - Kalam & Philosophy: "necessary being" -> "واجب الوجود", "contingency" -> "الإمكان / الممكن", "first cause" -> "العلة الأولى / واجب الوجود", "infinite regress" -> "التسلسل اللانهائي الممتنع عقلاً", "circular reasoning" -> "الدور السببي", "category mistake" -> "خلط المقولات", "teleological argument" -> "دليل الإتقان والغائية", "moral ontology" -> "أسس الأخلاق الموضوعية", "epistemology" -> "نظرية المعرفة", "scientism" -> "المذهب العلمي الطبيعي / العلموية", "synchronicities" -> "التزامنات / التوافقات" (NEVER المؤامرات or الموامرات!), "Taoism" -> "الطاوية" (NEVER الطائفة!).
-- Biblical & Comparative Religion: Paul -> "بولس" (NEVER بول!), Matthew -> "متى" (NEVER ماتيو!), Mark -> "مرقس", Luke -> "لوقا", John -> "يوحنا", Peter -> "بطرس", James -> "يعقوب", "Jews" -> "اليهود" (NEVER Hebrew chars!), "Trinity" -> "التثليث", "Hypostatic union" -> "الاتحاد الأقنومي", "Incarnation" -> "التجسد", "Crucifixion" -> "الصلب", "Atonement" -> "الفداء", "Original Sin" -> "الخطيئة الأصلية", "Council of Nicaea" -> "مجمع نيقية", "Church Fathers" -> "آباء الكنيسة", "Old/New Testament" -> "العهد القديم / العهد الجديد".
-- Orthodox attribution (عقيدة أهل السنة والجماعة): preserve God's transcendence and distinguish the Da'ee's Islamic refutation from the interlocutor's claims.
-For EVERY unit in the array, output a JSON object preserving `question_turn_id`, `answer_turn_id`, `question_en`, and populating ALL Arabic fields:
-- `question_ar` (from seeker/skeptic perspective ending with '؟' — NEVER a Da'ee defensive comeback like "فما المشكل في ذلك؟"), `topic_category_ar`, `core_answer_summary_ar` (direct authoritative refutation, no 3rd-person meta-narrative)
-- `logical_premises_ar` (array of exactly 3 deductive steps: المقدمة الأولى، المقدمة الثانية، النتيجة)
-- `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `analogies_ar`, `socratic_question_ar` (ending with '؟')
-- `interlocutor_verbatim_quote_ar`, `verbatim_quote_ar`
-- `scriptural_citations`: array with `reference` and `significance_ar`
-- `dialogue_exchange`: array preserving each `turn_id`, `role`, `move_type` and adding `text_ar`
-Do NOT leave any Arabic field empty. Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"""
+- Biblical & Comparative Religion: Paul -> "بولس" (NEVER بول!), Matthew -> "متى" (NEVER ماتيو!), Mark -> "مرقس", Luke -> "لوقا", John -> "يوحنا", Peter -> "بطرس", James -> "يعقوب", Ezekiel -> "حزقيال" (NEVER إشعياء!), Midianites -> "المديانيين" (NEVER مناة!), "Nazareth in Galilee" -> "الناصرة في الجليل", "False Dilemma" -> "مغالطة الحصر الكاذب", "Children of Israel" -> "بني إسرائيل", "Jews" -> "اليهود" (NEVER Hebrew chars!), "Trinity" -> "التثليث", "Hypostatic union" -> "الاتحاد الأقنومي", "Incarnation" -> "التجسد", "Crucifixion" -> "الصلب", "Atonement" -> "الفداء", "Original Sin" -> "الخطيئة الأصلية", "Council of Nicaea" -> "مجمع نيقية", "Church Fathers" -> "آباء الكنيسة", "Old/New Testament" -> "العهد القديم / العهد الجديد".
+- Orthodox attribution (عقيدة أهل السنة والجماعة): preserve God's transcendence, Tawheed (NEVER write faulty double negatives like "لا يعني أن الله واحداً لا يولد له أبناء"), and Allah's complete omniscience; distinguish the Da'ee's Islamic refutation from the interlocutor's claims.
+- STRICT FIDELITY & LENGTH: NEVER attach prepositions like `للـ`/`بالـ` directly to English words (`للBible`); translate every word into Arabic cleanly. NEVER copy `question_ar` into `interlocutor_verbatim_quote_ar` — translate the actual spoken quote! NEVER truncate `core_answer_summary_ar` below 50% of the English summary length!
+
+EXACT JSON OUTPUT SCHEMA (POPULATE ALL KEYS — DO NOT OMIT ANY REQUIRED FIELD):
+[
+  {
+    "question_turn_id": "preserve exact ID from Round 1",
+    "answer_turn_id": "preserve exact ID from Round 1",
+    "question_en": "preserve exact string from Round 1",
+    "question_ar": "صياغة السؤال الفصحى من منظور السائل وتنتهي بـ ؟",
+    "topic_category_ar": "التصنيف الموضوعي بالعربية",
+    "core_answer_summary_ar": "صياغة الرد العلمي الشرعي المباشر بالفصحى الكاملة (لا يقل عن نصف طول النص الإنجليزي)",
+    "logical_premises_ar": [
+      "المقدمة الأولى: ...",
+      "المقدمة الثانية: ...",
+      "النتيجة: ..."
+    ],
+    "fallacy_or_misconception_exposed_ar": "بيان المغالطة المنطقية بالفصحى",
+    "analogy_or_metaphor_ar": "الترجمة العربية الفصحى للمثال الحسي (أو نص فارغ \"\" إذا لم يوجد مثال في الإنجليزية)",
+    "analogies_ar": ["الترجمة العربية الفصحى لكل مثال حسي، أو [] إذا كانت فارغة بالإنجليزية"],
+    "socratic_question_ar": "السؤال السقراطي المعاكس بالفصحى منتهياً بـ ؟",
+    "scriptural_citations": [{"reference": "...", "significance_ar": "البيان العقدي لدلالة النص"}],
+    "interlocutor_verbatim_quote_ar": "الترجمة العربية الفصحى لاقتباس المحاور الحرفي (لا تنسخ question_ar!)",
+    "verbatim_quote_ar": "الترجمة العربية الفصحى لاقتباس الداعية الحرفي",
+    "dialogue_exchange": [
+      {"turn_id": "...", "role": "INTERLOCUTOR | MAIN_DAEE | CO_DAEE", "move_type": "...", "text_ar": "الترجمة العربية الدقيقة للمداخلة"}
+    ]
+  }
+]
+Do NOT leave any required Arabic field empty. Do NOT emit <think> blocks. Output strictly a valid JSON array: [ { ... } ] /no_think"""
 
 USER_ROUND2_PROMPT_TEMPLATE = """ORIGINAL EPISODE CONTEXT:
 Video Title: {title_ar}

@@ -1,9 +1,9 @@
 # Dawah Dialectics (`yt-spx`) — Universal Apologetics Card Rating System & Quality Rubric
 
-> **Version**: 3.0.0  
+> **Version**: 3.1.0  
 > **Target Dataset**: `dawah_knowledge.db` (`qa_units`, `scenario_turns`, `video_speakers`, `videos`)  
-> **Evaluation Engine**: Manual AI Agent Swarm + Automated Audit CLI (`audit_cards.py`)  
-> **Core Objective**: Ensure every apologetics card is a verified, production-ready, intellectually convincing, bilingual dialectical dossier grounded 100% in acoustic diarization and spoken transcript truth.
+> **Evaluation Engine**: Manual AI Agent Swarm + Automated Audit CLI (`audit_cards.py` v3.1)  
+> **Core Objective**: Ensure every apologetics card is a verified, production-ready, intellectually convincing, bilingual dialectical dossier grounded 100% in acoustic diarization and spoken transcript truth (`PASS >= 75`).
 
 ---
 
@@ -53,7 +53,7 @@ Every card must satisfy four uncompromising pillars:
 | **2.1 Zero Prompt Leakage & Fabrication** | 7 | Zero prompt demonstration clichés (e.g., `"Mark 13:32"`, `"train of freight carriages"`, `"soldier cannot fire his rifle"`, `"whatever begins to exist has a cause"`, `"lamp drawing current from a power plant"`) unless spoken verbatim on camera. | **[GATE-LEAK] (AUTOMATIC 0/100)** if prompt demonstration text is copied into the card. |
 | **2.2 Interlocutor Quote Accuracy & Role** | 6 | `interlocutor_verbatim_quote` matches spoken words in `scenario_turns` spoken by the `INTERLOCUTOR` (or Da'ee framing the objection in a verified solo monologue) and represents the objection—not the Da'ee's counter-argument. | **[GATE-ROLE]** / -6 if it contains the Muslim Da'ee's counter-argument or is fabricated; -3 if fused with Da'ee speech due to diarization collapse. |
 | **2.3 Da'ee Proof Quote Accuracy & Role** | 6 | `verbatim_quote` matches spoken words by `MAIN_DAEE`/`CO_DAEE` delivering proof/refutation—not the opponent's objection and not a fused 2-speaker block. | **[GATE-ROLE]** / -6 if it contains the opponent's claim/attack or is ungrounded; -3 if fused with interlocutor speech. |
-| **2.4 Dialogue Trajectory Integrity** | 6 | `dialogue_exchange` preserves chronological progression across **6–12 turns** (minimum 4 turns for rich debates), with accurate `role` (`INTERLOCUTOR` vs `MAIN_DAEE`) matching who actually spoke each turn in `scenario_turns`. | -4 if `< 4` turns when the debate is long; -4 if `role` labels disagree with `scenario_turns` or collapse to a single role; -6 if dialogue turns are fabricated. |
+| **2.4 Dialogue Trajectory Integrity** | 6 | `dialogue_exchange` preserves chronological progression across **6–12 turns** (minimum 4 turns for rich debates), with monotonic timestamps (`NON_MONOTONIC_DIALOGUE_TIMESTAMPS`), accurate `role` (`INTERLOCUTOR` vs `MAIN_DAEE`), and `text_en` matching `scenario_turns[turn_id]` (`DIALOGUE_TURN_TEXT_SHIFTED`). | -4 if `< 4` turns when the debate is long; -5 if `dialogue_exchange[i].text_en` is shifted/mismatched against its own `turn_id`; -3 if timestamps regress; -5 if `role` disagrees with `scenario_turns`; **[GATE-UNGROUNDED]** (-12 & 0/100) if topical stem overlap `< 9%` with the local window. |
 
 ---
 
@@ -75,7 +75,7 @@ Every card must satisfy four uncompromising pillars:
 | :--- | :---: | :--- | :--- |
 | **4.1 Complete Arabic Localization** | 8 | All 8 Arabic fields (`question_ar`, `core_answer_summary_ar`, `logical_premises_ar`, `fallacy_or_misconception_exposed_ar`, `analogy_or_metaphor_ar`, `socratic_question_ar`, `verbatim_quote_ar`, `interlocutor_verbatim_quote_ar`) + `text_ar` in every `dialogue_exchange` turn + `significance_ar` in `scriptural_citations` are fully populated. | **[GATE-ARABIC] (AUTOMATIC 0/100)** if any required Arabic field is missing/empty; -3 if `text_ar` or `significance_ar` is missing. |
 | **4.2 Eloquent Classical Arabic (فصحى أصيلة)** | 7 | Authoritative scholarly Arabic prose adhering to the Islamic apologetics glossary (`الجزيرة العربية` never `عربة`; `التزامنات` never `المؤامرات`; `بولس/متى/مرقس/لوقا/يوحنا/بطرس` never phonetic `بول/ماتيو/مارك/لوك/جون/بيتر`; proper `؟` and `،`). | -3 to -5 for glossary drift, literal calques, gender/number agreement errors, or robotic syntax. |
-| **4.3 Zero Foreign Script / Latin Leakage** | 5 | Clean of Russian Cyrillic, Hebrew, Korean/CJK characters or punctuation (`。，？`), and untranslated Latin words inside Arabic fields. | -5 if Cyrillic, Hebrew, CJK, or Latin words leak into Arabic fields. |
+| **4.3 Zero Foreign Script / Latin Leakage & Arabic Hygiene** | 5 | Clean of Cyrillic/Hebrew/CJK characters (`。，？`), untranslated Latin words, dangling stripped-Latin proclitics (`"لل."` / `"لل "`), duplicate question copied into `interlocutor_verbatim_quote_ar`, and severe summary truncation (`< 36%` AR/EN word ratio on `>= 90`-word EN summaries). | -5 if Cyrillic, Hebrew, CJK, or Latin words leak into Arabic fields; -4 for `CORRUPTED_ARABIC_PREPOSITION` or `DUPLICATE_ARABIC_QUOTE_QUESTION`; -5 for `TRUNCATED_ARABIC_SUMMARY`. |
 
 ---
 
@@ -102,13 +102,14 @@ Any card exhibiting **at least one** of the following conditions receives an aut
    - `daee_speaker_id == interlocutor_speaker_id`, `answer_turn_id` spoken by an interlocutor, or opponent dogma asserted as Islamic proof.
    - `interlocutor_verbatim_quote` contains the Da'ee's argument OR `verbatim_quote` contains the interlocutor's objection.
 5. **[GATE-NOISE] Conversational Noise / Street Drama / Chit-Chat**: Extracts police scuffles, dog petting, fundraising outros, or non-apologetic personal chat (*"What converted you to Islam?"*).
-6. **[GATE-DIARIZATION] Stage 1 Single-Speaker Diarization Collapse**: The source debate (>180s, clearly involving 2+ speakers in the audio/transcript) collapsed into `speakers_count = 1` (`SPK_00` only) in Stage 1 M3 diarization, fusing both speakers inside single turns and corrupting `interlocutor_speaker_id`, `dialogue_exchange`, and verbatim quotes.
+6. **[GATE-DIARIZATION] Stage 1 Single-Speaker or Functional Diarization Collapse**: The source debate (`>180s`, `>= 200` words) either collapsed into `speakers_count = 1` (`SPK_00` only) OR functionally collapsed interlocutor turns (`< 40` `INTERLOCUTOR` words or `< 3.5%` interlocutor share despite `speakers_count >= 2`), fusing speakers inside single turns and corrupting attribution.
+7. **[GATE-UNGROUNDED] Severe Topical Drift / Hallucinated Dossier**: `question_en` and `core_answer_summary_en` share `< 9%` 5-char topical stems with the local `scenario_turns` window (`[-60s, +120s]`) in multi-turn debates, indicating a fabricated off-topic dossier.
 
 ---
 
 ## 4. Final Quality Classification Tiers
 
-- **Tier 1: Production Ready (Gold)** `[90 - 100 Points]`: Flawless, authoritative, verified 1-to-1 against `scenario_turns` and `video_speakers`, ready for live website publication.
-- **Tier 2: Minor Polish Needed (Silver)** `[75 - 89 Points]`: Substantive and well-grounded, with minor stylistic, Arabic, meta-narrative, or trajectory length flaws that can be repaired cleanly.
-- **Tier 3: Substandard / Requires Regeneration (Bronze)** `[50 - 74 Points]`: Grounded in a real topic, but suffers from weak phrasing, awkward 1st/2nd-person question framing, intra-video duplication, wrong `interlocutor_type`, or poor quote selection.
-- **Tier 4: Critical Failure / Rejected (Red)** `[0 - 49 Points]`: Triggers a Hard-Fail Gate (`[GATE-*]`) or fails due to perspective inversion, swapped quotes, diarization collapse, prompt leakage, noise, or missing Arabic.
+- **Tier 1: Production Ready (Gold)** `[90 - 100 Points — PASS]`: Flawless, authoritative, verified 1-to-1 against `scenario_turns` and `video_speakers`, ready for live website publication.
+- **Tier 2: Minor Polish Needed (Silver)** `[75 - 89 Points — PASS]`: Substantive and well-grounded, with minor stylistic, Arabic, meta-narrative, or trajectory length flaws that can be repaired cleanly.
+- **Tier 3: Substandard / Requires Regeneration (Bronze)** `[50 - 74 Points — FAIL (DO_NOT_PUBLISH / NEEDS_REGEN)]`: Grounded in a real topic, but UNSAFE for live publication due to truncated/corrupted Arabic, shifted turn texts, weak phrasing, awkward 1st/2nd-person question framing, intra-video duplication, or wrong `interlocutor_type`. Requires `PASS >= 75`.
+- **Tier 4: Critical Failure / Rejected (Red)** `[0 - 49 Points — FAIL]`: Triggers a Hard-Fail Gate (`[GATE-*]`) or fails due to perspective inversion, swapped quotes, diarization collapse, topical drift, prompt leakage, noise, or missing Arabic.

@@ -369,8 +369,17 @@ def build_turns_from_aligned_words(
     return turns
 
 
+def _collapse_turn_repetition_loops(text: str) -> str:
+    """Collapses Whisper ASR word-repetition loops before storing Stage 1 turns."""
+    if not text:
+        return ""
+    collapsed = re.sub(r"\b(\w+[\s,.]*)\s*(?:\1){2,}", r"\1 ", text, flags=re.IGNORECASE)
+    return " ".join(collapsed.split()).strip()
+
+
 def _pack_word_turn(words: List[Dict[str, Any]], language: str = "en") -> Dict[str, Any]:
-    text = " ".join(w["word"].strip() for w in words if w.get("word")).strip()
+    raw_text = " ".join(w["word"].strip() for w in words if w.get("word")).strip()
+    text = _collapse_turn_repetition_loops(raw_text)
     start_ms = int(words[0]["start_ms"])
     end_ms = int(words[-1]["end_ms"])
     return {

@@ -1,4 +1,4 @@
-# AI Agent Manual Audit Instructions & Rating Workflow (v3.0)
+# AI Agent Manual Audit Instructions & Rating Workflow (v3.1)
 
 > **Purpose**: Re-usable step-by-step instructions, system prompt, and output schema enabling any AI Agent or Swarm Rater to manually evaluate `qa_units` apologetics cards one by one against ground-truth `scenario_turns` and `video_speakers` metadata, diagnose pipeline root causes, and produce actionable recommendations.
 
@@ -20,10 +20,10 @@ When auditing a batch of cards, execute these 4 steps **manually for every singl
      - **Socratic role reversal** (the Muslim Da'ee attacking Christian/Atheist scripture, mistakenly reframed as `question_en`),
      - **Quote swapping** (Da'ee's argument placed in `interlocutor_verbatim_quote` or opponent's objection placed in `verbatim_quote`).
 
-3. **Audit Every Field Against `RUBRIC.md` v3.0 (100 Pts + 6 Hard-Fail Gates)**:
-   - Evaluate Dimensions 1–5 (`20 + 25 + 20 + 20 + 15 = 100 pts`).
-   - Check all 6 Hard-Fail Gates: `[GATE-LEAK]`, `[GATE-ARABIC]`, `[GATE-PERSPECTIVE]`, `[GATE-ROLE]`, `[GATE-NOISE]`, `[GATE-DIARIZATION]`.
-   - Never rely solely on automated keyword heuristics: use semantic reading to judge whether the question is genuinely what a seeker searches, whether the theological target is unambiguous (e.g. explicitly naming the Bible/Old Testament when refuting 1 Samuel 15:3), whether the syllogism is valid and faithful to the transcript, and whether the Arabic is natural, accurate Classical Arabic (*فصحى أصيلة*).
+3. **Audit Every Field Against `RUBRIC.md` v3.1 (100 Pts + 7 Hard-Fail Gates, `PASS >= 75`)**:
+   - Evaluate Dimensions 1–5 (`20 + 25 + 20 + 20 + 15 = 100 pts`). Score `raw_unclamped_estimate` strictly on the rubric point deductions BEFORE clamping `total_score` to `0` on hard-fail gates. Tier 3 (`50–74`) is **`FAIL` (`DO_NOT_PUBLISH / NEEDS_REGEN`)**; only Tier 1 (`90–100`) and Tier 2 (`75–89`) earn `status = "PASS"`.
+   - Check all 7 Hard-Fail Gates: `[GATE-LEAK]`, `[GATE-ARABIC]`, `[GATE-PERSPECTIVE]`, `[GATE-ROLE]`, `[GATE-NOISE]`, `[GATE-DIARIZATION]`, `[GATE-UNGROUNDED]`.
+   - Never rely solely on automated keyword heuristics: use semantic reading to judge whether the question is genuinely what a seeker searches, whether the theological target is unambiguous (e.g. explicitly naming the Bible/Old Testament when refuting 1 Samuel 15:3), whether the syllogism is valid and faithful to the transcript, whether `dialogue_exchange[i].text_en` truly matches its cited `turn_id` in chronological order, and whether the Arabic is complete, eloquent Classical Arabic (*فصحى أصيلة*).
 
 4. **Record Specific Root Causes & Concrete Card + Pipeline Recommendations**:
    - State clearly **why** the card is good or bad with exact quoted evidence from both the card and `scenario_turns`.
@@ -37,18 +37,19 @@ When auditing a batch of cards, execute these 4 steps **manually for every singl
 ```text
 You are a Senior Apologetics Quality Auditor, Scholar of Islamic Dialectics, and Ground-Truth Verifier for the Dawah Dialectics (yt-spx) project.
 
-Your mission is to manually evaluate every extracted apologetics card one by one with uncompromising rigor against its ground-truth diarized transcript (`scenario_turns`), `video_speakers` roster, and `RUBRIC.md` (Version 3.0.0).
+Your mission is to manually evaluate every extracted apologetics card one by one with uncompromising rigor against its ground-truth diarized transcript (`scenario_turns`), `video_speakers` roster, and `RUBRIC.md` (Version 3.1.0, `PASS >= 75`).
 
 EVALUATION RULES:
-1. Diarization & Speaker Integrity First: Verify `video_speakers` and `scenario_turns`. If a multi-speaker debate (>180s) collapsed into `speakers_count == 1` (`SPK_00` only) and fused both speakers inside turns, trigger `[GATE-DIARIZATION]` (Score: 0). If `daee_speaker_id == interlocutor_speaker_id`, `answer_turn_id` belongs to an interlocutor, opponent dogma is asserted as truth, or `interlocutor_verbatim_quote` and `verbatim_quote` are swapped/attributed to the wrong speaker, trigger `[GATE-ROLE]` (Score: 0).
+1. Diarization & Speaker Integrity First: Verify `video_speakers` and `scenario_turns`. Trigger `[GATE-DIARIZATION]` (Score: 0) if a multi-speaker debate (>180s) collapsed into `speakers_count == 1` (`SPK_00` only) OR functionally collapsed interlocutor speech (`< 40` `INTERLOCUTOR` words or `< 3.5%` share across `>= 200` words). Trigger `[GATE-ROLE]` (Score: 0) if `daee_speaker_id == interlocutor_speaker_id`, `answer_turn_id` belongs to an interlocutor, opponent dogma (Trinitarian co-equality, pluralist denial of 3:85, limited omniscience, unconditional salvation, Tawheed negation) is asserted as Islamic truth, or quotes are swapped.
 2. Question Perspective, Polarity & Unambiguous Target: `question_en` and `question_ar` MUST represent a genuine seeker/skeptic inquiry or misconception ending with `?`/`؟`. Trigger `[GATE-PERSPECTIVE]` (Score: 0) if the question is:
    - A 1st-person confession or awkward street dialogue ("Why do I oppose Islam...", "How can I know...", "Why can't I believe...", "How does Islam affect me...", "Do you agree...", "Can you prove God to me? Okay?"),
    - A Da'ee defensive comeback spliced onto a claim ("...what is the problem with that?" / "فما المشكل في ذلك؟"),
-   - A Da'ee offensive cross-examination against opponent scripture (e.g., attacking 1 Samuel 15:3, Ezekiel 18, Trinity, or Biblical polygamy) phrased as if it were the main seeker question (or worse, misleadingly phrased as "Why does God command killing innocent children?" without naming the Bible).
-3. Grounding & Zero Leakage: Cross-check quotes, premises, analogies, citations, and `dialogue_exchange` turns against `scenario_turns`. Trigger `[GATE-LEAK]` (Score: 0) if prompt demonstration text ("whatever begins to exist has a cause", "train of freight carriages", "soldier cannot fire his rifle", "child being held down by doctors", "Mark 13:32", "lamp drawing current from a power plant") was copied without appearing in the transcript.
+   - A Da'ee offensive cross-examination against opponent scripture (e.g., attacking 1 Samuel 15:3, Ezekiel 18, Trinity, Original Sin, or Biblical polygamy) phrased as if it were the main seeker question (or misleadingly phrased as "Why does God command killing innocent children?" without naming the Bible).
+3. Grounding, Turn-ID Fidelity & Topical Alignment: Cross-check quotes, premises, analogies, citations, and every `dialogue_exchange` turn against its exact `turn_id` in `scenario_turns` (flagging `DIALOGUE_TURN_TEXT_SHIFTED` if `text_en` belongs to another turn and `NON_MONOTONIC_DIALOGUE_TIMESTAMPS` if timestamps regress). Trigger `[GATE-LEAK]` (Score: 0) if prompt demonstration text was copied, or `[GATE-UNGROUNDED]` (Score: 0) if `question_en`/`core_answer_summary_en` shares `< 9%` 5-char stems with the local `[-60s, +120s]` transcript window.
 4. Dialectical Depth & No Meta-Narration: Check that `core_answer_summary_en`/`_ar` states direct Islamic truth (no "The Da'ee explains...", "Hashim argues..."), `logical_premises` is a valid 3-step deductive syllogism, `socratic_question` is distinct from `question_en`, and `dialogue_exchange` accurately reflects 4-12 turns with matching speaker roles.
-5. Bilingual Classical Arabic Symmetry: All 8 Arabic fields + `text_ar` in `dialogue_exchange` + `significance_ar` in `scriptural_citations` must be complete ([GATE-ARABIC] if missing), eloquent (*فصحى أصيلة*), adhering to the theological glossary, and free of Cyrillic/Hebrew/CJK/Latin leakage.
+5. Bilingual Classical Arabic Symmetry & Hygiene: All 8 Arabic fields + `text_ar` in `dialogue_exchange` + `significance_ar` in `scriptural_citations` must be complete (`[GATE-ARABIC]` if missing), eloquent (*فصحى أصيلة*), adhering to the theological glossary, and free of Cyrillic/Hebrew/CJK/Latin leakage, dangling stripped-Latin proclitics (`لل.` -> `CORRUPTED_ARABIC_PREPOSITION`), copied question in `interlocutor_verbatim_quote_ar` (`DUPLICATE_ARABIC_QUOTE_QUESTION`), or severe summary truncation (`TRUNCATED_ARABIC_SUMMARY`, `< 36%` AR/EN ratio on `>= 90`-word EN summaries).
 6. Non-Theological Noise: Police scuffles, dog petting, fundraising outros, or personal biography chit-chat ("What converted you to Islam?") trigger `[GATE-NOISE]` (Score: 0).
+7. Scoring Discipline: Compute `dimension_scores` and `raw_unclamped_estimate` strictly from rubric point deductions BEFORE clamping `total_score` to `0` on any triggered hard-fail gate. Require `>= 75` for `"PASS"` (Tier 3 `50–74` is `"FAIL"` — `DO_NOT_PUBLISH / NEEDS_REGEN`).
 
 Produce your manual evaluation in the exact JSON Schema below alongside a human-readable Markdown analysis.
 ```
@@ -66,16 +67,16 @@ Please manually audit the following apologetics card against its video metadata,
 ### GROUND-TRUTH SCENARIO TRANSCRIPT TURNS:
 {transcript_turns_json}
 
-Apply the 5-dimension rubric from `tools/card_rating_system/RUBRIC.md` (Version 3.0.0, Max 100 points):
+Apply the 5-dimension rubric from `tools/card_rating_system/RUBRIC.md` (Version 3.1.0, Max 100 points, `PASS >= 75`):
 - Dimension 1: Question Formulation, Polarity & Standalone Clarity (Max 20)
 - Dimension 2: Grounding, Verbatim Fidelity & Speaker Separation (Max 25)
 - Dimension 3: Dialectical Depth, Syllogisms & Truth Value (Max 20)
 - Dimension 4: Bilingual Symmetry, Classical Arabic Eloquence & Hygiene (Max 20)
 - Dimension 5: Attribution, Timestamps & Website Presentation Readiness (Max 15)
 
-Check all 6 Hard-Fail Gates:
-`[GATE-LEAK]`, `[GATE-ARABIC]`, `[GATE-PERSPECTIVE]`, `[GATE-ROLE]`, `[GATE-NOISE]`, `[GATE-DIARIZATION]`.
-If any gate is triggered, set `total_score` to `0`, `status` to `"FAIL"`, and `tier` to `"Tier 4: Critical Failure / Rejected (Red)"`.
+Check all 7 Hard-Fail Gates:
+`[GATE-LEAK]`, `[GATE-ARABIC]`, `[GATE-PERSPECTIVE]`, `[GATE-ROLE]`, `[GATE-NOISE]`, `[GATE-DIARIZATION]`, `[GATE-UNGROUNDED]`.
+Score `raw_unclamped_estimate` strictly on rubric point deductions prior to gate clamping; if any gate is triggered, set `total_score` to `0`, `status` to `"FAIL"`, and `tier` to `"Tier 4: Critical Failure / Rejected (Red)"`. Tier 3 (`50–74`) also receives `status = "FAIL"` (`DO_NOT_PUBLISH / NEEDS_REGEN`).
 ```
 
 ---

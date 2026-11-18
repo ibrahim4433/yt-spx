@@ -801,10 +801,17 @@ _ARABIC_COMPOUND_REPLACEMENTS = [
     (re.compile(r"\bإنجيل\s+لوك\b"), "إنجيل لوقا"),
     (re.compile(r"\bإنجيل\s+جون\b"), "إنجيل يوحنا"),
     (re.compile(r"\bالقديس\s+بيتر\b"), "القديس بطرس"),
+    (re.compile(r"إشعياء\s*18\s*:\s*20"), "حزقيال 18:20"),
+    (re.compile(r"نَزَرَثَ\s+في\s+غاليلية|نزرة\s+في\s+غاليلية"), "الناصرة في الجليل"),
+    (re.compile(r"(?<![\w\u0600-\u06ff])الأرحيم(?![\w\u0600-\u06ff])"), "الرحيم"),
+    (re.compile(r"(?<![\w\u0600-\u06ff])العلاقةي(?![\w\u0600-\u06ff])"), "العلائقي"),
+    (re.compile(r"(?<![\w\u0600-\u06ff])نقطةي(?![\w\u0600-\u06ff])"), "نقطتي"),
+    (re.compile(r"(?<![\w\u0600-\u06ff])بنية\s+إسرائيل(?![\w\u0600-\u06ff])"), "بني إسرائيل"),
 ]
 _ARABIC_GOSPEL_CTX_TERMS = ("الإنجيل", "العهد الجديد", "متى", "مرقس", "لوقا", "يوحنا", "المسيح", "يسوع", "شاهد")
 _ARABIC_PAUL_CTX_RE = re.compile(r"(?<![\w\u0600-\u06ff])([وفبكل]?)بول\b")
-_ARABIC_ORPHAN_PREFIX_RE = re.compile(r"(?:^|\s)(?:[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])")
+_ARABIC_ORPHAN_PREFIX_RE = re.compile(r"(?:^|\s)(?:[وف]?للـ?|[وفبكل]?الـ?|[وفبكل]ـ?)\s*(?=[a-zA-Z])")
+_DANGLING_PROCLITIC_RE = re.compile(r"(?<![\w\u0600-\u06ff])(?:[وف]?للـ?|[وف]الـ?)(?=[\s.,؛،!?؟]|$)")
 _LATIN_WORDS_RE = re.compile(r"[A-Za-z]+")
 _EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
 _EMPTY_BRACKETS_RE = re.compile(r"\[\s*\]")
@@ -868,6 +875,7 @@ def clean_latin_tokens_in_arabic(text: str) -> str:
     if _LATIN_WORDS_RE.search(val):
         val = _ARABIC_ORPHAN_PREFIX_RE.sub(" ", val)
         val = _LATIN_WORDS_RE.sub("", val)
+    val = _DANGLING_PROCLITIC_RE.sub("", val)
     val = _HEBREW_RE.sub("", val)
     val = _EMPTY_PARENS_RE.sub("", val)
     val = _EMPTY_BRACKETS_RE.sub("", val)
@@ -927,6 +935,13 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
         (r'\b(?:islam|quran)\s+(?:affirms|accepts|endorses|recognizes)\s+(?:non-binary|multiple\s+genders|same-sex\s+marriage)\b', 'Secular gender/marriage distortion attributed to Islam', False),
         (r'\bnon-binary\s+(?:gender\s+)?identity\s+is\s+(?:islamic|affirmed|valid\s+in\s+islam)\b', 'Non-binary identity endorsed as Islamic', True),
         (r'(?:الإسلام|القرآن)\s+(?:يقر|يؤيد|يعترف\s+بـ?)\s*(?:الهوية\s+اللاجندرية|تعدد\s+الأجناس|الزواج\s+المثلي)', 'نسبة الهوية اللاجندرية أو الزواج المثلي إلى الإسلام', False),
+
+        # 9. Trinitarian co-equality / pluralist denial of 3:85 / omniscience denial / Tawheed negation
+        (r"\b(?:does\s+not\s+(?:negate|diminish|deny)\s+(?:his|jesus'?s?)\s+divin(?:e\s+status|ity)|co-equal\s+persons?\s+of\s+the\s+trinity|co-equal\s+with\s+the\s+father|does\s+not\s+imply\s+inferiority\s+in\s+divine\s+nature)\b", 'Trinitarian co-equality asserted as truth', True),
+        (r'\b(?:does\s+not\s+mean\s+(?:that\s+)?all\s+other\s+religions\s+are\s+invalid|does\s+not\s+invalidate\s+other\s+(?:religious\s+)?paths|all\s+religions\s+are\s+equally\s+valid\s+in\s+islam)\b', 'Religious pluralism contradicting Surah 3:85 asserted as Islamic truth', False),
+        (r'\bgod\s+(?:cannot|does\s+not)\s+know\s+(?:the\s+final\s+outcome|who\s+will\s+succeed|the\s+future)\b', 'Denial of divine omniscience', False),
+        (r'\bislam\s+teaches\s+unconditional\s+salvation\s+regardless\s+of\s+(?:belief|faith|leaving\s+islam)\b', 'Unconditional salvation regardless of faith misattributed to Islam', False),
+        (r'لا\s+يعني\s+أن\s+الله\s+واحد(?:اً|ًا|ا)?\s+لا\s+ي[\u064f]?ولد\s+له\s+أبناء', 'صياغة عربية تنفي التوحيد خطأً', False),
     ]
 
     texts_to_check = [
@@ -934,12 +949,21 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
         str(unit.get("core_answer_summary_ar") or ""),
         str(unit.get("verbatim_quote") or ""),
         str(unit.get("verbatim_quote_ar") or ""),
+        str(unit.get("analogy_or_metaphor") or ""),
+        str(unit.get("analogy_or_metaphor_ar") or ""),
     ]
 
-    for pk in ("logical_premises", "logical_premises_ar"):
+    for pk in ("logical_premises", "logical_premises_ar", "analogies", "analogies_ar", "analogies_json"):
         val = unit.get(pk)
+        if isinstance(val, str) and val.strip().startswith("["):
+            try:
+                val = json.loads(val)
+            except Exception:
+                pass
         if isinstance(val, list):
             texts_to_check.extend(str(x) for x in val)
+        elif isinstance(val, str) and val.strip():
+            texts_to_check.append(val)
 
     if a_turn:
         texts_to_check.append(str(a_turn.get("text_original") or ""))

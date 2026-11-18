@@ -112,13 +112,89 @@ const MOVE_TYPE_MAP = {
   "analogy": "قياس ومثال",
   "clarification": "توضيح",
   "reaction": "تعقيب",
-  "concession": "إقرار / تسليم"
+  "concession": "إقرار / تسليم",
+  "scriptural challenge": "إلزام نصي",
+  "scriptural proof": "دليل نصي",
+  "conclusion": "خلاصة / نتيجة",
+  "conceptual distinction": "تحرير مفاهيمي",
+  "turn": "مداخلة"
 };
 
 function getLocalizedMoveType(moveType, lang = currentLang) {
   const m = String(moveType || "").trim();
   if (!m || lang !== "ar") return m;
   return MOVE_TYPE_MAP[m.toLowerCase()] || m;
+}
+
+function buildExchangeTimelineHtml(exchanges, opts = {}) {
+  const list = Array.isArray(exchanges) ? exchanges.slice(0, 12) : [];
+  if (!list.length) return "";
+  const {
+    videoId = "",
+    fallbackTs = "00:00",
+    fallbackSec = 0,
+    daeeNameEn = "",
+    daeeNameAr = "",
+    showParallel = false,
+    isAr = false,
+    lang = currentLang,
+    visibleCount = 4,
+    marginTop = "",
+    t = {},
+  } = opts;
+  const hasExtra = list.length > visibleCount;
+  const extraCount = Math.max(0, list.length - visibleCount);
+  const turnsLabel = isAr ? `${list.length} مداخلة` : `${list.length} TURNS`;
+  const panelStyle = marginTop ? ` style="margin-top:${marginTop};"` : "";
+  const itemsHtml = list
+    .map((ex, exIdx) => {
+      const isExtra = exIdx >= visibleCount;
+      const isDaeeRole = String(ex.role || "").includes("DAEE") || /الداعية|المُحاجج|المحاجج/.test(String(ex.role || ""));
+      const roleCls = isDaeeRole ? "exchange-role-daee" : "exchange-role-inter";
+      let spkName = "";
+      if (isAr) {
+        spkName = ex.speaker_label_ar && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_ar)
+          ? ex.speaker_label_ar
+          : (isDaeeRole ? (daeeNameAr || "الداعية المحاور") : "المحاور");
+      } else {
+        spkName = ex.speaker_label_en && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_en)
+          ? ex.speaker_label_en
+          : (isDaeeRole ? (daeeNameEn || "Main Da'ee") : "Interlocutor");
+      }
+      const exBody = formatParallelText(ex.text_en, ex.text_ar, showParallel, isAr, "rgba(15,82,62,0.14)", false);
+      const exMove = getLocalizedMoveType(ex.move_type, lang);
+      const exTs = ex.timestamp_formatted || fallbackTs || "00:00";
+      const exSec = Number(ex.timestamp_seconds ?? fallbackSec ?? 0) || 0;
+      const extraClass = isExtra ? " exchange-step-extra" : "";
+      const extraStyle = isExtra ? ' style="display:none;"' : "";
+      return `
+        <button type="button" class="exchange-step-item${extraClass}"${extraStyle} onclick="openScenarioStudio('${escapeJsStr(videoId)}', '${escapeJsStr(ex.turn_id || "")}', ${exSec})">
+          <div class="exchange-step-meta">
+            <span class="${roleCls}">${escapeHtml(spkName)}${exMove ? ` · ${escapeHtml(exMove)}` : ""}</span>
+            <span>${escapeHtml(exTs)}</span>
+          </div>
+          <div class="exchange-step-text">${exBody}</div>
+        </button>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="exchange-timeline-panel"${panelStyle}>
+      <div class="exchange-timeline-bar">
+        <span>${SVG_ICONS.scenario} ${escapeHtml(t.exchangeLabel || "Chronological Speaker Exchange")}</span>
+        <span>${escapeHtml(turnsLabel)}</span>
+      </div>
+      <div class="exchange-steps-list">${itemsHtml}</div>
+      ${hasExtra ? `
+        <div style="padding: 0 0.75rem 0.6rem 0.75rem;">
+          <button type="button" class="exchange-toggle-btn" data-expanded="false" onclick="toggleExchangeTurns(this)">
+            <span>+ ${escapeHtml(t.showMoreTurns || "Show remaining turns")} (${extraCount})</span>
+          </button>
+        </div>
+      ` : ""}
+    </div>
+  `;
 }
 
 const SVG_ICONS = {
@@ -1452,62 +1528,18 @@ function renderCards(cards) {
     const exchanges = Array.isArray(card.dialogue_exchange) && card.dialogue_exchange.length
       ? card.dialogue_exchange
       : (Array.isArray(card.dialogue_trajectory) ? card.dialogue_trajectory : []);
-    let exchangeHtml = "";
-    if (exchanges.length) {
-      const displayedExchanges = exchanges.slice(0, 12);
-      const hasExtra = displayedExchanges.length > 4;
-      const extraCount = displayedExchanges.length - 4;
-      const turnsLabel = isAr ? `${displayedExchanges.length} مداخلة` : `${displayedExchanges.length} TURNS`;
-      exchangeHtml = `
-        <div class="exchange-timeline-panel">
-          <div class="exchange-timeline-bar">
-            <span>${SVG_ICONS.scenario} ${escapeHtml(t.exchangeLabel)}</span>
-            <span>${escapeHtml(turnsLabel)}</span>
-          </div>
-          <div class="exchange-steps-list">
-            ${displayedExchanges
-              .map((ex, exIdx) => {
-                const isExtra = exIdx >= 4;
-                const isDaeeRole = String(ex.role || "").includes("DAEE") || /الداعية|المُحاجج|المحاجج/.test(String(ex.role || ""));
-                const roleCls = isDaeeRole ? "exchange-role-daee" : "exchange-role-inter";
-                let spkName = "";
-                if (isAr) {
-                  spkName = ex.speaker_label_ar && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_ar)
-                    ? ex.speaker_label_ar
-                    : (isDaeeRole ? (card.daee_name_ar || "الداعية المحاور") : "المحاور");
-                } else {
-                  spkName = ex.speaker_label_en && !["MAIN_DAEE", "INTERLOCUTOR", "CO_DAEE"].includes(ex.speaker_label_en)
-                    ? ex.speaker_label_en
-                    : (isDaeeRole ? (card.daee_name_en || "Main Da'ee") : "Interlocutor");
-                }
-                const exBody = formatParallelText(ex.text_en, ex.text_ar, showParallel, isAr, "rgba(15,82,62,0.14)", false);
-                const exMove = getLocalizedMoveType(ex.move_type, currentLang);
-                const exTs = ex.timestamp_formatted || card.timestamp_formatted || "00:00";
-                const exSec = Number(ex.timestamp_seconds || card.timestamp_seconds || 0);
-                const extraClass = isExtra ? " exchange-step-extra" : "";
-                const extraStyle = isExtra ? ' style="display:none;"' : "";
-                return `
-                  <button type="button" class="exchange-step-item${extraClass}"${extraStyle} onclick="openScenarioStudio('${escapeJsStr(card.video_id || "")}', '${escapeJsStr(ex.turn_id || "")}', ${exSec})">
-                    <div class="exchange-step-meta">
-                      <span class="${roleCls}">${escapeHtml(spkName)}${exMove ? ` · ${escapeHtml(exMove)}` : ""}</span>
-                      <span>${escapeHtml(exTs)}</span>
-                    </div>
-                    <div class="exchange-step-text">${exBody}</div>
-                  </button>
-                `;
-              })
-              .join("")}
-          </div>
-          ${hasExtra ? `
-            <div style="padding: 0 0.75rem 0.6rem 0.75rem;">
-              <button type="button" class="exchange-toggle-btn" data-expanded="false" onclick="toggleExchangeTurns(this)">
-                <span>+ ${escapeHtml(t.showMoreTurns || "Show remaining turns")} (${extraCount})</span>
-              </button>
-            </div>
-          ` : ""}
-        </div>
-      `;
-    }
+    const exchangeHtml = buildExchangeTimelineHtml(exchanges, {
+      videoId: card.video_id || "",
+      fallbackTs: card.timestamp_formatted || "00:00",
+      fallbackSec: Number(card.timestamp_seconds || 0),
+      daeeNameEn: card.daee_name_en || "",
+      daeeNameAr: card.daee_name_ar || "",
+      showParallel,
+      isAr,
+      lang: currentLang,
+      visibleCount: 4,
+      t,
+    });
 
     const tags = Array.isArray(card.tags) ? card.tags.slice(0, 5) : [];
     const tagsHtml = tags.length
@@ -1576,7 +1608,7 @@ function renderCards(cards) {
             <div class="video-proof-bar">
               <div class="source-video-meta">
                 <span class="timestamp-chip">${escapeHtml(watchTime)}</span>
-                <span class="source-video-title" title="${escapeHtml(card.video_title_ar || "")}">${escapeHtml(card.video_title_ar || "SCDawah Arabic Archive")}</span>
+                <span class="source-video-title" dir="rtl" title="${escapeHtml(card.video_title_ar || "")}">${escapeHtml(card.video_title_ar || "SCDawah Arabic Archive")}</span>
               </div>
               <div class="proof-actions">
                 ${
@@ -2357,6 +2389,21 @@ function sendChatMessage() {
           `
           : "";
 
+        const chatExchanges = Array.isArray(pkg.dialogue_exchange) ? pkg.dialogue_exchange : [];
+        const chatDialogueHtml = buildExchangeTimelineHtml(chatExchanges, {
+          videoId: pkg.video_id || "",
+          fallbackTs: pkg.timestamp || "00:00",
+          fallbackSec: Number(pkg.timestamp_seconds || 0),
+          daeeNameEn: pkg.daee_name_en || "",
+          daeeNameAr: pkg.daee_name_ar || "",
+          showParallel: isParallelMode,
+          isAr: contentAr,
+          lang: currentLang,
+          visibleCount: 2,
+          marginTop: "0.75rem",
+          t,
+        });
+
         const firstTid = Array.isArray(pkg.source_turn_ids) && pkg.source_turn_ids.length ? pkg.source_turn_ids[0] : "";
 
         const relatedHtml =
@@ -2403,12 +2450,13 @@ function sendChatMessage() {
           ${premisesHtml}
           ${analogyHtml}
           ${chatCitationsHtml}
+          ${chatDialogueHtml}
           <div class="video-proof-bar" style="margin-top:0.9rem; padding-top:0.75rem; border-top:1px solid var(--border-hairline);">
-            <span class="source-video-title">${escapeHtml(pkg.video_title || "")}</span>
+            <span class="source-video-title" dir="rtl">${escapeHtml(pkg.video_title || "")}</span>
             <div class="proof-actions">
               ${
                 pkg.video_id
-                  ? `<button type="button" class="btn-outline-action" onclick="openScenarioStudio('${escapeJsStr(pkg.video_id)}', '${escapeJsStr(firstTid)}', 0)">
+                  ? `<button type="button" class="btn-outline-action" onclick="openScenarioStudio('${escapeJsStr(pkg.video_id)}', '${escapeJsStr(firstTid)}', ${Number(pkg.timestamp_seconds) || 0})">
                       ${SVG_ICONS.scenario}
                       <span>${escapeHtml(t.scenarioJumpBtn)}</span>
                     </button>`

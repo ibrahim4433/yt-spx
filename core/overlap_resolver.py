@@ -953,7 +953,7 @@ def _speaker_durations_ms(rttm_segs: List[Dict[str, Any]]) -> List[Tuple[str, in
 
 
 def _is_collapsed_diarization(rttm_segs: List[Dict[str, Any]], total_ms: int) -> bool:
-    """Returns True when a multi-minute video collapsed to <=1 speaker or >=96% single-speaker dominance."""
+    """Returns True when a multi-minute video collapsed to <=1 speaker, <10% secondary share, or intro/outro-only split."""
     if total_ms < 90_000:
         return False
     ranked = _speaker_durations_ms(rttm_segs)
@@ -962,7 +962,17 @@ def _is_collapsed_diarization(rttm_segs: List[Dict[str, Any]], total_ms: int) ->
     total_spk_ms = sum(d for _, d in ranked) or 1
     top_share = ranked[0][1] / total_spk_ms
     second_ms = ranked[1][1]
-    return top_share >= 0.96 and second_ms < 15_000
+    if top_share >= 0.96 and second_ms < 15_000:
+        return True
+    if total_ms >= 300_000:
+        if top_share >= 0.90 or second_ms < 25_000:
+            return True
+        edge_lo = int(total_ms * 0.12)
+        edge_hi = int(total_ms * 0.88)
+        sec_segs = [s for s in rttm_segs if s["speaker_id"] == ranked[1][0]]
+        if sec_segs and all(int(s["end_ms"]) <= edge_lo or int(s["start_ms"]) >= edge_hi for s in sec_segs):
+            return True
+    return False
 
 
 def _write_rttm_file(video_id: str, rttm_segs: List[Dict[str, Any]], rttm_path: Path) -> None:
@@ -1058,51 +1068,54 @@ def run_diarization_m3(
                 "bounded 2-speaker recovery",
             ),
         ]
-        for forced_k, clus_ovr, label in retry_configs:
-            cand_rttm = diarizer.run_diarization(
-                leveled_16k_wav,
-                rttm_path,
-                is_short=is_short,
-                forced_num_speakers=forced_k,
-                clustering_overrides=clus_ovr,
-            )
-            cand_segs = parse_rttm_lines(cand_rttm)
-            cand_ov = detect_simultaneous_overlap_windows(cand_segs, total_duration_ms=total_ms)
-            cand_cents = _compute_centroids_for_rttm(cand_segs, cand_ov, samples, sr, diarizer)
-            cand_segs, cand_cents, cand_merge = merge_fragmented_speaker_clusters(
-                rttm_segments=cand_segs,
-                speaker_centroids=cand_cents,
-                threshold=0.84,
-            )
-            if cand_merge:
-                cand_ov = detect_simultaneous_overlap_windows(
-                    cand_segs, total_duration_ms=total_ms, min_overlap_ms=600
+        retry_rttm_path = rttm_path.with_suffix(".retry.rttm")
+        try:
+            for forced_k, clus_ovr, label in retry_configs:
+                cand_rttm = diarizer.run_diarization(
+                    leveled_16k_wav,
+                    retry_rttm_path,
+                    is_short=is_short,
+                    forced_num_speakers=forced_k,
+                    clustering_overrides=clus_ovr,
                 )
-
-            ranked_cand = _speaker_durations_ms(cand_segs)
-            if len(ranked_cand) >= 2:
-                tot_cand = sum(d for _, d in ranked_cand) or 1
-                s1, s2 = ranked_cand[0][0], ranked_cand[1][0]
-                dur2 = ranked_cand[1][1]
-                share2 = dur2 / tot_cand
-                sim_12 = (
-                    float(np.dot(l2_normalize(cand_cents[s1]), l2_normalize(cand_cents[s2])))
-                    if (s1 in cand_cents and s2 in cand_cents)
-                    else 0.0
+                cand_segs = parse_rttm_lines(cand_rttm)
+                cand_ov = detect_simultaneous_overlap_windows(cand_segs, total_duration_ms=total_ms)
+                cand_cents = _compute_centroids_for_rttm(cand_segs, cand_ov, samples, sr, diarizer)
+                cand_segs, cand_cents, cand_merge = merge_fragmented_speaker_clusters(
+                    rttm_segments=cand_segs,
+                    speaker_centroids=cand_cents,
+                    threshold=0.84,
                 )
-                # Accept recovered split ONLY if secondary speaker is substantive AND acoustically distinct
-                if dur2 >= 5_000 and share2 >= 0.025 and sim_12 < 0.85:
-                    print(
-                        f"      [Anti-Collapse Recovery] Recovered {len(ranked_cand)} distinct speakers via {label} "
-                        f"(2nd share={share2:.1%}, cos_sim={sim_12:.2f})",
-                        flush=True,
+                if cand_merge:
+                    cand_ov = detect_simultaneous_overlap_windows(
+                        cand_segs, total_duration_ms=total_ms, min_overlap_ms=600
                     )
-                    rttm_segs, centroids, overlaps = cand_segs, cand_cents, cand_ov
-                    retried = True
-                    break
 
-    if merge_map or retried:
-        _write_rttm_file(video_id, rttm_segs, rttm_path)
+                ranked_cand = _speaker_durations_ms(cand_segs)
+                if len(ranked_cand) >= 2:
+                    tot_cand = sum(d for _, d in ranked_cand) or 1
+                    s1, s2 = ranked_cand[0][0], ranked_cand[1][0]
+                    dur2 = ranked_cand[1][1]
+                    share2 = dur2 / tot_cand
+                    sim_12 = (
+                        float(np.dot(l2_normalize(cand_cents[s1]), l2_normalize(cand_cents[s2])))
+                        if (s1 in cand_cents and s2 in cand_cents)
+                        else 0.0
+                    )
+                    # Accept recovered split ONLY if secondary speaker is substantive AND acoustically distinct
+                    if dur2 >= 5_000 and share2 >= 0.025 and sim_12 < 0.85:
+                        print(
+                            f"      [Anti-Collapse Recovery] Recovered {len(ranked_cand)} distinct speakers via {label} "
+                            f"(2nd share={share2:.1%}, cos_sim={sim_12:.2f})",
+                            flush=True,
+                        )
+                        rttm_segs, centroids, overlaps = cand_segs, cand_cents, cand_ov
+                        retried = True
+                        break
+        finally:
+            retry_rttm_path.unlink(missing_ok=True)
+
+    _write_rttm_file(video_id, rttm_segs, rttm_path)
 
     np.savez_compressed(str(emb_path), **centroids)
     workspace.atomic_write_json(ov_path, overlaps)
