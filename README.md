@@ -1,4 +1,4 @@
-# Dawah Dialectics V2 (`yt-spx`)
+# Dialectics V2 (`yt-spx`)
 
 **Multi-Stage Acoustic Diarization, Overlap Separation, Pedestrian Isolation & Local LLM Dialectical Extraction Pipeline**
 
