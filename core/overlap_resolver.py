@@ -16,6 +16,7 @@ Fixes the 4 core street-debate limitations of MahmoudAshraf97/whisper-diarizatio
 import os
 import json
 import math
+import inspect
 import shutil
 import logging
 import warnings
@@ -487,14 +488,26 @@ def realign_words_preserving_interruptions(
             run_dur_ms = out[j - 1]["end_ms"] - out[i]["start_ms"]
             after_spk = out[j]["speaker_id"] if j < n else None
             gap_before = out[i]["start_ms"] - out[i - 1]["end_ms"]
+            gap_after = (out[j]["start_ms"] - out[j - 1]["end_ms"]) if j < n else 9999
+            run_ended_sentence = out[j - 1]["word"].endswith(sentence_ends)
 
-            # Absorb ONLY if surrounded by prev_spk, tiny word count, tiny duration, and no pause
-            if (
-                after_spk == prev_spk
-                and run_len <= jitter_max_words
+            is_micro_jitter = (
+                run_len <= jitter_max_words
                 and run_dur_ms <= jitter_max_ms
                 and gap_before < 350
-            ):
+            )
+            # Mid-clause acoustic flicker: 1-4 words with NO sentence punctuation before OR after
+            # and tight (<250ms) acoustic continuity on both sides (e.g. "How | does the Bible | define...")
+            is_mid_clause_flicker = (
+                not run_ended_sentence
+                and run_len <= 4
+                and run_dur_ms <= 1200
+                and gap_before < 250
+                and gap_after < 250
+            )
+
+            # Absorb ONLY if surrounded by prev_spk and either micro-jitter or continuous mid-clause flicker
+            if after_spk == prev_spk and (is_micro_jitter or is_mid_clause_flicker):
                 for k in range(i, j):
                     out[k]["speaker_id"] = prev_spk
             i = j
@@ -626,24 +639,35 @@ class WarmNeMoDiarizer:
         is_short: bool = False,
         forced_num_speakers: Optional[int] = None,
         clustering_overrides: Optional[Dict[str, Any]] = None,
+        msdd_sigmoid_threshold: Optional[float] = None,
+        clustering_only: bool = False,
     ) -> str:
-        """Runs NeMo MSDD NeuralDiarizer (up to 10 speakers + overlap RTTM) and writes out_rttm_path."""
+        """Runs NeMo MSDD NeuralDiarizer (or ClusteringDiarizer when clustering_only=True) and writes out_rttm_path."""
         import importlib
         import torch
         from omegaconf import OmegaConf
 
         _quiet_nemo_loggers()
-        # Prioritize overlap-aware NeuralDiarizer (NeMo 2.x msdd_models) before ClusteringDiarizer fallback.
-        # Do NOT swallow inner dependency errors (e.g. ml_dtypes / onnx AttributeError).
+        # Prioritize overlap-aware NeuralDiarizer (NeMo 2.x msdd_models) unless clustering_only=True
+        # (bypassing telephonic MSDD suppression on outdoor street debates).
         DiarizerClass = None
         last_err: Optional[Exception] = None
-        for mod_path, cls_name in [
-            ("nemo.collections.asr.models.msdd_models", "NeuralDiarizer"),
-            ("nemo.collections.asr.parts.submodules.neural_diarizer", "NeuralDiarizer"),
-            ("nemo.collections.asr.models.clustering_diarizer", "NeuralDiarizer"),
-            ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
-            ("nemo.collections.asr.models", "ClusteringDiarizer"),
-        ]:
+        candidates_cls = (
+            [
+                ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
+                ("nemo.collections.asr.models", "ClusteringDiarizer"),
+                ("nemo.collections.asr.models.msdd_models", "NeuralDiarizer"),
+            ]
+            if clustering_only
+            else [
+                ("nemo.collections.asr.models.msdd_models", "NeuralDiarizer"),
+                ("nemo.collections.asr.parts.submodules.neural_diarizer", "NeuralDiarizer"),
+                ("nemo.collections.asr.models.clustering_diarizer", "NeuralDiarizer"),
+                ("nemo.collections.asr.models.clustering_diarizer", "ClusteringDiarizer"),
+                ("nemo.collections.asr.models", "ClusteringDiarizer"),
+            ]
+        )
+        for mod_path, cls_name in candidates_cls:
             try:
                 mod = importlib.import_module(mod_path)
                 _quiet_nemo_loggers()
@@ -671,7 +695,12 @@ class WarmNeMoDiarizer:
             shutil.rmtree(tmp_p, ignore_errors=True)
         tmp_p.mkdir(parents=True, exist_ok=True)
 
-        custom_cfg = (forced_num_speakers is not None) or bool(clustering_overrides)
+        custom_cfg = (
+            (forced_num_speakers is not None)
+            or bool(clustering_overrides)
+            or (msdd_sigmoid_threshold is not None)
+            or bool(clustering_only)
+        )
         try:
             manifest_path = tmp_p / "input_manifest.json"
             meta = {
@@ -746,7 +775,7 @@ class WarmNeMoDiarizer:
                         "parameters": {
                             "use_speaker_model_from_ckpt": True,
                             "infer_batch_size": 40,
-                            "sigmoid_threshold": [0.5],
+                            "sigmoid_threshold": [float(msdd_sigmoid_threshold) if msdd_sigmoid_threshold is not None else 0.5],
                             "seq_eval_mode": False,
                             "split_infer": True,
                             "diar_window_length": 50,
@@ -952,27 +981,57 @@ def _speaker_durations_ms(rttm_segs: List[Dict[str, Any]]) -> List[Tuple[str, in
     return sorted(durs.items(), key=lambda x: x[1], reverse=True)
 
 
-def _is_collapsed_diarization(rttm_segs: List[Dict[str, Any]], total_ms: int) -> bool:
-    """Returns True when a multi-minute video collapsed to <=1 speaker, <10% secondary share, or intro/outro-only split."""
+def _diagnose_collapse_reason(rttm_segs: List[Dict[str, Any]], total_ms: int) -> Optional[str]:
+    """Returns a concise machine-readable collapse reason string, or None when speaker separation looks healthy."""
     if total_ms < 90_000:
-        return False
+        return None
     ranked = _speaker_durations_ms(rttm_segs)
     if len(ranked) <= 1:
-        return True
+        return f"single_speaker(k={len(ranked)})"
     total_spk_ms = sum(d for _, d in ranked) or 1
     top_share = ranked[0][1] / total_spk_ms
     second_ms = ranked[1][1]
     if top_share >= 0.96 and second_ms < 15_000:
-        return True
+        return f"extreme_imbalance(top_share={top_share:.1%},second_s={second_ms/1000:.1f}s)"
     if total_ms >= 300_000:
-        if top_share >= 0.90 or second_ms < 25_000:
-            return True
+        if top_share >= 0.90:
+            return f"dominant_speaker_90pct(top_share={top_share:.1%},second_s={second_ms/1000:.1f}s)"
+        if second_ms < 25_000:
+            return f"tiny_secondary_speaker(second_s={second_ms/1000:.1f}s,top_share={top_share:.1%})"
         edge_lo = int(total_ms * 0.12)
         edge_hi = int(total_ms * 0.88)
         sec_segs = [s for s in rttm_segs if s["speaker_id"] == ranked[1][0]]
         if sec_segs and all(int(s["end_ms"]) <= edge_lo or int(s["start_ms"]) >= edge_hi for s in sec_segs):
-            return True
-    return False
+            return f"edge_only_secondary(second_s={second_ms/1000:.1f}s,edge=12pct)"
+    return None
+
+
+def _is_collapsed_diarization(rttm_segs: List[Dict[str, Any]], total_ms: int) -> bool:
+    """Returns True when a multi-minute video collapsed to <=1 speaker, <10% secondary share, or intro/outro-only split."""
+    return _diagnose_collapse_reason(rttm_segs, total_ms) is not None
+
+
+def _summarize_rttm_stats(
+    rttm_segs: List[Dict[str, Any]],
+    centroids: Dict[str, np.ndarray],
+) -> Dict[str, Any]:
+    ranked = _speaker_durations_ms(rttm_segs)
+    total_spk_ms = sum(d for _, d in ranked) or 1
+    sim_12 = None
+    if len(ranked) >= 2:
+        s1, s2 = ranked[0][0], ranked[1][0]
+        if s1 in centroids and s2 in centroids:
+            sim_12 = round(float(np.dot(l2_normalize(centroids[s1]), l2_normalize(centroids[s2]))), 3)
+    return {
+        "speakers_count": len(ranked),
+        "speakers": {
+            spk: {"sec": round(dur / 1000.0, 1), "share": round(dur / total_spk_ms, 4)}
+            for spk, dur in ranked
+        },
+        "second_share": round(ranked[1][1] / total_spk_ms, 4) if len(ranked) >= 2 else 0.0,
+        "second_sec": round(ranked[1][1] / 1000.0, 1) if len(ranked) >= 2 else 0.0,
+        "top2_cos_sim": sim_12,
+    }
 
 
 def _write_rttm_file(video_id: str, rttm_segs: List[Dict[str, Any]], rttm_path: Path) -> None:
@@ -1053,31 +1112,74 @@ def run_diarization_m3(
             min_overlap_ms=600,
         )
 
-    # Anti-Collapse Automatic Recovery on multi-minute debates
+    # Anti-Collapse Automatic Recovery Tournament on multi-minute debates
+    initial_stats = _summarize_rttm_stats(rttm_segs, centroids)
+    collapse_reason = _diagnose_collapse_reason(rttm_segs, total_ms)
     retried = False
-    if _is_collapsed_diarization(rttm_segs, total_ms):
+    accepted_strategy = ""
+    retry_trace: List[Dict[str, Any]] = []
+
+    if collapse_reason:
+        print(
+            f"      [M3 Trace] Initial pass collapsed ({collapse_reason}; "
+            f"k={initial_stats['speakers_count']}, 2nd={initial_stats['second_share']:.1%}, cos={initial_stats['top2_cos_sim']}) -> launching recovery tournament",
+            flush=True,
+        )
         retry_configs = [
             (
                 None,
                 {"max_rp_threshold": 0.12, "enhanced_count_thres": 25, "sparse_search_volume": 50, "maj_vote_spk_count": True},
+                0.35,
+                False,
                 "sensitive spectral retry",
             ),
             (
                 2,
                 {"oracle_num_speakers": True, "max_rp_threshold": 0.15},
+                0.35,
+                False,
                 "bounded 2-speaker recovery",
             ),
+            (
+                3,
+                {"oracle_num_speakers": True, "max_rp_threshold": 0.12},
+                0.35,
+                False,
+                "bounded 3-speaker recovery",
+            ),
+            (
+                2,
+                {"oracle_num_speakers": True, "max_rp_threshold": 0.12},
+                None,
+                True,
+                "pure TitaNet clustering 2-speaker recovery",
+            ),
         ]
+        try:
+            diar_sig_params = set(inspect.signature(diarizer.run_diarization).parameters.keys())
+        except Exception:
+            diar_sig_params = set()
+
+        best_candidate: Optional[Tuple[Tuple[int, float], List[Dict[str, Any]], Dict[str, np.ndarray], List[Dict[str, Any]], str, Dict[str, Any]]] = None
         retry_rttm_path = rttm_path.with_suffix(".retry.rttm")
         try:
-            for forced_k, clus_ovr, label in retry_configs:
-                cand_rttm = diarizer.run_diarization(
-                    leveled_16k_wav,
-                    retry_rttm_path,
-                    is_short=is_short,
-                    forced_num_speakers=forced_k,
-                    clustering_overrides=clus_ovr,
-                )
+            for forced_k, clus_ovr, sig_thr, use_clus_only, label in retry_configs:
+                call_kwargs: Dict[str, Any] = {
+                    "is_short": is_short,
+                    "forced_num_speakers": forced_k,
+                    "clustering_overrides": clus_ovr,
+                }
+                if "msdd_sigmoid_threshold" in diar_sig_params:
+                    call_kwargs["msdd_sigmoid_threshold"] = sig_thr
+                if "clustering_only" in diar_sig_params:
+                    call_kwargs["clustering_only"] = use_clus_only
+
+                try:
+                    cand_rttm = diarizer.run_diarization(leveled_16k_wav, retry_rttm_path, **call_kwargs)
+                except Exception as retry_err:
+                    retry_trace.append({"strategy": label, "accepted": False, "reject_reason": f"error:{type(retry_err).__name__}:{str(retry_err)[:120]}"})
+                    continue
+
                 cand_segs = parse_rttm_lines(cand_rttm)
                 cand_ov = detect_simultaneous_overlap_windows(cand_segs, total_duration_ms=total_ms)
                 cand_cents = _compute_centroids_for_rttm(cand_segs, cand_ov, samples, sr, diarizer)
@@ -1091,7 +1193,11 @@ def run_diarization_m3(
                         cand_segs, total_duration_ms=total_ms, min_overlap_ms=600
                     )
 
+                cand_stats = _summarize_rttm_stats(cand_segs, cand_cents)
                 ranked_cand = _speaker_durations_ms(cand_segs)
+                cand_collapse = _diagnose_collapse_reason(cand_segs, total_ms)
+                is_edge_only = bool(cand_collapse and cand_collapse.startswith("edge_only_secondary"))
+
                 if len(ranked_cand) >= 2:
                     tot_cand = sum(d for _, d in ranked_cand) or 1
                     s1, s2 = ranked_cand[0][0], ranked_cand[1][0]
@@ -1102,20 +1208,69 @@ def run_diarization_m3(
                         if (s1 in cand_cents and s2 in cand_cents)
                         else 0.0
                     )
-                    # Accept recovered split ONLY if secondary speaker is substantive AND acoustically distinct
                     if dur2 >= 5_000 and share2 >= 0.025 and sim_12 < 0.85:
-                        print(
-                            f"      [Anti-Collapse Recovery] Recovered {len(ranked_cand)} distinct speakers via {label} "
-                            f"(2nd share={share2:.1%}, cos_sim={sim_12:.2f})",
-                            flush=True,
+                        rank_key = (0 if is_edge_only else 1, share2)
+                        rec_entry = {
+                            "strategy": label,
+                            "accepted": True,
+                            "stats": cand_stats,
+                            "edge_only": is_edge_only,
+                        }
+                        retry_trace.append(rec_entry)
+                        if best_candidate is None or rank_key > best_candidate[0]:
+                            best_candidate = (rank_key, cand_segs, cand_cents, cand_ov, label, cand_stats)
+                        # Stop early ONLY once we recover a strong non-edge balanced split (>= 18% secondary share)
+                        if (not is_edge_only) and share2 >= 0.18:
+                            break
+                    else:
+                        rej = (
+                            f"same_voice(cos={sim_12:.2f}>=0.85)"
+                            if sim_12 >= 0.85
+                            else f"too_small(2nd={dur2/1000:.1f}s,{share2:.1%})"
                         )
-                        rttm_segs, centroids, overlaps = cand_segs, cand_cents, cand_ov
-                        retried = True
-                        break
+                        retry_trace.append({"strategy": label, "accepted": False, "reject_reason": rej, "stats": cand_stats})
+                else:
+                    retry_trace.append({"strategy": label, "accepted": False, "reject_reason": "single_speaker", "stats": cand_stats})
+
+            if best_candidate is not None:
+                _, cand_segs, cand_cents, cand_ov, best_label, best_stats = best_candidate
+                # Keep recovery only if it improves secondary share over initial pass (or initial had <=1 speaker)
+                if initial_stats["speakers_count"] <= 1 or best_stats["second_share"] >= initial_stats["second_share"]:
+                    print(
+                        f"      [Anti-Collapse Recovery] Recovered {best_stats['speakers_count']} distinct speakers via {best_label} "
+                        f"(2nd share={best_stats['second_share']:.1%}, cos_sim={best_stats['top2_cos_sim'] if best_stats['top2_cos_sim'] is not None else 0.0:.2f})",
+                        flush=True,
+                    )
+                    rttm_segs, centroids, overlaps = cand_segs, cand_cents, cand_ov
+                    retried = True
+                    accepted_strategy = best_label
         finally:
             retry_rttm_path.unlink(missing_ok=True)
 
     _write_rttm_file(video_id, rttm_segs, rttm_path)
+
+    final_stats = _summarize_rttm_stats(rttm_segs, centroids)
+    try:
+        from core.debug_tracer import record_video_trace_section
+        record_video_trace_section(
+            workspace,
+            video_id,
+            "stage1_m3",
+            {
+                "total_ms": total_ms,
+                "initial": initial_stats,
+                "collapse_triggered": bool(collapse_reason),
+                "collapse_reason": collapse_reason,
+                "retry_attempts": retry_trace,
+                "recovered": retried,
+                "accepted_strategy": accepted_strategy,
+                "final": final_stats,
+                "final_speakers_count": final_stats["speakers_count"],
+                "overlap_windows_count": len(overlaps),
+            },
+        )
+    except Exception:
+        pass
 
     np.savez_compressed(str(emb_path), **centroids)
     workspace.atomic_write_json(ov_path, overlaps)

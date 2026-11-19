@@ -1113,5 +1113,530 @@ class TestV31RootCauseRegressions(unittest.TestCase):
         self.assertEqual(t3_report["status"], "FAIL")
 
 
+class TestDeepRootCauseAndForensicDebugger(unittest.TestCase):
+    """Regression suite for systemic Stage 1/2 root-cause fixes, v3.2 audit upgrades, and forensic debug tracer."""
+
+    def test_mid_clause_flicker_smoothing_preserves_real_backchannels(self):
+        from core.overlap_resolver import assign_words_to_speakers_iou, realign_words_preserving_interruptions
+
+        # 1. Mid-clause acoustic flicker: "How | does the Bible | define adultery?" -> smoothed into 1 speaker_0 run
+        flicker_words = [
+            {"word": "How", "start": 1.000, "end": 1.200},
+            {"word": "does", "start": 1.240, "end": 1.400},
+            {"word": "the", "start": 1.420, "end": 1.520},
+            {"word": "Bible", "start": 1.540, "end": 1.850},
+            {"word": "define", "start": 1.910, "end": 2.200},
+            {"word": "adultery?", "start": 2.230, "end": 2.650},
+        ]
+        flicker_rttm = [
+            {"speaker_id": "speaker_0", "start_ms": 950, "end_ms": 1220},
+            {"speaker_id": "speaker_1", "start_ms": 1230, "end_ms": 1870},
+            {"speaker_id": "speaker_0", "start_ms": 1890, "end_ms": 2700},
+        ]
+        mapped_flicker = assign_words_to_speakers_iou(flicker_words, flicker_rttm)
+        smoothed = realign_words_preserving_interruptions(mapped_flicker)
+        self.assertEqual({w["speaker_id"] for w in smoothed}, {"speaker_0"})
+
+        # 2. Genuine punctuated backchannel after sentence end -> MUST keep speaker_1 distinct
+        backchannel_words = [
+            {"word": "God", "start": 1.000, "end": 1.200},
+            {"word": "is", "start": 1.220, "end": 1.350},
+            {"word": "eternal.", "start": 1.370, "end": 1.700},
+            {"word": "Really?", "start": 1.800, "end": 2.100},
+            {"word": "Yes,", "start": 2.200, "end": 2.400},
+            {"word": "necessarily.", "start": 2.420, "end": 2.900},
+        ]
+        backchannel_rttm = [
+            {"speaker_id": "speaker_0", "start_ms": 950, "end_ms": 1750},
+            {"speaker_id": "speaker_1", "start_ms": 1780, "end_ms": 2150},
+            {"speaker_id": "speaker_0", "start_ms": 2180, "end_ms": 2950},
+        ]
+        mapped_bc = assign_words_to_speakers_iou(backchannel_words, backchannel_rttm)
+        preserved = realign_words_preserving_interruptions(mapped_bc)
+        self.assertEqual([w["speaker_id"] for w in preserved], ["speaker_0", "speaker_0", "speaker_0", "speaker_1", "speaker_0", "speaker_0"])
+
+    def test_m3_multi_strategy_tournament_picks_best_candidate_and_writes_trace(self):
+        import numpy as np
+        from unittest.mock import patch
+        from core.overlap_resolver import run_diarization_m3
+
+        class MockTournamentDiarizer:
+            def __init__(self):
+                self.calls = []
+                self._emb_call = 0
+
+            def run_diarization(
+                self,
+                wav_path,
+                rttm_path,
+                is_short=False,
+                forced_num_speakers=None,
+                clustering_overrides=None,
+                msdd_sigmoid_threshold=None,
+                clustering_only=False,
+            ):
+                self.calls.append((forced_num_speakers, msdd_sigmoid_threshold, clustering_only))
+                if len(self.calls) == 1:
+                    # Initial pass: 100% single-speaker collapse across 240s
+                    lines = [f"SPEAKER audio 1 {i*10:.2f} 9.00 <NA> <NA> speaker_0 <NA> <NA>" for i in range(24)]
+                elif forced_num_speakers is None:
+                    # Strategy 1 (sensitive spectral): weak 8% 2nd speaker
+                    lines = [f"SPEAKER audio 1 {i*10:.2f} 9.00 <NA> <NA> {'speaker_1' if i in (5, 15) else 'speaker_0'} <NA> <NA>" for i in range(24)]
+                else:
+                    # Strategy 2 (bounded 2-speaker): balanced 33% 2nd speaker across the whole video
+                    lines = [f"SPEAKER audio 1 {i*10:.2f} 9.00 <NA> <NA> {'speaker_1' if i % 3 == 1 else 'speaker_0'} <NA> <NA>" for i in range(24)]
+                text = "\n".join(lines) + "\n"
+                Path(rttm_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(rttm_path).write_text(text, encoding="utf-8")
+                return text
+
+            def extract_embedding(self, samples_slice, sr=16000):
+                # Return orthogonal embeddings based on slice mean tag so speaker_0 and speaker_1 stay distinct
+                vec = np.zeros(192, dtype=np.float32)
+                if float(np.mean(samples_slice)) > 0.25:
+                    vec[1] = 1.0
+                else:
+                    vec[0] = 1.0
+                return vec
+
+        # Encode speaker_1 intervals (i % 3 == 1) with amplitude +0.5 so embeddings are genuinely orthogonal!
+        sr = 16000
+        synth = np.zeros(240 * sr, dtype=np.float32)
+        for i in range(24):
+            if i % 3 == 1:
+                synth[i * 10 * sr : (i * 10 + 9) * sr] = 0.5
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(Path(tmp))
+            vid = "M3_TOURN"
+            wav_p = ws.audio_clean_dir / f"{vid}_vocals.wav"
+            wav_p.write_bytes(b"RIFF0000WAVEfmt ")
+            diar = MockTournamentDiarizer()
+
+            with patch("core.overlap_resolver.read_wav_float32", return_value=(synth, sr)):
+                rttm_segs, centroids, overlaps = run_diarization_m3(
+                    video_id=vid,
+                    leveled_16k_wav=wav_p,
+                    workspace=ws,
+                    diarizer=diar,
+                )
+            spk_ids = {s["speaker_id"] for s in rttm_segs}
+            self.assertEqual(spk_ids, {"SPK_00", "SPK_01"})
+            self.assertGreaterEqual(len(diar.calls), 3)
+            trace = ws.read_json(ws.debug_traces_dir / f"{vid}.trace.json", default={})
+            m3_tr = trace.get("stage1_m3") or {}
+            self.assertTrue(m3_tr.get("collapse_triggered"))
+            self.assertTrue(m3_tr.get("recovered"))
+            self.assertEqual(m3_tr.get("accepted_strategy"), "bounded 2-speaker recovery")
+            self.assertGreaterEqual(len(m3_tr.get("retry_attempts") or []), 2)
+
+    def test_merge_word_cap_raw_subturn_snapping_quote_trimming_and_analogy_grounding(self):
+        from core.scenario_extractor import (
+            merge_consecutive_speaker_turns,
+            _ground_dialogue_exchange,
+            _trim_focused_quote,
+            _filter_grounded_analogies,
+        )
+
+        # 1. Word cap prevents >110w fused blocks when consecutive same-speaker turns are merged
+        raw_turns = [
+            {
+                "turn_id": "CAP_T01",
+                "speaker_id": "SPK_00",
+                "speaker_role": "MAIN_DAEE",
+                "episode_index": 1,
+                "start_ms": 0,
+                "end_ms": 20000,
+                "start_fmt": "00:00",
+                "end_fmt": "00:20",
+                "text_original": " ".join(f"proofword{i}" for i in range(65)),
+            },
+            {
+                "turn_id": "CAP_T02",
+                "speaker_id": "SPK_00",
+                "speaker_role": "MAIN_DAEE",
+                "episode_index": 1,
+                "start_ms": 20500,
+                "end_ms": 40000,
+                "start_fmt": "00:20",
+                "end_fmt": "00:40",
+                "text_original": " ".join(f"reasonword{i}" for i in range(65)),
+            },
+        ]
+        merged = merge_consecutive_speaker_turns(raw_turns, max_merged_words=110)
+        self.assertEqual(len(merged), 2)
+
+        # 2. Raw sub-turn snapping aligns merged dialogue_exchange turn to exact SQLite turn_id
+        sub_raw = [
+            {
+                "turn_id": "SNP_T01",
+                "speaker_id": "SPK_00",
+                "speaker_role": "MAIN_DAEE",
+                "episode_index": 1,
+                "start_ms": 0,
+                "end_ms": 5000,
+                "start_fmt": "00:00",
+                "end_fmt": "00:05",
+                "text_original": "No, I did not say that.",
+            },
+            {
+                "turn_id": "SNP_T02",
+                "speaker_id": "SPK_00",
+                "speaker_role": "MAIN_DAEE",
+                "episode_index": 1,
+                "start_ms": 5500,
+                "end_ms": 15000,
+                "start_fmt": "00:05",
+                "end_fmt": "00:15",
+                "text_original": "God rewards believers in Paradise with eternal peace and real blessings.",
+            },
+        ]
+        cohesive = merge_consecutive_speaker_turns(sub_raw, max_merged_words=110)
+        self.assertEqual(len(cohesive), 1)
+        ex_out, _ = _ground_dialogue_exchange(
+            [{"turn_id": "SNP_T01", "role": "MAIN_DAEE", "text_en": "God rewards believers in Paradise with eternal peace and real blessings."}],
+            {c["turn_id"]: c for c in cohesive},
+            {r["turn_id"]: r for r in sub_raw},
+            "Hashim",
+            "هاشم",
+            "SPK_01",
+            0,
+        )
+        self.assertEqual(ex_out[0]["turn_id"], "SNP_T02")
+
+        # 3. _trim_focused_quote strips crowd-control logistics and trims overlong speech to <= 65 words
+        noisy_speech = (
+            "Stop interrupting me! Otherwise, I'll not carry on the conversation. "
+            "God is absolute, eternal, and utterly distinct from contingent creation that depends on food, sleep, or decay. "
+            + " ".join(["Every created thing depends on an independent creator beyond space and time."] * 10)
+        )
+        trimmed = _trim_focused_quote(noisy_speech, anchor_text="God eternal distinct contingent creation", max_words=65)
+        self.assertNotIn("Stop interrupting", trimmed)
+        self.assertLessEqual(len(trimmed.split()), 65)
+        self.assertIn("contingent creation", trimmed)
+
+        # 4. _filter_grounded_analogies drops invented textbook analogies absent from transcript, keeps grounded ones
+        long_turns = [{"text_original": " ".join(["A finely tuned pocket watch points directly to an intelligent watchmaker behind creation."] * 15)} for _ in range(4)]
+        long_tr = " ".join(t["text_original"] for t in long_turns).lower()
+        kept_en, kept_ar = _filter_grounded_analogies(
+            [
+                "Breaking a formal business partnership contract invalidates the agreement.",
+                "A finely tuned pocket watch points to a watchmaker.",
+            ],
+            ["فسخ عقد شراكة تجارية يبطل الاتفاق.", "الساعة المتقنة تدل على صانعها."],
+            long_tr,
+            long_turns,
+        )
+        self.assertEqual(kept_en, ["A finely tuned pocket watch points to a watchmaker."])
+        self.assertEqual(kept_ar, ["الساعة المتقنة تدل على صانعها."])
+
+    def test_pre_stage2_diarization_health_gate_skips_collapsed_debate_and_generates_debug_report(self):
+        from core.debug_tracer import generate_session_debug_report
+        from tools.inspect_debug_traces import main as inspect_cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(Path(tmp))
+            vid = "COLL_SKIP1"
+            turns = [
+                {
+                    "turn_id": f"{vid}_T{i:04d}",
+                    "turn_index": i - 1,
+                    "episode_index": 1,
+                    "speaker_id": "SPK_00",
+                    "speaker_role": "MAIN_DAEE",
+                    "start_ms": (i - 1) * 25000,
+                    "end_ms": i * 25000 - 1000,
+                    "start_fmt": f"00:{(i-1)*25:02d}",
+                    "end_fmt": f"00:{i*25:02d}",
+                    "text_original": "This is a collapsed debate monologue combining both speakers with twenty five words of theological argumentation about scripture and truth today.",
+                }
+                for i in range(1, 13)
+            ]
+            ws.atomic_write_json(ws.scenarios_dir / f"{vid}.json", {
+                "video_id": vid,
+                "title_ar": "مناظرة منهارة التمييز الصوتي",
+                "duration_sec": 300.0,
+                "metrics": {"duration_sec": 300.0, "speakers_count": 1},
+                "speakers": [{"speaker_id": "SPK_00", "role": "MAIN_DAEE", "display_name_en": "Hashim", "display_name_ar": "هاشم"}],
+                "turns": turns,
+            })
+            ws.advance_micro_step(vid, "M5_SCENARIO_BUILT")
+
+            class NeverCalledLLM:
+                def __init__(self):
+                    self.calls = 0
+
+                def extract_round1_english(self, prompt):
+                    self.calls += 1
+                    return "[]"
+
+                def extract_round2_arabic(self, r1_json, prompt, enable_thinking=False, max_thinking_tokens=0):
+                    self.calls += 1
+                    return "[]"
+
+            llm = NeverCalledLLM()
+            units = Stage2ScenarioExtractor(workspace=ws, llm_client=llm).extract_video_m6(vid, verbose=False)
+            self.assertEqual(units, [])
+            self.assertEqual(llm.calls, 0, "Collapsed video must skip LLM extraction with 0 calls")
+            trace = ws.read_json(ws.debug_traces_dir / f"{vid}.trace.json", default={})
+            self.assertTrue((trace.get("stage2_m6") or {}).get("skipped_pre_stage2_diarization"))
+            self.assertIn("SINGLE_SPEAKER_COLLAPSE", (trace.get("stage2_m6") or {}).get("pre_stage2_skip_reason", ""))
+
+            report_path = generate_session_debug_report(ws)
+            report_txt = report_path.read_text(encoding="utf-8")
+            self.assertIn(vid, report_txt)
+            self.assertIn("SKIP_DIAR", report_txt)
+            self.assertIn("SINGLE_SPEAKER_COLLAPSE", report_txt)
+
+            # Verify CLI inspector executes cleanly
+            rc = inspect_cli_main(["--dir", str(ws.debug_traces_dir), "--failures-only"])
+            self.assertEqual(rc, 0)
+
+    def test_implicit_round2_en_repair_anchor_subreasons_and_bilingual_length_mismatch(self):
+        from core.scenario_extractor import (
+            merge_round1_and_round2_units,
+            anchor_and_enrich_extracted_unit,
+            diagnose_missing_arabic_fields,
+        )
+
+        # 1. allow_implicit_en_repair=True applies R2's rewritten question_en even when english_edits_needed=False
+        r1 = [{
+            "question_turn_id": "R2F_T01",
+            "answer_turn_id": "R2F_T02",
+            "question_en": "In Christianity, is adultery the only valid reason for divorce?",
+            "core_answer_summary_en": " ".join(["Islamic law protects spouses from harm and abuse through structured divorce rights."] * 5),
+        }]
+        r2 = [{
+            "question_turn_id": "R2F_T01",
+            "rubric_audit": {"score": 92, "english_edits_needed": False, "drop_card": False},
+            "question_en": "Why does Islam permit divorce for serious harm rather than restricting it solely to adultery?",
+            "question_ar": "لماذا يُجيز الإسلام الطلاق لرفع الضرر الجسيم ولا يحصره في الزنا وحده؟",
+        }]
+        kept_clean = merge_round1_and_round2_units(r1, r2, allow_implicit_en_repair=False)[0]
+        self.assertEqual(kept_clean["question_en"], r1[0]["question_en"])
+        repaired_flagged = merge_round1_and_round2_units(r1, r2, allow_implicit_en_repair=True)[0]
+        self.assertEqual(repaired_flagged["question_en"], r2[0]["question_en"])
+
+        # 2. anchor_and_enrich_extracted_unit populates exact drop sub-reasons
+        scenario = {
+            "video_id": "SUBR",
+            "title_ar": "حوار",
+            "speakers": [
+                {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "display_name_en": "Interlocutor", "display_name_ar": "المحاور"},
+            ],
+            "turns": [
+                {"turn_id": "SUBR_T01", "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 0, "end_ms": 5000, "start_fmt": "00:00", "end_fmt": "00:05", "text_original": "Does Surah 3:85 reject other religions?"},
+                {"turn_id": "SUBR_T02", "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 6000, "end_ms": 20000, "start_fmt": "00:06", "end_fmt": "00:20", "text_original": "Surah 3:85 states whoever seeks a religion other than Islam it will never be accepted."},
+            ],
+        }
+        reasons = []
+        res = anchor_and_enrich_extracted_unit(
+            raw_unit={
+                "question_turn_id": "SUBR_T01",
+                "answer_turn_id": "SUBR_T02",
+                "question_en": "Does Surah 3:85 mean Islam rejects all other religions?",
+                "question_ar": "هل تعني سورة آل عمران 85 أن الإسلام يرفض سائر الأديان؟",
+                "core_answer_summary_en": "Surah 3:85 does not imply that non-Muslims are automatically condemned because sincerity matters.",
+                "core_answer_summary_ar": "الآية لا تعني رفض الأديان الأخرى.",
+                "verbatim_quote": "Surah 3:85 states whoever seeks a religion other than Islam it will never be accepted.",
+                "verbatim_quote_ar": "تقرر سورة آل عمران أن من يبتغ غير الإسلام ديناً فلن يقبل منه.",
+            },
+            scenario=scenario,
+            episode_index=1,
+            window_start_ms=0,
+            unit_seq_num=1,
+            drop_reason_out=reasons,
+        )
+        self.assertIsNone(res)
+        self.assertTrue(reasons and reasons[0].startswith("THEOLOGICAL_BIAS:"))
+
+        # 3. diagnose_missing_arabic_fields flags excess bilingual quote length mismatch
+        diag = diagnose_missing_arabic_fields({
+            "question_en": "Does Surah 3:85 teach salvation exclusivity in Islam?",
+            "question_ar": "هل تقرر سورة آل عمران حصرية النجاة في الإسلام؟",
+            "core_answer_summary_en": "Islam affirms pure monotheism and exclusive submission to Allah alone.",
+            "core_answer_summary_ar": "يقرر الإسلام التوحيد الخالص وإفراد الله بالعبادة والانقياد له وحده.",
+            "interlocutor_verbatim_quote": "Why does the Quran say whoever seeks another religion will not be accepted?",
+            "interlocutor_verbatim_quote_ar": " ".join(["هذا نص عربي طويل جداً يترجم فقرة أخرى بالكامل لا علاقة لها بالاقتباس الإنجليزي القصير"] * 6),
+            "verbatim_quote": "Surah 3:85 clearly establishes submission to God alone.",
+            "verbatim_quote_ar": "تقرر سورة آل عمران بوضوح وجوب الاستسلام لله وحده.",
+        })
+        self.assertIn("length_mismatch_excess:interlocutor_verbatim_quote_ar", diag)
+
+        # 4. End-to-end Stage 2 records R2 <think> excerpt and R2 English repair diff in debug trace
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = SharedWorkspace(Path(tmp))
+            vid = "R2_REPAIR1"
+            ws.atomic_write_json(ws.scenarios_dir / f"{vid}.json", {
+                "video_id": vid,
+                "title_ar": "حوار حول الطلاق",
+                "duration_sec": 120.0,
+                "metrics": {"duration_sec": 120.0, "speakers_count": 2},
+                "speakers": [
+                    {"speaker_id": "SPK_00", "role": "MAIN_DAEE", "display_name_en": "Hashim", "display_name_ar": "هاشم"},
+                    {"speaker_id": "SPK_01", "role": "INTERLOCUTOR", "display_name_en": "Interlocutor", "display_name_ar": "المحاور"},
+                ],
+                "turns": [
+                    {"turn_id": f"{vid}_T0001", "turn_index": 0, "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 0, "end_ms": 15000, "start_fmt": "00:00", "end_fmt": "00:15", "text_original": "In the Gospel divorce is only allowed for sexual immorality and not for other reasons."},
+                    {"turn_id": f"{vid}_T0002", "turn_index": 1, "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 16000, "end_ms": 45000, "start_fmt": "00:16", "end_fmt": "00:45", "text_original": "Islam protects spouses by allowing divorce for serious harm, abuse, and abandonment while preserving justice and dignity."},
+                    {"turn_id": f"{vid}_T0003", "turn_index": 2, "episode_index": 1, "speaker_id": "SPK_01", "speaker_role": "INTERLOCUTOR", "start_ms": 46000, "end_ms": 65000, "start_fmt": "00:46", "end_fmt": "01:05", "text_original": "Does not permitting divorce too easily weaken the sanctity of marriage vows?"},
+                    {"turn_id": f"{vid}_T0004", "turn_index": 3, "episode_index": 1, "speaker_id": "SPK_00", "speaker_role": "MAIN_DAEE", "start_ms": 66000, "end_ms": 95000, "start_fmt": "01:06", "end_fmt": "01:35", "text_original": "Reconciliation is mandated first, yet trapping an abused spouse in permanent harm contradicts divine mercy and justice."},
+                ],
+            })
+            ws.advance_micro_step(vid, "M5_SCENARIO_BUILT")
+
+            class RepairMockLLM:
+                def extract_round1_english(self, prompt):
+                    return json.dumps([{
+                        "question_turn_id": f"{vid}_T0001",
+                        "answer_turn_id": f"{vid}_T0002",
+                        "topic_category": "Sharia & Islamic Law",
+                        "topic_subcategory": "Divorce Law",
+                        "interlocutor_type": "Christian / Trinitarian",
+                        "question_en": "In Christianity, is the only valid reason for divorce adultery?",
+                        "core_answer_summary_en": " ".join(["Islamic jurisprudence balances the sanctity of marriage with protection against serious harm, abuse, and neglect by mandating reconciliation first while granting lawful exit when marriage causes enduring injustice."] * 2),
+                        "logical_premises": [
+                            "Divine law must uphold both marital stability and human protection from harm.",
+                            "Restricting divorce solely to adultery traps abused spouses in permanent injustice.",
+                            "Therefore, permitting structured divorce for serious harm reflects supreme divine mercy and justice.",
+                        ],
+                        "fallacy_or_misconception_exposed": "False dichotomy between strict indissolubility and reckless dissolution.",
+                        "socratic_question": "Should an abused spouse remain legally trapped when marriage causes severe ongoing harm?",
+                        "interlocutor_verbatim_quote": "Does not permitting divorce too easily weaken the sanctity of marriage vows?",
+                        "verbatim_quote": "Islam protects spouses by allowing divorce for serious harm, abuse, and abandonment while preserving justice and dignity.",
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0001", "role": "INTERLOCUTOR", "move_type": "Claim", "text_en": "In the Gospel divorce is only allowed for sexual immorality and not for other reasons."},
+                            {"turn_id": f"{vid}_T0002", "role": "MAIN_DAEE", "move_type": "Proof", "text_en": "Islam protects spouses by allowing divorce for serious harm, abuse, and abandonment while preserving justice and dignity."},
+                            {"turn_id": f"{vid}_T0003", "role": "INTERLOCUTOR", "move_type": "Objection", "text_en": "Does not permitting divorce too easily weaken the sanctity of marriage vows?"},
+                            {"turn_id": f"{vid}_T0004", "role": "MAIN_DAEE", "move_type": "Refutation", "text_en": "Reconciliation is mandated first, yet trapping an abused spouse in permanent harm contradicts divine mercy and justice."},
+                        ],
+                    }])
+
+                def extract_round2_arabic(self, r1_json, prompt, enable_thinking=False, max_thinking_tokens=0):
+                    # Deliberately leaves english_edits_needed=False while repairing question_en!
+                    return "<think>Pre-R2 flagged DAEE_CROSS_EXAM_IN_QUESTION; converting question_en to Islamic-first seeker inquiry.</think>" + json.dumps([{
+                        "question_turn_id": f"{vid}_T0001",
+                        "rubric_audit": {"score": 95, "english_edits_needed": False, "drop_card": False},
+                        "question_en": "Does permitting divorce beyond adultery weaken the sanctity of marriage in Islam?",
+                        "question_ar": "هل يُضعف إباحة الطلاق لغير الزنا قدسية الزواج في الإسلام؟",
+                        "core_answer_summary_ar": "يوازن التشريع الإسلامي بين قدسية عقد الزواج وحماية الزوجين من الضرر الجسيم والإيذاء والهجر، فيأمر بالإصلاح والتحكيم أولاً، ثم يشرع الطلاق مخرجاً عادلاً عند تعذر العشرة بالمعروف رفعاً للظلم وتحقيقاً للرحمة والعدل الإلهي.",
+                        "logical_premises_ar": [
+                            "الشريعة الإلهية الكاملة تجمع بين حفظ استقرار الأسرة ودفع الضرر عن الإنسان.",
+                            "حصر الطلاق في الزنا وحده يُبقي الزوجة المتضررة رهينة للأذى والظلم الدائم.",
+                            "إذن فإباحة الطلاق المنضبط لرفع الضرر تجسد كمال العدل والرحمة الإلهية.",
+                        ],
+                        "fallacy_or_misconception_exposed_ar": "مغالطة القسمة الثنائية الزائفة بين تحريم الطلاق مطلقاً وبين التفريط في قدسية الزواج.",
+                        "socratic_question_ar": "هل يليق بالعدل الإلهي إلزام الزوجة بالبقاء تحت الأذى الدائم دون مخرج شرعي؟",
+                        "interlocutor_verbatim_quote_ar": "ألا يُضعف السماح بالطلاق بسهولة قدسية عهد الزواج؟",
+                        "verbatim_quote_ar": "يحمي الإسلام الزوجين بإباحة الطلاق عند الضرر الجسيم والإيذاء والهجر مع حفظ العدل والكرامة.",
+                        "dialogue_exchange": [
+                            {"turn_id": f"{vid}_T0001", "text_ar": "في الإنجيل لا يُباح الطلاق إلا لعلة الفاحشة دون سائر الأسباب."},
+                            {"turn_id": f"{vid}_T0002", "text_ar": "يحمي الإسلام الزوجين بإباحة الطلاق عند الضرر الجسيم والإيذاء والهجر مع حفظ العدل والكرامة."},
+                            {"turn_id": f"{vid}_T0003", "text_ar": "ألا يُضعف السماح بالطلاق بسهولة قدسية عهد الزواج؟"},
+                            {"turn_id": f"{vid}_T0004", "text_ar": "الإصلاح مقدم أولاً، غير أن حبس المتضرر في الأذى الدائم يناقض الرحمة والعدل الإلهي."},
+                        ],
+                    }], ensure_ascii=False)
+
+            out_units = Stage2ScenarioExtractor(workspace=ws, llm_client=RepairMockLLM()).extract_video_m6(vid, verbose=False)
+            self.assertEqual(len(out_units), 1)
+            self.assertEqual(out_units[0]["question_en"], "Does permitting divorce beyond adultery weaken the sanctity of marriage in Islam?")
+            tr = ws.read_json(ws.debug_traces_dir / f"{vid}.trace.json", default={})
+            u_tr = tr["stage2_m6"]["windows"][0]["units"][0]
+            self.assertIn("question_en", u_tr["r2_en_repairs"])
+            self.assertIn("DAEE_CROSS_EXAM_IN_QUESTION", u_tr["r2_think_excerpt"])
+            self.assertEqual(u_tr["outcome"], "KEPT")
+
+    def test_expanded_theological_bias_and_audit_cards_v32_blind_spots(self):
+        from db.database import check_theological_bias
+
+        # 1. Expanded check_theological_bias doctrinal rules
+        self.assertIsNotNone(check_theological_bias({
+            "core_answer_summary_en": "Surah 3:85 does not imply that non-Muslims are automatically condemned.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "core_answer_summary_en": "The concept of 72 virgins is purely symbolic and not a literal reward.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "core_answer_summary_en": "The phrase 72 virgins is explicitly mentioned in the Quran for martyrs.",
+        }))
+        self.assertIsNotNone(check_theological_bias({
+            "core_answer_summary_en": "The claim that a born again Christian cannot sin is a misinterpretation of 1 John 3:9, which means they are not defined by sin.",
+        }))
+
+        # 2. Audit v3.2 blind-spot detections
+        turns = [
+            {
+                "turn_id": "V32_T01",
+                "speaker_role": "MAIN_DAEE",
+                "start_ms": 0,
+                "end_ms": 20000,
+                "text_original": (
+                    "Stop interrupting me! Otherwise I'll not carry on the conversation. "
+                    "In Christianity, is the only valid reason for divorce sexual immorality even in severe abuse cases? "
+                    + " ".join(["divorce marriage justice mercy protection scripture"] * 20)
+                ),
+            },
+            {
+                "turn_id": "V32_T02",
+                "speaker_role": "INTERLOCUTOR",
+                "start_ms": 21000,
+                "end_ms": 40000,
+                "text_original": (
+                    "The Bible speaks about marriage vows, divorce, abuse, and Christian forgiveness in many chapters "
+                    + " ".join(["marriage vows divorce christian forgiveness"] * 12)
+                ),
+            },
+        ]
+        card = {
+            "id": "V32_001",
+            "video_id": "V32",
+            "daee_speaker_id": "SPK_00",
+            "interlocutor_speaker_id": "SPK_01",
+            "question_turn_id": "V32_T02",
+            "answer_turn_id": "V32_T01",
+            "timestamp_seconds": 10,
+            "question_en": "In Christianity, is the only valid reason for divorce adultery?",
+            "question_ar": "هل العبارة التي تقولها في دينكم تعني أن الزنا هو سبب الطلاق الوحيد؟",
+            "core_answer_summary_en": " ".join(["Islamic jurisprudence regulates divorce and marriage with justice and mercy."] * 10),
+            "core_answer_summary_ar": " ".join(["ينظم الفقه الإسلامي أحكام الزواج والطلاق بالعدل والرحمة وحفظ الحقوق."] * 8),
+            "logical_premises": ["Premise 1.", "Premise 2.", "Conclusion."],
+            "logical_premises_ar": ["مقدمة 1.", "مقدمة 2.", "نتيجة."],
+            "fallacy_or_misconception_exposed": "False dichotomy.",
+            "fallacy_or_misconception_exposed_ar": "قسمة ثنائية زائفة.",
+            "socratic_question": "How does indissolubility protect an abused spouse?",
+            "socratic_question_ar": "كيف يحمي تحريم الطلاق الزوجة المتضررة؟",
+            # Exact substring from MAIN_DAEE turn (even though topic words also appear in INTERLOCUTOR!)
+            "interlocutor_verbatim_quote": "In Christianity, is the only valid reason for divorce sexual immorality even in severe abuse cases?",
+            "interlocutor_verbatim_quote_ar": " ".join(["هذا نص عربي طويل جداً لا يطابق طول الاقتباس الإنجليزي الأصلي على الإطلاق"] * 8),
+            "verbatim_quote": turns[0]["text_original"],
+            "verbatim_quote_ar": " ".join(["توقف عن مقاطعتي وإلا فلن أواصل الحوار فالإسلام يحفظ العدل والرحمة في الزواج والطلاق."] * 8),
+            "dialogue_exchange": [
+                {"turn_id": "V32_T01", "role": "MAIN_DAEE", "timestamp_seconds": 0, "text_en": " ".join(["justice mercy protection"] * 12), "text_ar": "العدل والرحمة."},
+                {"turn_id": "V32_T02", "role": "INTERLOCUTOR", "timestamp_seconds": 21, "text_en": "Okay.", "text_ar": "حسناً."},
+                {"turn_id": "V32_T01", "role": "MAIN_DAEE", "timestamp_seconds": 25, "text_en": " ".join(["divorce scripture mercy"] * 12), "text_ar": "الطلاق والرحمة."},
+                {"turn_id": "V32_T01", "role": "MAIN_DAEE", "timestamp_seconds": 30, "text_en": " ".join(["marriage justice protection"] * 12), "text_ar": "الزواج والعدل."},
+            ],
+        }
+        rep = audit_single_card(card, turns, require_arabic=True)
+        codes = {d["code"] for d in rep["defects"]}
+        self.assertIn("[GATE-PERSPECTIVE]", rep["hard_fails_all"])
+        self.assertIn("[GATE-ROLE]", rep["hard_fails_all"])
+        self.assertIn("DAEE_CROSS_EXAM_IN_QUESTION", codes)
+        self.assertIn("QUOTE_ROLE_SWAPPED_INTERLOCUTOR", codes)
+        self.assertIn("LOGISTICS_NOISE_QUOTE", codes)
+        self.assertIn("OVERLONG_FUSED_QUOTE", codes)
+        self.assertIn("DAEE_DOMINATED_DIALOGUE_EXCHANGE", codes)
+        self.assertIn("BILINGUAL_QUOTE_LENGTH_MISMATCH", codes)
+        self.assertIn("AWKWARD_ARABIC_2ND_PERSON_QUESTION", codes)
+
+        # Also verify 7-word mid-sentence cut without punctuation triggers TRUNCATED_FRAGMENT_QUOTE
+        card2 = dict(card)
+        card2["interlocutor_verbatim_quote"] = "You said when you're a new born"
+        card2["interlocutor_verbatim_quote_ar"] = "قلت حين تكون مولوداً من جديد"
+        rep2 = audit_single_card(card2, turns, require_arabic=True)
+        self.assertIn("TRUNCATED_FRAGMENT_QUOTE", {d["code"] for d in rep2["defects"]})
+
+
 if __name__ == "__main__":
     unittest.main()

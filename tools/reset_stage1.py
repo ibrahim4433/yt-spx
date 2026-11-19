@@ -85,6 +85,15 @@ def reset_stage1_pipeline(workspace: SharedWorkspace, keep_diarization: bool = F
 
     print(f"   -> Purged {removed_shards} Stage 2 .qa.json shard(s) & {removed_partials} partial window(s)")
 
+    traces_dir = getattr(workspace, "debug_traces_dir", None)
+    if traces_dir and traces_dir.exists():
+        for tf in traces_dir.glob("*"):
+            if tf.is_file():
+                try:
+                    tf.unlink()
+                except Exception:
+                    pass
+
     # 3. Diarization cleanup (if keep_diarization is False)
     removed_diar_dirs = 0
     if not keep_diarization and workspace.diarization_dir.exists():

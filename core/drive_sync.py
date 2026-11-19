@@ -114,6 +114,7 @@ class SharedWorkspace:
         self.locks_dir = self.root / "locks"
         self.profiles_dir = self.root / "profiles"
         self.logs_dir = self.root / "logs"
+        self.debug_traces_dir = self.root / "debug_traces"
 
         for d in (
             self.data_dir,
@@ -128,6 +129,7 @@ class SharedWorkspace:
             self.locks_dir,
             self.profiles_dir,
             self.logs_dir,
+            self.debug_traces_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

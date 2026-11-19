@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 tools/card_rating_system/audit_cards.py
-Universal Apologetics Card Audit & Rating Engine (v3.1) for Dawah Dialectics (yt-spx).
+Universal Apologetics Card Audit & Rating Engine (v3.2) for Dawah Dialectics (yt-spx).
 
 Evaluates cards in `qa_units` against ground-truth spoken turns in `scenario_turns`,
 `video_speakers`, and `videos`. Enforces the 5 Core Rubric Dimensions (100 Pts) and
@@ -122,7 +122,8 @@ DAEE_CROSS_EXAM_REGEX = re.compile(
     r'|\bhow\s+can\s+jesus\s+be\s+considered\s+the\s+[\'"]?son\s+of\s+god[\'"]?\b'
     r'|\bhow\s+can\s+the\s+doctrine\s+of\s+original\s+sin\b'
     r'|\bwill\s+i\s+still\s+be\s+saved\s+if\s+i\s+leave\s+christianity\b'
-    r'|\bif\s+the\s+bible\s+commands\s+the\s+killing\b)',
+    r'|\bif\s+the\s+bible\s+commands\s+the\s+killing\b'
+    r'|^\s*in\s+christianity,\s+(?:is|does|why|how)\b)',
     re.IGNORECASE,
 )
 
@@ -132,6 +133,15 @@ HEBREW_REGEX = re.compile(r'[\u0590-\u05FF]')
 CJK_REGEX = re.compile(r'[\u4E00-\u9FFF\u3000-\u303F]')
 LATIN_IN_ARABIC_REGEX = re.compile(r'\b[A-Za-z]{4,}\b')
 _DANGLING_PROCLITIC_RE = re.compile(r'(?:^|[\s،(«])(?:[وف]?لل)(?:[\s.،؛؟!\)»]|$)|(?:^|\s)لل\s+ال')
+_LOGISTICS_QUOTE_RE = re.compile(
+    r"\b(?:stop\s+interrupting|courtesy\s+to\s+let\s+me\s+finish|not\s+carry\s+on\s+(?:the\s+)?conversation|"
+    r"very\s+angry\s+man|don'?t\s+touch\s+me|step\s+back|get\s+out\s+of\s+my\s+face|"
+    r"shut\s+up\s+and\s+listen|let\s+me\s+finish\s+speaking)\b",
+    re.IGNORECASE,
+)
+_ARABIC_2ND_PERSON_Q_RE = re.compile(
+    r"(?:التي\s+تقولها|الذي\s+تقوله|حسب\s+اعتقادكم|في\s+دينكم|كما\s+تزعمون|حسب\s+قولك)"
+)
 
 META_NARRATOR_REGEX = re.compile(
     r'(?:\b(?:the\s+(?:da\'?ee|speaker|apologist|scholar|muslim|debater|narrator|presenter)'
@@ -453,26 +463,52 @@ def audit_single_card(
     daee_quote = (card.get("verbatim_quote") or "").strip()
     inter_quote = (card.get("interlocutor_verbatim_quote") or "").strip()
     if daee_transcript and inter_transcript:
+        norm_daee = " ".join(re.findall(r"[a-z0-9']+", daee_transcript.lower()))
+        norm_inter = " ".join(re.findall(r"[a-z0-9']+", inter_transcript.lower()))
+        daee_word_total = len(norm_daee.split())
+        inter_word_total = len(norm_inter.split())
         if daee_quote:
+            norm_vq = " ".join(re.findall(r"[a-z0-9']+", daee_quote.lower()))
             vq_d_ov = _quote_transcript_overlap(daee_quote, daee_transcript) or 0.0
             vq_i_ov = _quote_transcript_overlap(daee_quote, inter_transcript) or 0.0
-            if vq_i_ov >= 0.60 and vq_d_ov < 0.30 and (vq_i_ov - vq_d_ov) >= 0.30:
+            exact_in_inter_only = (
+                len(norm_vq.split()) >= 8
+                and daee_word_total >= 40
+                and norm_vq in norm_inter
+                and norm_vq not in norm_daee
+            )
+            if exact_in_inter_only or (vq_i_ov >= 0.60 and vq_d_ov < 0.30 and (vq_i_ov - vq_d_ov) >= 0.30):
                 _add_gate("[GATE-ROLE]", "verbatim_quote belongs to INTERLOCUTOR turns rather than MAIN_DAEE proof turns.")
                 defects.append({
                     "code": "QUOTE_ROLE_SWAPPED_DAEE",
                     "severity": "CRITICAL",
-                    "description": f"verbatim_quote matches INTERLOCUTOR speech ({vq_i_ov:.0%} overlap) instead of MAIN_DAEE ({vq_d_ov:.0%}).",
+                    "description": (
+                        "verbatim_quote appears verbatim in INTERLOCUTOR turns and not in MAIN_DAEE turns."
+                        if exact_in_inter_only
+                        else f"verbatim_quote matches INTERLOCUTOR speech ({vq_i_ov:.0%} overlap) instead of MAIN_DAEE ({vq_d_ov:.0%})."
+                    ),
                 })
                 recommendations.append("Replace verbatim_quote with an authentic MAIN_DAEE proof turn.")
         if inter_quote:
+            norm_ivq = " ".join(re.findall(r"[a-z0-9']+", inter_quote.lower()))
             ivq_d_ov = _quote_transcript_overlap(inter_quote, daee_transcript) or 0.0
             ivq_i_ov = _quote_transcript_overlap(inter_quote, inter_transcript) or 0.0
-            if ivq_d_ov >= 0.60 and ivq_i_ov < 0.30 and (ivq_d_ov - ivq_i_ov) >= 0.30:
+            exact_in_daee_only = (
+                len(norm_ivq.split()) >= 8
+                and inter_word_total >= 40
+                and norm_ivq in norm_daee
+                and norm_ivq not in norm_inter
+            )
+            if exact_in_daee_only or (ivq_d_ov >= 0.60 and ivq_i_ov < 0.30 and (ivq_d_ov - ivq_i_ov) >= 0.30):
                 _add_gate("[GATE-ROLE]", "interlocutor_verbatim_quote belongs to MAIN_DAEE turns rather than INTERLOCUTOR turns.")
                 defects.append({
                     "code": "QUOTE_ROLE_SWAPPED_INTERLOCUTOR",
                     "severity": "CRITICAL",
-                    "description": f"interlocutor_verbatim_quote matches MAIN_DAEE speech ({ivq_d_ov:.0%} overlap) instead of INTERLOCUTOR ({ivq_i_ov:.0%}).",
+                    "description": (
+                        "interlocutor_verbatim_quote appears verbatim in MAIN_DAEE turns and not in INTERLOCUTOR turns."
+                        if exact_in_daee_only
+                        else f"interlocutor_verbatim_quote matches MAIN_DAEE speech ({ivq_d_ov:.0%} overlap) instead of INTERLOCUTOR ({ivq_i_ov:.0%})."
+                    ),
                 })
                 recommendations.append("Replace interlocutor_verbatim_quote with the actual INTERLOCUTOR turn voicing the objection.")
 
@@ -572,6 +608,14 @@ def audit_single_card(
             dim_scores["grounding_fidelity"] -= 8
             defects.append({"code": "QUOTE_UNGROUNDED_DAEE", "severity": "HIGH", "description": f"Da'ee verbatim quote appears ungrounded (only {ratio:.0%} lexical overlap with transcript)."})
             recommendations.append("Replace verbatim_quote with an exact spoken quote from the Da'ee in the transcript.")
+        if _LOGISTICS_QUOTE_RE.search(daee_quote):
+            dim_scores["grounding_fidelity"] -= 5
+            defects.append({"code": "LOGISTICS_NOISE_QUOTE", "severity": "HIGH", "description": "verbatim_quote contains crowd-control or interruption logistics rather than pure apologetic proof."})
+            recommendations.append("Strip crowd-control/interruption chatter from verbatim_quote and keep only the core proof.")
+        if len(daee_quote.split()) > 110:
+            dim_scores["grounding_fidelity"] -= 4
+            defects.append({"code": "OVERLONG_FUSED_QUOTE", "severity": "HIGH", "description": f"verbatim_quote is an overly long block ({len(daee_quote.split())} words > 110 max), likely fusing multiple turns."})
+            recommendations.append("Trim verbatim_quote to a focused 15-65 word proof excerpt.")
 
     if not inter_quote:
         dim_scores["grounding_fidelity"] -= 2
@@ -583,6 +627,16 @@ def audit_single_card(
             dim_scores["grounding_fidelity"] -= 5
             defects.append({"code": "QUOTE_UNGROUNDED_INTERLOCUTOR", "severity": "HIGH", "description": f"Interlocutor verbatim quote appears ungrounded (only {ratio_i:.0%} lexical overlap with transcript)."})
             recommendations.append("Replace interlocutor_verbatim_quote with an exact spoken quote from the interlocutor.")
+        ivq_words = inter_quote.split()
+        ivq_has_end_punct = bool(re.search(r'[.?!؟"»\']\s*$', inter_quote))
+        if (
+            (len(ivq_words) < 7 and "?" not in inter_quote)
+            or (len(ivq_words) <= 8 and not ivq_has_end_punct)
+            or (inter_quote[0].islower() and len(ivq_words) < 20)
+        ):
+            dim_scores["grounding_fidelity"] -= 4
+            defects.append({"code": "TRUNCATED_FRAGMENT_QUOTE", "severity": "HIGH", "description": f"interlocutor_verbatim_quote is a truncated/mid-clause fragment ({len(ivq_words)} words)."})
+            recommendations.append("Use a complete interlocutor objection sentence rather than a mid-sentence fragment.")
 
     ex_turns = ex_turns_raw if isinstance(ex_turns_raw, list) else []
     min_ex_turns = 4 if require_arabic else 2
@@ -678,6 +732,22 @@ def audit_single_card(
                     "severity": "MEDIUM",
                     "description": "dialogue_exchange collapsed into a single speaker role despite multi-speaker turns.",
                 })
+        if len(ex_turns) >= 4 and len(inter_transcript.split()) >= 40:
+            total_ex_w = sum(len((ex.get("text_en") or "").split()) for ex in ex_turns if isinstance(ex, dict))
+            inter_ex_turns = [
+                ex for ex in ex_turns
+                if isinstance(ex, dict) and _canon_role(ex.get("role")) == "INTERLOCUTOR"
+            ]
+            inter_ex_w = sum(len((ex.get("text_en") or "").split()) for ex in inter_ex_turns)
+            substantive_inter = sum(1 for ex in inter_ex_turns if len((ex.get("text_en") or "").split()) >= 6)
+            if total_ex_w >= 40 and ((inter_ex_w / total_ex_w) < 0.15 or substantive_inter == 0):
+                dim_scores["grounding_fidelity"] -= 5
+                defects.append({
+                    "code": "DAEE_DOMINATED_DIALOGUE_EXCHANGE",
+                    "severity": "HIGH",
+                    "description": f"dialogue_exchange is overwhelmingly Da'ee speech (interlocutor has only {inter_ex_w}/{total_ex_w} words across {substantive_inter} substantive turn(s)).",
+                })
+                recommendations.append("Include substantive INTERLOCUTOR objection/follow-up turns in dialogue_exchange.")
 
     # Topical Grounding Check: [GATE-UNGROUNDED]
     if len(turns) >= 4:
@@ -822,6 +892,57 @@ def audit_single_card(
             if any(not (isinstance(ex, dict) and (ex.get("text_ar") or "").strip()) for ex in ex_turns):
                 dim_scores["bilingual_symmetry"] -= 3
                 defects.append({"code": "MISSING_DIALOGUE_TEXT_AR", "severity": "MEDIUM", "description": "One or more dialogue_exchange turns lack text_ar."})
+            vq_ar = (card.get("verbatim_quote_ar") or "").strip()
+            len_mismatch_found = False
+            for en_lbl, en_s, ar_lbl, ar_s in (
+                ("interlocutor_verbatim_quote", inter_quote, "interlocutor_verbatim_quote_ar", ivq_ar),
+                ("verbatim_quote", daee_quote, "verbatim_quote_ar", vq_ar),
+            ):
+                en_w = len(en_s.split())
+                ar_w = len(ar_s.split())
+                if en_w >= 6 and ar_w > max(35, int(en_w * 2.3)):
+                    dim_scores["bilingual_symmetry"] -= 5
+                    defects.append({
+                        "code": "BILINGUAL_QUOTE_LENGTH_MISMATCH",
+                        "severity": "HIGH",
+                        "description": f"{ar_lbl} ({ar_w} words) vastly exceeds {en_lbl} ({en_w} words), indicating a mismatched turn translation.",
+                    })
+                    recommendations.append(f"Translate ONLY {en_lbl} faithfully 1-to-1 into {ar_lbl}.")
+                    len_mismatch_found = True
+                    break
+                if en_w >= 25 and ar_w > 0 and ar_w < max(6, int(en_w * 0.25)):
+                    dim_scores["bilingual_symmetry"] -= 5
+                    defects.append({
+                        "code": "BILINGUAL_QUOTE_LENGTH_MISMATCH",
+                        "severity": "HIGH",
+                        "description": f"{ar_lbl} ({ar_w} words) is severely truncated compared to {en_lbl} ({en_w} words).",
+                    })
+                    recommendations.append(f"Translate the full {en_lbl} faithfully into {ar_lbl}.")
+                    len_mismatch_found = True
+                    break
+            if not len_mismatch_found:
+                for ex in ex_turns:
+                    if not isinstance(ex, dict):
+                        continue
+                    t_en = (ex.get("text_en") or "").strip()
+                    t_ar = (ex.get("text_ar") or "").strip()
+                    if len(t_en.split()) >= 8 and len(t_ar.split()) > max(40, int(len(t_en.split()) * 2.5)):
+                        dim_scores["bilingual_symmetry"] -= 4
+                        defects.append({
+                            "code": "BILINGUAL_QUOTE_LENGTH_MISMATCH",
+                            "severity": "HIGH",
+                            "description": f"dialogue_exchange turn '{ex.get('turn_id', '?')}' text_ar ({len(t_ar.split())}w) vastly exceeds text_en ({len(t_en.split())}w).",
+                        })
+                        recommendations.append("Translate each dialogue_exchange turn's text_en 1-to-1 into text_ar without copying adjacent turns.")
+                        break
+            if q_ar and _ARABIC_2ND_PERSON_Q_RE.search(q_ar):
+                dim_scores["bilingual_symmetry"] -= 3
+                defects.append({
+                    "code": "AWKWARD_ARABIC_2ND_PERSON_QUESTION",
+                    "severity": "MEDIUM",
+                    "description": f"question_ar uses informal 2nd-person street wording ('{q_ar[:80]}').",
+                })
+                recommendations.append("Rewrite question_ar in formal impersonal Classical Arabic without 'التي تقولها / في دينكم'.")
 
     # Dim 5: Attribution & Timestamps (Max 15)
     ts_sec = card.get("timestamp_seconds")

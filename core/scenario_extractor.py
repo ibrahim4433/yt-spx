@@ -45,6 +45,18 @@ try:
 except (ImportError, ValueError):
     from .colab_runner import _supports_kwarg
 from core.audio_diarizer import ms_to_fmt
+try:
+    from core.debug_tracer import (
+        classify_diarization_health,
+        extract_think_excerpt,
+        record_video_trace_section,
+    )
+except (ImportError, ValueError):
+    from .debug_tracer import (
+        classify_diarization_health,
+        extract_think_excerpt,
+        record_video_trace_section,
+    )
 
 try:
     from db.database import (
@@ -670,10 +682,14 @@ def collapse_repetition_loops(text: str) -> str:
     return " ".join(collapsed.split()).strip()
 
 
-def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int = 2500) -> List[Dict[str, Any]]:
+def merge_consecutive_speaker_turns(
+    turns: List[Dict[str, Any]],
+    max_gap_ms: int = 2500,
+    max_merged_words: int = 110,
+) -> List[Dict[str, Any]]:
     """
-    Merges rapid consecutive micro-turns spoken by the same speaker.
-    Prevents chopped speech fragments from confusing the LLM and enables clean verbatim quotes.
+    Merges rapid consecutive micro-turns spoken by the same speaker while capping merged length
+    so turns do not balloon into >110-word multi-turn blobs that diverge from SQLite scenario_turns.
     Also suppresses Faster-Whisper repetition loops.
     """
     if not turns:
@@ -684,6 +700,8 @@ def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int
         # Suppress any Whisper repetition loops in raw text
         if t_copy.get("text_original"):
             t_copy["text_original"] = collapse_repetition_loops(t_copy["text_original"])
+        prev_w_cnt = len((merged[-1].get("text_original") or "").split()) if merged else 0
+        curr_w_cnt = len((t_copy.get("text_original") or "").split())
         if (
             merged
             and merged[-1].get("speaker_id") == t_copy.get("speaker_id")
@@ -691,6 +709,7 @@ def merge_consecutive_speaker_turns(turns: List[Dict[str, Any]], max_gap_ms: int
             and not t_copy.get("is_pedestrian_interruption")
             and not merged[-1].get("is_pedestrian_interruption")
             and (int(t_copy.get("start_ms", 0)) - int(merged[-1].get("end_ms", 0))) <= max_gap_ms
+            and (prev_w_cnt + curr_w_cnt) <= max_merged_words
         ):
             # Concatenate text
             prev_text = (merged[-1].get("text_original") or "").strip()
@@ -1124,6 +1143,108 @@ def _recover_substantive_daee_turn(
     return a_turn, a_tid
 
 
+_CROWD_LOGISTICS_SENT_RE = re.compile(
+    r"\b(?:stop\s+interrupting|let\s+me\s+finish|courtesy\s+to\s+let\s+me|"
+    r"not\s+carry\s+on\s+the\s+conversation|don'?t\s+interrupt|hold\s+on\s+one\s+second|"
+    r"calm\s+down|you'?re\s+a\s+very\s+angry|he'?s\s+doing\s+it\s+again)\b",
+    re.IGNORECASE,
+)
+
+
+def _trim_focused_quote(text: str, anchor_text: str = "", max_words: int = 65) -> str:
+    """
+    Trims overlong multi-turn quotes cleanly to <= max_words at sentence boundaries,
+    dropping pure crowd-control/interruption sentences when substantive proof sentences exist.
+    """
+    cleaned = clean_dangling_quote((text or "").strip())
+    if not cleaned:
+        return ""
+    sents = [s.strip() for s in re.split(r"(?<=[.!?؟])\s+", cleaned) if s.strip()]
+    if len(sents) > 1:
+        substantive_sents = [s for s in sents if not _CROWD_LOGISTICS_SENT_RE.search(s)]
+        if substantive_sents and sum(len(s.split()) for s in substantive_sents) >= 8:
+            sents = substantive_sents
+            cleaned = " ".join(sents)
+    words = cleaned.split()
+    if len(words) <= max_words or len(sents) <= 1:
+        return " ".join(words[:max_words]) if len(words) > max_words else cleaned
+
+    anchor_toks = set(re.findall(r"[a-z]{4,}", (anchor_text or "").lower()))
+    best_span = sents[0]
+    best_score = -1.0
+    for i in range(len(sents)):
+        cur_sents: List[str] = []
+        cur_words = 0
+        for j in range(i, len(sents)):
+            sw = len(sents[j].split())
+            if cur_sents and (cur_words + sw) > max_words:
+                break
+            cur_sents.append(sents[j])
+            cur_words += sw
+            if cur_words >= 12:
+                cand_txt = " ".join(cur_sents)
+                if anchor_toks:
+                    cand_toks = set(re.findall(r"[a-z]{4,}", cand_txt.lower()))
+                    sc = len(cand_toks & anchor_toks) + min(cur_words, 45) * 0.02
+                else:
+                    sc = float(cur_words)
+                if sc > best_score:
+                    best_score = sc
+                    best_span = cand_txt
+    if len(best_span.split()) > max_words:
+        best_span = " ".join(best_span.split()[:max_words])
+    return clean_dangling_quote(best_span)
+
+
+_ANALOGY_ABSTRACT_STOPWORDS = frozenset({
+    "allah", "islam", "islamic", "muslim", "muslims", "quran", "quranic", "bible", "biblical",
+    "jesus", "christ", "christian", "christians", "christianity", "prophet", "prophets", "messenger",
+    "human", "humans", "person", "people", "someone", "anyone", "everyone", "individual", "individuals",
+    "divine", "moral", "morally", "truth", "faith", "faiths", "belief", "beliefs", "world", "earth",
+    "nature", "religion", "religions", "scripture", "creator", "creation", "created", "eternal",
+    "justice", "mercy", "wisdom", "salvation", "paradise", "heaven", "forgiveness", "repentance",
+    "mistakes", "mistake", "sinning", "sinless", "being", "beings", "similarly", "however", "therefore",
+    "rather", "instead", "simply", "without", "because", "through", "against", "between", "another",
+    "other", "every", "where", "which", "their", "there", "would", "could", "should", "cannot",
+    "desire", "desires", "heart", "soul", "spirit", "living", "lives", "alive", "death", "dying",
+    "still", "means", "meaning", "state", "form", "exact", "general", "whole", "entire", "total",
+    "bound", "given", "makes", "making", "leads", "leading", "based", "follows", "following",
+})
+
+
+def _filter_grounded_analogies(
+    analogies_en: List[str],
+    analogies_ar: List[str],
+    all_transcript_lower: str,
+    cohesive_turns: List[Dict[str, Any]],
+) -> Tuple[List[str], List[str]]:
+    """
+    Drops invented textbook analogies whose concrete imagery never appears anywhere in a long
+    video transcript (`>= 4` turns and `>= 120` words), keeping both EN and AR lists aligned.
+    """
+    if not analogies_en or len(cohesive_turns) < 4 or len(all_transcript_lower.split()) < 120:
+        return analogies_en, analogies_ar
+    transcript_stems = {w[:5] for w in re.findall(r"[a-z]{5,}", all_transcript_lower)}
+    kept_en: List[str] = []
+    kept_ar: List[str] = []
+    for idx, an in enumerate(analogies_en):
+        an_s = str(an or "").strip()
+        if _is_empty_or_negative_sentinel(an_s):
+            continue
+        concrete_stems = {
+            w[:5]
+            for w in re.findall(r"[a-z]{5,}", an_s.lower())
+            if w not in _ANALOGY_ABSTRACT_STOPWORDS
+        }
+        # Only drop when analogy introduces >=2 concrete imagery terms with 0 stem hits in transcript
+        if len(concrete_stems) >= 2 and not (concrete_stems & transcript_stems):
+            continue
+        kept_en.append(an_s)
+        if idx < len(analogies_ar) and str(analogies_ar[idx] or "").strip():
+            kept_ar.append(str(analogies_ar[idx]).strip())
+    return kept_en, kept_ar
+
+
 def _ground_dialogue_exchange(
     raw_exchange: List[Any],
     cohesive_turns_by_id: Dict[str, Dict[str, Any]],
@@ -1134,7 +1255,7 @@ def _ground_dialogue_exchange(
     fallback_ts_sec: int,
     repair_english_from_turn: bool = True,
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    """Locks turn roles, deduplicates turn IDs, sorts chronologically if matched, and repairs drifted text_en."""
+    """Locks turn roles, snaps merged IDs to exact raw SQLite scenario_turns, sorts chronologically, and repairs drifted text_en."""
     enriched_exchange: List[Dict[str, Any]] = []
     any_diarized_turn_matched = False
     all_turns_matched = True
@@ -1143,11 +1264,37 @@ def _ground_dialogue_exchange(
         if not isinstance(ex, dict):
             continue
         etid = str(ex.get("turn_id") or "").strip()
+        ex_txt = str(ex.get("text_en") or "").strip()
         if etid and etid in seen_tids:
             continue
         eturn = _lookup_turn(etid, cohesive_turns_by_id, raw_turns_by_id)
-        if eturn is not None and not (cohesive_turns_by_id.get(etid) or raw_turns_by_id.get(etid)):
-            etid = str(eturn.get("turn_id") or etid)
+
+        # Snap cohesive merged turns to the best-matching exact raw scenario_turn so SQLite & Scenario Studio match 1-to-1
+        raw_match = raw_turns_by_id.get(etid) if etid else None
+        if eturn is not None:
+            sub_ids = [sid for sid in (eturn.get("merged_turn_ids") or []) if sid in raw_turns_by_id]
+            if len(sub_ids) > 1:
+                if ex_txt:
+                    best_sid = max(
+                        sub_ids,
+                        key=lambda sid: (
+                            _word_containment(ex_txt, (raw_turns_by_id[sid].get("text_original") or "").lower()),
+                            len((raw_turns_by_id[sid].get("text_original") or "").split()),
+                        ),
+                    )
+                else:
+                    best_sid = max(sub_ids, key=lambda sid: len((raw_turns_by_id[sid].get("text_original") or "").split()))
+                raw_match = raw_turns_by_id[best_sid]
+                etid = best_sid
+            elif raw_match is None and eturn.get("turn_id") in raw_turns_by_id:
+                etid = str(eturn["turn_id"])
+                raw_match = raw_turns_by_id[etid]
+            elif not (cohesive_turns_by_id.get(etid) or raw_turns_by_id.get(etid)):
+                etid = str(eturn.get("turn_id") or etid)
+
+        if raw_match is not None:
+            eturn = raw_match
+
         if etid:
             if etid in seen_tids:
                 continue
@@ -1169,7 +1316,6 @@ def _ground_dialogue_exchange(
             spk_label_en = ((eturn.get("speaker_label_en") if turn_matches else None) or (daee_name_en if is_daee else "Interlocutor"))
             spk_label_ar = ((eturn.get("speaker_label_ar") if turn_matches else None) or (daee_name_ar if is_daee else "المحاور"))
 
-        ex_txt = str(ex.get("text_en") or "").strip()
         turn_orig = str(eturn.get("text_original") or "").strip() if eturn else ""
         if repair_english_from_turn and turn_orig:
             orig_words = set(re.findall(r"\b\w{3,}\b", turn_orig.lower()))
@@ -1179,6 +1325,8 @@ def _ground_dialogue_exchange(
             elif len(ex_words) >= 4 and len(orig_words) >= 4:
                 if (len(ex_words & orig_words) / len(ex_words)) < 0.55:
                     ex_txt = turn_orig
+            elif len(ex_words) >= 4 and len(orig_words) < 4:
+                ex_txt = turn_orig
 
         enriched_exchange.append({
             "turn_id": etid,
@@ -1259,13 +1407,18 @@ def _sync_role_quotes_in_item(
             and raw_q.lower() not in role_transcript_lower
             and _word_containment(raw_q, sum_en_low) >= 0.72
         )
+        is_overlong_or_logistics = bool(
+            raw_q and (len(q_words) > 90 or _CROWD_LOGISTICS_SENT_RE.search(raw_q))
+        )
+        anchor_ctx = f"{item.get('question_en') or ''} {item.get('core_answer_summary_en') or ''}"
 
         replaced_english = False
-        if (overlap_low or is_summary_prose or is_short or has_dangling) and primary_turn and primary_turn.get("text_original"):
+        if (overlap_low or is_summary_prose or is_short or has_dangling or is_overlong_or_logistics) and primary_turn and primary_turn.get("text_original"):
             p_orig = primary_turn["text_original"].strip()
             p_words = [w for w in re.split(r"\s+", p_orig) if w]
             if len(p_words) >= 8 or overlap_low or is_summary_prose:
-                cleaned_p = clean_dangling_quote(p_orig)
+                source_txt = raw_q if (is_overlong_or_logistics and not (overlap_low or is_summary_prose or is_short or has_dangling)) else p_orig
+                cleaned_p = _trim_focused_quote(source_txt, anchor_text=anchor_ctx, max_words=65)
                 if cleaned_p and cleaned_p != clean_dangling_quote(raw_q):
                     item[quote_key] = cleaned_p
                     replaced_english = True
@@ -1279,9 +1432,10 @@ def _sync_role_quotes_in_item(
                             ),
                             "",
                         )
-                        item[quote_ar_key] = p_ar or matched_ex_ar
+                        if p_ar or matched_ex_ar:
+                            item[quote_ar_key] = p_ar or matched_ex_ar
                 elif raw_q:
-                    item[quote_key] = clean_dangling_quote(raw_q)
+                    item[quote_key] = _trim_focused_quote(raw_q, anchor_text=anchor_ctx, max_words=65)
             elif allow_exchange_fallback:
                 cand_turns = [
                     ex for ex in enriched_exchange
@@ -1289,18 +1443,18 @@ def _sync_role_quotes_in_item(
                 ]
                 if cand_turns:
                     best_ex = max(cand_turns, key=lambda x: len((x.get("text_en") or "").split()))
-                    cleaned_best = clean_dangling_quote(best_ex["text_en"].strip())
+                    cleaned_best = _trim_focused_quote(best_ex["text_en"].strip(), anchor_text=anchor_ctx, max_words=65)
                     if cleaned_best != clean_dangling_quote(raw_q):
                         item[quote_key] = cleaned_best
                         replaced_english = True
-                        if sync_arabic:
+                        if sync_arabic and (best_ex.get("text_ar") or "").strip():
                             item[quote_ar_key] = clean_dangling_quote((best_ex.get("text_ar") or "").strip())
                 elif raw_q:
-                    item[quote_key] = clean_dangling_quote(raw_q)
+                    item[quote_key] = _trim_focused_quote(raw_q, anchor_text=anchor_ctx, max_words=65)
             elif raw_q:
-                item[quote_key] = clean_dangling_quote(raw_q)
+                item[quote_key] = _trim_focused_quote(raw_q, anchor_text=anchor_ctx, max_words=65)
         elif raw_q:
-            item[quote_key] = clean_dangling_quote(raw_q)
+            item[quote_key] = _trim_focused_quote(raw_q, anchor_text=anchor_ctx, max_words=65)
 
         if sync_arabic and not replaced_english and not item.get(quote_ar_key):
             for ex in enriched_exchange:
@@ -1453,11 +1607,21 @@ def _preground_round1_unit(
         a_tid = str(a_turn["turn_id"])
         u["answer_turn_id"] = a_tid
 
-    # Normalize negative analogy sentinels before Round 2 sees them
+    # Normalize negative analogy sentinels and drop fabricated analogies before Round 2 sees them
     if _is_empty_or_negative_sentinel(u.get("analogy_or_metaphor")):
         u["analogy_or_metaphor"] = ""
-    if isinstance(u.get("analogies"), list):
-        u["analogies"] = [str(a).strip() for a in u["analogies"] if not _is_empty_or_negative_sentinel(a)]
+    raw_pre_an = (
+        [str(a).strip() for a in u["analogies"] if not _is_empty_or_negative_sentinel(a)]
+        if isinstance(u.get("analogies"), list)
+        else ([str(u["analogy_or_metaphor"]).strip()] if u.get("analogy_or_metaphor") else [])
+    )
+    if raw_pre_an:
+        all_tr_low = " ".join((t.get("text_original") or "").strip() for t in cohesive_turns).lower()
+        grounded_an, _ = _filter_grounded_analogies(raw_pre_an, [], all_tr_low, cohesive_turns)
+        u["analogies"] = grounded_an
+        u["analogy_or_metaphor"] = grounded_an[0] if grounded_an else ""
+    elif isinstance(u.get("analogies"), list):
+        u["analogies"] = []
 
     if a_turn is None or _canon_speaker_role(a_turn.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
         return u
@@ -1513,12 +1677,18 @@ def anchor_and_enrich_extracted_unit(
     window_start_ms: int,
     unit_seq_num: int,
     cohesive_turns: Optional[List[Dict[str, Any]]] = None,
+    drop_reason_out: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Anchors LLM-extracted turn IDs and speaker identities directly against ground-truth
     cohesive turns and diarized Speaker records.
     Returns None if the unit fails theological validation, perspective integrity, or attributes opponent bias.
     """
+    def _fail(code: str) -> None:
+        if drop_reason_out is not None:
+            drop_reason_out.append(code)
+        return None
+
     item = sanitize_arabic_fields({k: v for k, v in raw_unit.items() if not str(k).startswith("_")})
     item.pop("rubric_audit", None)
     vid = scenario["video_id"]
@@ -1529,7 +1699,7 @@ def anchor_and_enrich_extracted_unit(
     raw_q_ar = str(item.get("question_ar") or "").strip()
     norm_q_en, norm_q_ar, is_valid_perspective = normalize_question_syntax_and_perspective(raw_q_en, raw_q_ar)
     if not is_valid_perspective or not is_valid_dialectical_question(norm_q_en, norm_q_ar):
-        return None
+        return _fail("INVALID_PERSPECTIVE")
     item["question_en"] = norm_q_en
     if norm_q_ar:
         item["question_ar"] = norm_q_ar
@@ -1566,7 +1736,7 @@ def anchor_and_enrich_extracted_unit(
 
     if a_turn is None or _canon_speaker_role(a_turn.get("speaker_role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
         # Strictly reject / drop unit if candidate answer turn is missing or belongs to interlocutor
-        return None
+        return _fail("MISSING_DAEE_TURN")
 
     a_turn, a_tid = _recover_substantive_daee_turn(
         item, q_turn, a_turn, a_tid, window_start_ms, cohesive_turns, cohesive_turns_by_id, raw_turns_by_id
@@ -1594,7 +1764,7 @@ def anchor_and_enrich_extracted_unit(
         main_daee
     )
     if not matched_daee or _canon_speaker_role(matched_daee.get("role"), "") not in ("MAIN_DAEE", "CO_DAEE"):
-        return None
+        return _fail("INVALID_DAEE_SPEAKER")
 
     daee_name_en = matched_daee.get("display_name_en") or (main_daee.get("display_name_en") if main_daee else "Main Da'ee")
     daee_name_ar = matched_daee.get("display_name_ar") or (main_daee.get("display_name_ar") if main_daee else "الداعية المحاور")
@@ -1602,7 +1772,7 @@ def anchor_and_enrich_extracted_unit(
 
     # Theological Guardrail: Strictly reject any unit that fell into an interlocutor
     if daee_name_ar in ("المحاور", "المحاور 1", "المحاور 2", "Interlocutor", "Interlocutor 1", "Interlocutor 2"):
-        return None
+        return _fail("INTERLOCUTOR_AS_DAEE")
 
     if not daee_name_ar and main_daee and main_daee.get("display_name_ar"):
         daee_name_ar = main_daee["display_name_ar"]
@@ -1612,7 +1782,7 @@ def anchor_and_enrich_extracted_unit(
     # Theological Guardrail: Validate no heresy or opponent bias is being asserted as truth
     bias_reason = check_theological_bias(item, a_turn)
     if bias_reason:
-        return None
+        return _fail(f"THEOLOGICAL_BIAS:{str(bias_reason)[:60]}")
 
     # Collect ordered source turn IDs referenced in dialogue_exchange + q_tid + a_tid
     raw_exchange = item.get("dialogue_exchange") or item.get("dialogue_trajectory") or []
@@ -1635,7 +1805,10 @@ def anchor_and_enrich_extracted_unit(
             if resolved_tid and resolved_tid not in src_tids:
                 src_tids.append(resolved_tid)
 
-    # Analogies: support multiple analogies list + single analogy field, filtering negative sentinels
+    all_transcript = " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns])
+    all_transcript_lower = all_transcript.lower()
+
+    # Analogies: support multiple analogies list + single analogy field, filtering negative sentinels & invented analogies
     raw_an = item.get("analogies")
     if isinstance(raw_an, list) and raw_an:
         clean_analogies = [str(a).strip() for a in raw_an if not _is_empty_or_negative_sentinel(a)]
@@ -1652,11 +1825,12 @@ def anchor_and_enrich_extracted_unit(
     else:
         clean_analogies_ar = []
 
+    clean_analogies, clean_analogies_ar = _filter_grounded_analogies(
+        clean_analogies, clean_analogies_ar, all_transcript_lower, cohesive_turns
+    )
+
     item["analogy_or_metaphor"] = clean_analogies[0] if clean_analogies else ""
     item["analogy_or_metaphor_ar"] = clean_analogies_ar[0] if clean_analogies_ar else ""
-
-    all_transcript = " ".join([(t.get("text_original") or "").strip() for t in cohesive_turns])
-    all_transcript_lower = all_transcript.lower()
 
     # Scriptural citations grounded against transcript in long scenarios
     raw_citations = item.get("scriptural_citations")
@@ -1667,7 +1841,7 @@ def anchor_and_enrich_extracted_unit(
     )
 
     if not _passes_topical_grounding_gate(item, q_turn, a_turn, cohesive_turns):
-        return None
+        return _fail("TOPICAL_DRIFT")
 
     # Anti-Leakage Gate: Discard any card with prompt demonstration signatures not in transcript
     prompt_leak_signatures = [
@@ -1702,7 +1876,7 @@ def anchor_and_enrich_extracted_unit(
                 continue
             sig_present = sig in all_transcript_lower
         if not sig_present:
-            return None
+            return _fail(f"PROMPT_LEAK:{sig}")
 
     # Anti-Noise Gate: Discard cards referencing street incidents, dog petting, or promotional outro pitches
     unconditional_noise_signatures = [
@@ -1712,7 +1886,7 @@ def anchor_and_enrich_extracted_unit(
     ]
     for nsig in unconditional_noise_signatures:
         if nsig in card_all_text:
-            return None
+            return _fail(f"NOISE:{nsig}")
 
     # Police/weapon chatter must not trigger on rhetorical theological analogies in core_answer_summary/analogies
     spoken_and_q_text = " ".join([
@@ -1723,7 +1897,7 @@ def anchor_and_enrich_extracted_unit(
     ]).lower()
     for nsig in ("call the police", "police officer", "brandish", "brandished", "firearm", "police come"):
         if nsig in spoken_and_q_text:
-            return None
+            return _fail(f"NOISE:{nsig}")
 
     _sync_role_quotes_in_item(
         item, q_turn, q_tid, a_turn, a_tid, enriched_exchange, cohesive_turns, inter_spk_id, sync_arabic=True
@@ -1746,7 +1920,7 @@ def anchor_and_enrich_extracted_unit(
             ).lower()
             daee_tokens = set(re.findall(r"[a-z]{5,}", daee_spoken))
             if not (q_content_tokens & daee_tokens):
-                return None
+                return _fail("FLEETING_QUOTE")
 
     resolved_episode_index = int(
         (q_turn.get("episode_index") if q_turn else None)
@@ -1800,6 +1974,7 @@ _CONDITIONAL_EN_SCALAR_KEYS = (
 def merge_round1_and_round2_units(
     r1_units: List[Dict[str, Any]],
     r2_units: List[Dict[str, Any]],
+    allow_implicit_en_repair: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Deterministically zipper-merges Round 1 (pure English dialectical reasoning)
@@ -1808,6 +1983,8 @@ def merge_round1_and_round2_units(
     Protects against:
     - Out-of-order LLM response generation in Round 2 (matches by turn IDs or question similarity).
     - Forced/needless English rewrites when Round 1 already passed quality checks (`english_edits_needed=false`).
+    - Silently discarding Round 2 English repairs when Pre-Round-2 flagged defects (`allow_implicit_en_repair=True`)
+      and the LLM rewrote defective English fields without toggling `rubric_audit.english_edits_needed=true`.
     - Dropping English dialogue turns if Round 2 truncates dialogue turns.
     - Wiping out English scriptural citation source/significance if Round 2 only provides Arabic significance.
     - Wiping out multiple English analogies.
@@ -1898,7 +2075,10 @@ def merge_round1_and_round2_units(
             final_merged.append(merged)
             continue
 
-        english_edits_needed = bool(r2_audit.get("english_edits_needed") is True)
+        english_edits_needed = bool(
+            r2_audit.get("english_edits_needed") is True
+            or allow_implicit_en_repair
+        )
 
         # Merge Arabic scalar & list fields
         for k, v in r2_u.items():
@@ -2143,6 +2323,21 @@ def diagnose_missing_arabic_fields(unit: Dict[str, Any]) -> List[str]:
         if q_stems and ivq_stems and (len(q_stems & ivq_stems) / min(len(q_stems), len(ivq_stems))) < 0.50:
             issues.append("duplicate_question_copied_to:interlocutor_verbatim_quote_ar")
 
+    # Bilingual Quote Length-Symmetry Check: catches wrong-turn Arabic translations (e.g., 16w EN paired with 250w AR)
+    for en_k, ar_k in (
+        ("interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar"),
+        ("verbatim_quote", "verbatim_quote_ar"),
+    ):
+        en_v = str(unit.get(en_k) or "").strip()
+        ar_v = str(unit.get(ar_k) or "").strip()
+        if en_v and ar_v and _is_clean_arabic_text(ar_v):
+            en_w = len(en_v.split())
+            ar_w = len(ar_v.split())
+            if en_w >= 6 and ar_w > max(35, int(en_w * 2.3)):
+                issues.append(f"length_mismatch_excess:{ar_k}")
+            elif en_w >= 45 and ar_w < 3:
+                issues.append(f"length_mismatch_truncated:{ar_k}")
+
     for list_field in ("logical_premises_ar", "analogies_ar"):
         vals = unit.get(list_field)
         if isinstance(vals, str):
@@ -2163,9 +2358,16 @@ def diagnose_missing_arabic_fields(unit: Dict[str, Any]) -> List[str]:
     for ex in (unit.get("dialogue_exchange") or unit.get("dialogue_trajectory") or []):
         if isinstance(ex, dict):
             txt_ar = str(ex.get("text_ar") or "").strip()
+            txt_en = str(ex.get("text_en") or "").strip()
             if txt_ar and not _is_clean_arabic_text(txt_ar):
                 issues.append("dialogue_exchange.text_ar")
                 break
+            if txt_en and txt_ar:
+                en_w = len(txt_en.split())
+                ar_w = len(txt_ar.split())
+                if en_w >= 8 and ar_w > max(40, int(en_w * 2.5)):
+                    issues.append("length_mismatch:dialogue_exchange.text_ar")
+                    break
     return issues
 
 
@@ -2381,6 +2583,7 @@ class Stage2ScenarioExtractor:
             )
 
     def extract_video_m6(self, video_id: str, verbose: bool = True) -> Optional[List[Dict[str, Any]]]:
+        t0_video = time.time()
         scen_path = self.workspace.scenarios_dir / f"{video_id}.json"
         qa_shard_path = self.workspace.extractions_dir / f"{video_id}.qa.json"
         state = self.workspace.get_video_state(video_id)
@@ -2413,6 +2616,71 @@ class Stage2ScenarioExtractor:
             self.workspace.advance_micro_step(video_id, "M6_LLM_EXTRACTED", metrics={"qa_count": 0})
             return []
 
+        # Pre-Stage-2 Diarization Health Gate: skip collapsed debates (>180s, >=200w, <=1 spk or <3.5% inter)
+        # immediately in 0.0s instead of wasting 5-8 minutes of GPU inference on cards guaranteed to fail [GATE-DIARIZATION].
+        scen_metrics = scenario.get("metrics") if isinstance(scenario.get("metrics"), dict) else {}
+        dur_sec_meta = float(scen_metrics.get("duration_sec") or scenario.get("duration_sec") or 0.0)
+        if dur_sec_meta <= 0.0 and turns:
+            dur_sec_meta = max(int(t.get("end_ms") or 0) for t in turns) / 1000.0
+        spk_count_meta = int(scen_metrics.get("speakers_count") or len(scenario.get("speakers") or []))
+        total_turn_words = sum(len((t.get("text_original") or "").split()) for t in turns)
+        inter_turn_words = sum(
+            len((t.get("text_original") or "").split())
+            for t in turns
+            if _canon_speaker_role(t.get("speaker_role"), "") == "INTERLOCUTOR"
+        )
+        diar_health = classify_diarization_health(
+            duration_sec=dur_sec_meta,
+            speakers_count=spk_count_meta,
+            total_words=total_turn_words,
+            interlocutor_words=inter_turn_words,
+            turns_count=len(turns),
+        )
+        if diar_health["status"] == "COLLAPSED":
+            skip_reason = diar_health["reason"]
+            zero_card_reason = f"pre_stage2_skip={skip_reason}"
+            if verbose:
+                print(
+                    f"\n[Stage 2 LLM] [{video_id}] PRE-STAGE-2 SKIP (Diarization Collapse): {skip_reason} (0.0s LLM spent)",
+                    flush=True,
+                )
+            self.workspace.atomic_write_json(
+                qa_shard_path,
+                {
+                    "schema_version": "2.0",
+                    "video_id": video_id,
+                    "extracted_at": time.time(),
+                    "worker_id": self.workspace.worker_id,
+                    "units": [],
+                    "pre_stage2_skip_reason": skip_reason,
+                },
+            )
+            record_video_trace_section(
+                self.workspace,
+                video_id,
+                "stage2_m6",
+                {
+                    "skipped_pre_stage2_diarization": True,
+                    "pre_stage2_skip_reason": skip_reason,
+                    "diarization_health": diar_health,
+                    "total_elapsed_sec": round(time.time() - t0_video, 2),
+                    "r1_candidates_total": 0,
+                    "kept_cards_count": 0,
+                    "dropped_gate_counts": {"[PRE-STAGE2-DIARIZATION-COLLAPSE]": 1},
+                    "zero_card_reason": zero_card_reason,
+                    "windows": [],
+                },
+                title_ar=scenario.get("title_ar", ""),
+            )
+            self.workspace.advance_micro_step(
+                video_id,
+                "M6_LLM_EXTRACTED",
+                artifacts={"qa_json": str(qa_shard_path)},
+                metrics={"qa_count": 0},
+                extra_updates={"db_qa_synced": False, "zero_card_reason": zero_card_reason},
+            )
+            return []
+
         cohesive_turns = merge_consecutive_speaker_turns(turns)
         # Dynamically scale unified full-conversation window capacity with active LLM context length:
         # At 32K ctx (7,500 words / 72,000 chars), >99% of full debates fit into 1 single context window.
@@ -2434,7 +2702,8 @@ class Stage2ScenarioExtractor:
         if verbose:
             print(
                 f"\n[Stage 2 LLM] [{video_id}] {scenario.get('title_ar', '')[:55]} "
-                f"| Turns: {len(turns)} | Episode Windows: {len(windows)}",
+                f"| Turns: {len(turns)} | Episode Windows: {len(windows)} "
+                f"| Diarization: {diar_health['status']} ({diar_health['interlocutor_word_ratio']:.1%} inter)",
                 flush=True,
             )
 
@@ -2443,6 +2712,7 @@ class Stage2ScenarioExtractor:
         gatekeeper_skipped_windows = 0
         r1_total_candidates = 0
         dropped_gate_counts: Dict[str, int] = {}
+        window_traces: List[Dict[str, Any]] = []
 
         def _record_drop(tag: str) -> None:
             dropped_gate_counts[tag] = dropped_gate_counts.get(tag, 0) + 1
@@ -2451,6 +2721,24 @@ class Stage2ScenarioExtractor:
             w_idx = w["window_index"]
             partial_file = self.workspace.partial_extractions_dir / f"{video_id}_win{w_idx:03d}.json"
             partial_en_file = self.workspace.partial_extractions_dir / f"{video_id}_win{w_idx:03d}.en.json"
+
+            # Raw unmerged scenario turns covering this window (matches SQLite scenario_turns 1-to-1)
+            raw_win_turns = [
+                t for t in turns
+                if int(t.get("end_ms") or 0) >= int(w.get("start_ms") or 0)
+                and int(t.get("start_ms") or 0) <= int(w.get("end_ms") or 0)
+            ] or (w.get("turns") or [])
+
+            win_trace: Dict[str, Any] = {
+                "window_index": w_idx,
+                "gatekeeper_skipped": False,
+                "gatekeeper_reason": "",
+                "r1_elapsed_sec": 0.0,
+                "r1_parsed_count": 0,
+                "r1_accepted_count": 0,
+                "r2_elapsed_sec": 0.0,
+                "units": [],
+            }
 
             # Pre-Extraction Gatekeeper: Screen window turns for substantive apologetics
             win_turns = w.get("turns") or []
@@ -2461,6 +2749,9 @@ class Stage2ScenarioExtractor:
             )
             if not is_substantive:
                 gatekeeper_skipped_windows += 1
+                win_trace["gatekeeper_skipped"] = True
+                win_trace["gatekeeper_reason"] = gate_reason
+                window_traces.append(win_trace)
                 if verbose:
                     print(f"      [Gatekeeper Window {w_idx}] Skipping non-apologetic window: {gate_reason}", flush=True)
                 self.workspace.atomic_write_json(partial_file, [])
@@ -2480,6 +2771,7 @@ class Stage2ScenarioExtractor:
                     if not cached_win_units:
                         # Empty list means legitimately skipped window (e.g. noise or no questions)
                         completed_win_ids.append(w_idx)
+                        window_traces.append(win_trace)
                         continue
                     elif all(has_valid_arabic_localization(cu) for cu in cached_win_units):
                         for cu in cached_win_units:
@@ -2487,6 +2779,9 @@ class Stage2ScenarioExtractor:
                                 cu["id"] = f"{video_id}_{len(all_units) + 1:03d}"
                                 all_units.append(cu)
                         completed_win_ids.append(w_idx)
+                        win_trace["resumed_from_partial"] = True
+                        win_trace["kept_count"] = len(cached_win_units)
+                        window_traces.append(win_trace)
                         continue
                     else:
                         # Stale English-only partial window - purge corrupted partial file and treat as Round 1 units for Round 2 Arabic localization!
@@ -2503,6 +2798,7 @@ class Stage2ScenarioExtractor:
                     except Exception:
                         pass
                 completed_win_ids.append(w_idx)
+                window_traces.append(win_trace)
                 continue
 
             main_daee = next((s for s in scenario.get("speakers", []) if _canon_speaker_role(s.get("role"), "") == "MAIN_DAEE"), None)
@@ -2530,6 +2826,8 @@ class Stage2ScenarioExtractor:
                 elapsed_sp = round(time.time() - t0_sp, 1)
 
                 parsed = clean_llm_json_array(raw_out)
+                win_trace["r1_elapsed_sec"] = elapsed_sp
+                win_trace["r1_parsed_count"] = len(parsed)
                 win_enriched: List[Dict[str, Any]] = []
                 for raw_item in parsed:
                     if not is_valid_dialectical_question(raw_item.get("question_en", ""), raw_item.get("question_ar", "")):
@@ -2547,6 +2845,7 @@ class Stage2ScenarioExtractor:
                 self.workspace.atomic_write_json(partial_file, win_enriched)
                 all_units.extend(win_enriched)
                 completed_win_ids.append(w_idx)
+                window_traces.append(win_trace)
                 continue
 
             # 2. Check for intermediate Round 1 checkpoint (.en.json) or stale English-only partial
@@ -2554,10 +2853,12 @@ class Stage2ScenarioExtractor:
             elapsed_r2 = 0.0
             elapsed = 0.0
             r1_units = stale_partial_en_units
+            r1_parsed_count = 0
             if r1_units is None and partial_en_file.exists():
                 cached_en = self.workspace.read_json(partial_en_file, default=None)
                 if isinstance(cached_en, list):
                     r1_units = cached_en
+                    r1_parsed_count = len(cached_en)
                     if verbose:
                         print(f"      [Window {w_idx}] Resuming from checkpointed Round 1 ({len(r1_units)} units)...", flush=True)
 
@@ -2581,6 +2882,7 @@ class Stage2ScenarioExtractor:
                 elapsed_r1 = round(time.time() - t0_r1, 1)
 
                 parsed_r1 = clean_llm_json_array(raw_out_r1)
+                r1_parsed_count = len(parsed_r1)
                 r1_units = []
                 for u in parsed_r1:
                     if not isinstance(u, dict):
@@ -2596,6 +2898,7 @@ class Stage2ScenarioExtractor:
                         r1_units.append(_preground_round1_unit(u_clean, scenario, w["start_ms"], cohesive_turns))
                 self.workspace.atomic_write_json(partial_en_file, r1_units)
             else:
+                r1_parsed_count = len(r1_units)
                 r1_units = [
                     _preground_round1_unit(u, scenario, w["start_ms"], cohesive_turns)
                     for u in r1_units
@@ -2603,11 +2906,37 @@ class Stage2ScenarioExtractor:
                 ]
 
             r1_total_candidates += len(r1_units)
+            win_trace["r1_elapsed_sec"] = elapsed_r1
+            win_trace["r1_parsed_count"] = r1_parsed_count
+            win_trace["r1_accepted_count"] = len(r1_units)
 
             if not r1_units:
                 self.workspace.atomic_write_json(partial_file, [])
                 completed_win_ids.append(w_idx)
+                window_traces.append(win_trace)
                 continue
+
+            win_unit_traces: List[Dict[str, Any]] = [
+                {
+                    "unit_index": i + 1,
+                    "r1_question_en": str(u.get("question_en") or ""),
+                    "r1_question_turn_id": str(u.get("question_turn_id") or ""),
+                    "r1_answer_turn_id": str(u.get("answer_turn_id") or ""),
+                    "pre_r2_flagged": False,
+                    "pre_r2_defect_codes": [],
+                    "r2_thinking_enabled": False,
+                    "r2_think_excerpt": "",
+                    "r2_en_repairs": {},
+                    "r2_retries": [],
+                    "outcome": "PENDING",
+                    "drop_reason": "",
+                    "final_score": None,
+                    "final_tier": "",
+                    "final_gates": [],
+                    "final_defect_codes": [],
+                }
+                for i, u in enumerate(r1_units)
+            ]
 
             # 3. Round 2: Conditional Bounded-Thinking Repair (flagged batches) or Fast /no_think Arabic Localization (CLEAN)
             # Sub-batch groups of up to 2 units so reasoning (when flagged) + bilingual JSON fit cleanly without truncation.
@@ -2617,11 +2946,16 @@ class Stage2ScenarioExtractor:
             r2_batches_total = max(1, (len(r1_units) + r2_batch_size - 1) // r2_batch_size)
             for b_idx, b_start in enumerate(range(0, len(r1_units), r2_batch_size), 1):
                 r1_batch = r1_units[b_start:b_start + r2_batch_size]
-                r2_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], r1_batch, max_words=1800)
-                r1_json_str = json.dumps(r1_batch, ensure_ascii=False, indent=2)
                 pre_audit_summary, batch_needs_thinking = _assess_round2_batch_thinking(
-                    r1_batch, w.get("turns") or []
+                    r1_batch, raw_win_turns
                 )
+                # CLEAN fast localization gets a focused 450-word transcript excerpt to avoid wrong-turn Arabic confusion
+                r2_excerpt = _build_round2_transcript_excerpt(
+                    w["formatted_transcript"],
+                    r1_batch,
+                    max_words=(1800 if batch_needs_thinking else 450),
+                )
+                r1_json_str = json.dumps(r1_batch, ensure_ascii=False, indent=2)
                 r2_think_budget = 512 if batch_needs_thinking else 0
                 prompt_template = USER_ROUND2_PROMPT_TEMPLATE if batch_needs_thinking else USER_ROUND2_CLEAN_TEMPLATE
                 prompt_r2 = prompt_template.format(
@@ -2657,29 +2991,70 @@ class Stage2ScenarioExtractor:
                     max_thinking_tokens=r2_think_budget,
                 )
                 elapsed_r2 = round(elapsed_r2 + (time.time() - t0_r2), 1)
+                think_excerpt = extract_think_excerpt(raw_out_r2) if batch_needs_thinking else ""
+
+                # Parse per-card Pre-R2 flags into unit traces
+                pre_lines = [ln for ln in (pre_audit_summary or "").splitlines() if ln.strip().startswith("- Card ")]
+                for local_j in range(len(r1_batch)):
+                    ut = win_unit_traces[b_start + local_j]
+                    ut["r2_thinking_enabled"] = bool(batch_needs_thinking)
+                    if think_excerpt:
+                        ut["r2_think_excerpt"] = think_excerpt
+                    if local_j < len(pre_lines):
+                        pline = pre_lines[local_j]
+                        if "Status=CLEAN" not in pline:
+                            ut["pre_r2_flagged"] = True
+                            ut["pre_r2_defect_codes"] = re.findall(r"\[([A-Z0-9_\-]+)\]", pline)
 
                 parsed_r2 = clean_llm_json_array(raw_out_r2)
-                for merged_batch_u in merge_round1_and_round2_units(r1_batch, parsed_r2):
-                    if merged_batch_u.get("_dropped_by_round2_audit"):
-                        final_raw_units.append(merged_batch_u)
-                    else:
-                        final_raw_units.append(sanitize_arabic_fields(merged_batch_u))
+                merged_batch = merge_round1_and_round2_units(
+                    r1_batch, parsed_r2, allow_implicit_en_repair=batch_needs_thinking
+                )
+                for local_j, merged_batch_u in enumerate(merged_batch):
+                    u_global_idx = b_start + local_j
+                    ut = win_unit_traces[u_global_idx]
+                    r1_orig = r1_batch[local_j]
+                    if not merged_batch_u.get("_dropped_by_round2_audit"):
+                        merged_batch_u = sanitize_arabic_fields(merged_batch_u)
+                        repairs_diff: Dict[str, Dict[str, str]] = {}
+                        for en_k in _CONDITIONAL_EN_SCALAR_KEYS:
+                            before_v = str(r1_orig.get(en_k) or "").strip()
+                            after_v = str(merged_batch_u.get(en_k) or "").strip()
+                            if before_v and after_v and before_v != after_v:
+                                repairs_diff[en_k] = {"before": before_v, "after": after_v}
+                        if repairs_diff:
+                            ut["r2_en_repairs"] = repairs_diff
+                            if verbose:
+                                print(
+                                    f"      [R2 Repair] Unit {u_global_idx + 1}: applied English fixes on {list(repairs_diff.keys())}",
+                                    flush=True,
+                                )
+                    merged_batch_u["_trace_idx"] = u_global_idx
+                    final_raw_units.append(merged_batch_u)
 
             # 3B. Per-Unit Targeted Arabic Retry if batch Round 2 truncated or missed any unit's Arabic fields
             repaired_units: List[Dict[str, Any]] = []
             for idx_u, merged_u in enumerate(final_raw_units):
+                t_idx = int(merged_u.get("_trace_idx", idx_u))
+                ut = win_unit_traces[t_idx] if 0 <= t_idx < len(win_unit_traces) else {}
                 if merged_u.get("_dropped_by_round2_audit"):
                     _record_drop("[DROP-R2-AUDIT]")
+                    drop_r = str(merged_u.get("_drop_reason") or "Dropped by Round 2 Rubric Audit")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = f"[DROP-R2-AUDIT] {drop_r}"
+                    if verbose:
+                        print(f"      [Drop Reason] Window {w_idx} Unit {idx_u + 1} dropped by R2 Rubric Audit: {drop_r}", flush=True)
                     logger.info(
                         "Window %d unit %d dropped by Round 2 Rubric Audit (%s).",
-                        w_idx, idx_u + 1, merged_u.get("_drop_reason", ""),
+                        w_idx, idx_u + 1, drop_r,
                     )
                     continue
                 if has_valid_arabic_localization(merged_u):
+                    merged_u["_trace_idx"] = t_idx
                     repaired_units.append(merged_u)
                     continue
 
-                single_r1_base = r1_units[idx_u] if idx_u < len(r1_units) else merged_u
+                single_r1_base = r1_units[t_idx] if 0 <= t_idx < len(r1_units) else merged_u
                 clean_r1_seed = _strip_arabic_fields(single_r1_base)
                 single_json_str = json.dumps([clean_r1_seed], ensure_ascii=False, indent=2)
                 single_excerpt = _build_round2_transcript_excerpt(w["formatted_transcript"], [clean_r1_seed], max_words=900)
@@ -2695,13 +3070,24 @@ class Stage2ScenarioExtractor:
                     english_units_json=single_json_str,
                 )
 
-                best_clean_source = sanitize_arabic_fields(dict(merged_u))
-                cur_candidate = best_clean_source
+                cur_candidate = sanitize_arabic_fields(dict(merged_u))
+                best_clean_source = dict(cur_candidate)
+                # Strip specifically corrupted Arabic fields from backfill cache so retries cannot re-inject them
+                for init_issue in diagnose_missing_arabic_fields(best_clean_source):
+                    if ":" in init_issue:
+                        bad_field = init_issue.split(":", 1)[1]
+                        if bad_field in best_clean_source and isinstance(best_clean_source[bad_field], str):
+                            best_clean_source[bad_field] = ""
+
                 dropped_on_retry = False
                 for retry_attempt in range(1, 4):
-                    if verbose:
-                        print(f"      [Window {w_idx} Unit {idx_u+1}] Round 2 Arabic retry attempt {retry_attempt}/3...", flush=True)
                     missing_diag = diagnose_missing_arabic_fields(cur_candidate)
+                    if verbose:
+                        print(
+                            f"      [Window {w_idx} Unit {idx_u+1}] Round 2 Arabic retry attempt {retry_attempt}/3 "
+                            f"(missing={', '.join(missing_diag) or 'unknown'})...",
+                            flush=True,
+                        )
                     feedback_line = (
                         f"RETRY DIAGNOSTIC: Populate these missing/invalid Arabic keys cleanly: {', '.join(missing_diag)}."
                         if missing_diag
@@ -2761,15 +3147,26 @@ class Stage2ScenarioExtractor:
                         raw_retry = "[]"
                     elapsed_r2 = round(elapsed_r2 + (time.time() - t0_retry), 1)
                     parsed_retry = clean_llm_json_array(raw_retry)
+                    retry_passed = False
                     if parsed_retry:
                         retry_merged = merge_round1_and_round2_units(
                             [_strip_arabic_fields(clean_r1_seed)], parsed_retry
                         )[0]
                         if retry_merged.get("_dropped_by_round2_audit"):
                             _record_drop("[DROP-R2-AUDIT]")
+                            drop_r = str(retry_merged.get("_drop_reason") or "Dropped on retry")
+                            if "r2_retries" in ut:
+                                ut["r2_retries"].append({
+                                    "attempt": retry_attempt,
+                                    "mode": "escalated_think" if retry_attempt == 3 else "compact",
+                                    "missing_before": missing_diag,
+                                    "passed": False,
+                                })
+                            ut["outcome"] = "DROPPED"
+                            ut["drop_reason"] = f"[DROP-R2-AUDIT] {drop_r}"
                             logger.info(
                                 "Window %d unit %d dropped on Round 2 retry by Rubric Audit (%s).",
-                                w_idx, idx_u + 1, retry_merged.get("_drop_reason", ""),
+                                w_idx, idx_u + 1, drop_r,
                             )
                             dropped_on_retry = True
                             break
@@ -2777,32 +3174,58 @@ class Stage2ScenarioExtractor:
                         _backfill_clean_arabic_fields(retry_merged, best_clean_source)
                         _backfill_clean_arabic_fields(best_clean_source, retry_merged)
                         cur_candidate = retry_merged
-                        if has_valid_arabic_localization(cur_candidate):
-                            break
+                        retry_passed = has_valid_arabic_localization(cur_candidate)
+
+                    if "r2_retries" in ut:
+                        ut["r2_retries"].append({
+                            "attempt": retry_attempt,
+                            "mode": "escalated_think" if retry_attempt == 3 else "compact",
+                            "missing_before": missing_diag,
+                            "passed": retry_passed,
+                        })
+                    if retry_passed:
+                        break
 
                 if dropped_on_retry:
                     continue
                 if has_valid_arabic_localization(cur_candidate):
+                    cur_candidate["_trace_idx"] = t_idx
                     repaired_units.append(cur_candidate)
                 else:
+                    rem_missing = diagnose_missing_arabic_fields(cur_candidate)
                     _record_drop("[DROP-AR-RETRY]")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = f"[DROP-AR-RETRY] missing={','.join(rem_missing)}"
+                    if verbose:
+                        print(
+                            f"      [Drop Reason] Window {w_idx} Unit {idx_u+1} failed Arabic retry (missing={','.join(rem_missing)})",
+                            flush=True,
+                        )
                     logger.warning(
                         "Window %d unit %d dropped: failed complete Arabic localization after 3 attempts (missing=%s).",
-                        w_idx, idx_u + 1, ",".join(diagnose_missing_arabic_fields(cur_candidate)),
+                        w_idx, idx_u + 1, ",".join(rem_missing),
                     )
 
             final_raw_units = repaired_units
             elapsed = round(elapsed_r1 + elapsed_r2, 1)
+            win_trace["r2_elapsed_sec"] = elapsed_r2
 
             win_enriched: List[Dict[str, Any]] = []
             audit_labels_by_id: Dict[str, str] = {}
             for raw_item in final_raw_units:
+                t_idx = int(raw_item.get("_trace_idx", -1))
+                ut = win_unit_traces[t_idx] if 0 <= t_idx < len(win_unit_traces) else {}
                 if not has_valid_arabic_localization(raw_item):
                     _record_drop("[DROP-POST-AR]")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = f"[DROP-POST-AR] {','.join(diagnose_missing_arabic_fields(raw_item))}"
                     continue
                 if not is_valid_dialectical_question(raw_item.get("question_en", ""), raw_item.get("question_ar", "")):
                     _record_drop("[DROP-INVALID-Q]")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = "[DROP-INVALID-Q]"
                     continue
+                anchor_drop_reasons: List[str] = []
                 enriched = anchor_and_enrich_extracted_unit(
                     raw_unit=raw_item,
                     scenario=scenario,
@@ -2810,32 +3233,61 @@ class Stage2ScenarioExtractor:
                     window_start_ms=w["start_ms"],
                     unit_seq_num=len(all_units) + len(win_enriched) + 1,
                     cohesive_turns=cohesive_turns,
+                    drop_reason_out=anchor_drop_reasons,
                 )
                 if enriched is None:
-                    _record_drop("[DROP-ANCHOR]")
+                    sub_code = anchor_drop_reasons[0] if anchor_drop_reasons else "UNKNOWN"
+                    base_code = sub_code.split(":")[0]
+                    _record_drop(f"[DROP-ANCHOR:{base_code}]")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = f"[DROP-ANCHOR:{sub_code}]"
+                    if verbose:
+                        print(f"      [Drop Reason] Anchor rejected unit: {sub_code}", flush=True)
                     continue
                 if not has_valid_arabic_localization(enriched):
+                    post_missing = diagnose_missing_arabic_fields(enriched)
                     _record_drop("[DROP-POST-AR]")
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = f"[DROP-POST-AR] {','.join(post_missing)}"
                     continue
                 if audit_single_card is not None:
-                    scen_metrics = scenario.get("metrics") if isinstance(scenario.get("metrics"), dict) else {}
                     video_meta_audit = {
-                        "speakers_count": int(scen_metrics.get("speakers_count") or len(scenario.get("speakers") or [])),
-                        "duration_sec": float(scen_metrics.get("duration_sec") or scenario.get("duration_sec") or 0.0),
+                        "speakers_count": spk_count_meta,
+                        "duration_sec": dur_sec_meta,
                     }
                     card_audit = audit_single_card(
-                        enriched, w.get("turns") or [], video_meta=video_meta_audit, require_arabic=True
+                        enriched, raw_win_turns, video_meta=video_meta_audit, require_arabic=True
                     )
                     all_gates = list(card_audit.get("hard_fails_all") or [])
                     if not all_gates and card_audit.get("hard_fail_triggered"):
                         all_gates = [card_audit["hard_fail_triggered"]]
+                    final_defect_codes = [d.get("code", "") for d in (card_audit.get("defects") or []) if d.get("code")]
+                    ut["final_score"] = card_audit.get("total_score")
+                    ut["final_tier"] = card_audit.get("tier", "")
+                    ut["final_gates"] = all_gates
+                    ut["final_defect_codes"] = final_defect_codes
                     blocking_gates = [
                         g for g in all_gates
-                        if g in ("[GATE-LEAK]", "[GATE-NOISE]", "[GATE-ROLE]", "[GATE-PERSPECTIVE]", "[GATE-DIARIZATION]")
+                        if g in (
+                            "[GATE-LEAK]",
+                            "[GATE-NOISE]",
+                            "[GATE-ROLE]",
+                            "[GATE-PERSPECTIVE]",
+                            "[GATE-DIARIZATION]",
+                            "[GATE-UNGROUNDED]",
+                        )
                     ]
                     if blocking_gates:
                         for bg in blocking_gates:
                             _record_drop(bg)
+                        ut["outcome"] = "DROPPED"
+                        ut["drop_reason"] = f"{','.join(blocking_gates)} ({','.join(final_defect_codes[:5])})"
+                        if verbose:
+                            print(
+                                f"      [Drop Reason] Final Rubric Audit hard-fail {','.join(blocking_gates)} "
+                                f"(defects={','.join(final_defect_codes[:6])})",
+                                flush=True,
+                            )
                         logger.warning(
                             "Card %s dropped by final Rubric Audit hard-fail %s: %s",
                             enriched.get("id", ""), ",".join(blocking_gates), card_audit.get("root_cause", ""),
@@ -2844,7 +3296,15 @@ class Stage2ScenarioExtractor:
                     tier_short = card_audit["tier"].split(":")[0]
                     audit_labels_by_id[enriched["id"]] = f"{card_audit['total_score']}/100 {tier_short}"
                 if not _is_duplicate_qa(enriched, all_units + win_enriched):
+                    ut["outcome"] = "KEPT"
                     win_enriched.append(enriched)
+                else:
+                    ut["outcome"] = "DROPPED"
+                    ut["drop_reason"] = "[DROP-DUPLICATE]"
+                    _record_drop("[DROP-DUPLICATE]")
+
+            win_trace["units"] = win_unit_traces
+            window_traces.append(win_trace)
 
             # Persist finalized window immediately to Drive before moving to next episode!
             self.workspace.atomic_write_json(partial_file, win_enriched)
@@ -2920,6 +3380,24 @@ class Stage2ScenarioExtractor:
             logger.warning("Video %s extracted 0 Q&A cards (%s)", video_id, zero_card_reason)
             if verbose:
                 print(f"   [ZERO-CARD DIAGNOSTIC] Video {video_id} produced 0 cards ({zero_card_reason})", flush=True)
+
+        record_video_trace_section(
+            self.workspace,
+            video_id,
+            "stage2_m6",
+            {
+                "skipped_pre_stage2_diarization": False,
+                "pre_stage2_skip_reason": "",
+                "diarization_health": diar_health,
+                "total_elapsed_sec": round(time.time() - t0_video, 2),
+                "r1_candidates_total": r1_total_candidates,
+                "kept_cards_count": len(all_units),
+                "dropped_gate_counts": dropped_gate_counts,
+                "zero_card_reason": zero_card_reason,
+                "windows": window_traces,
+            },
+            title_ar=scenario.get("title_ar", ""),
+        )
 
         self.workspace.advance_micro_step(
             video_id,

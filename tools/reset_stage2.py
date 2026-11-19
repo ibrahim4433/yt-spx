@@ -54,6 +54,20 @@ def reset_stage2_extractions(workspace: SharedWorkspace) -> None:
     print(f"   -> Removed {removed_shards} completed .qa.json shard(s)")
     print(f"   -> Removed {removed_partials} partial episode window(s)")
 
+    traces_dir = getattr(workspace, "debug_traces_dir", None)
+    if traces_dir and traces_dir.exists():
+        for tf in traces_dir.glob("*.trace.json"):
+            tr = workspace.read_json(tf, default=None)
+            if isinstance(tr, dict) and tr.get("stage2_m6"):
+                tr["stage2_m6"] = {}
+                workspace.atomic_write_json(tf, tr)
+        rep = traces_dir / "session_debug_report.md"
+        if rep.exists():
+            try:
+                rep.unlink()
+            except Exception:
+                pass
+
     # 2. Reset state files from M6_LLM_EXTRACTED back to M5_SCENARIO_BUILT
     reset_states = 0
     state_dir = workspace.state_dir

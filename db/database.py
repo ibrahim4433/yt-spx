@@ -938,10 +938,16 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
 
         # 9. Trinitarian co-equality / pluralist denial of 3:85 / omniscience denial / Tawheed negation
         (r"\b(?:does\s+not\s+(?:negate|diminish|deny)\s+(?:his|jesus'?s?)\s+divin(?:e\s+status|ity)|co-equal\s+persons?\s+of\s+the\s+trinity|co-equal\s+with\s+the\s+father|does\s+not\s+imply\s+inferiority\s+in\s+divine\s+nature)\b", 'Trinitarian co-equality asserted as truth', True),
-        (r'\b(?:does\s+not\s+mean\s+(?:that\s+)?all\s+other\s+religions\s+are\s+invalid|does\s+not\s+invalidate\s+other\s+(?:religious\s+)?paths|all\s+religions\s+are\s+equally\s+valid\s+in\s+islam)\b', 'Religious pluralism contradicting Surah 3:85 asserted as Islamic truth', False),
+        (r'\b(?:does\s+not\s+(?:imply|mean|suggest)\s+(?:that\s+)?(?:all\s+other\s+religions\s+are\s+invalid|non-muslims\s+are\s+(?:automatically\s+)?(?:condemned|doomed|rejected))|does\s+not\s+invalidate\s+other\s+(?:religious\s+)?paths|all\s+religions\s+are\s+equally\s+valid\s+in\s+islam|not\s+the\s+exclusivity\s+of\s+salvation|not\s+about\s+rejecting\s+(?:the\s+goodness\s+of\s+)?other\s+faiths|other\s+faiths.{0,45}lead\s+to\s+the\s+same)\b', 'Religious pluralism contradicting Surah 3:85 asserted as Islamic truth', False),
         (r'\bgod\s+(?:cannot|does\s+not)\s+know\s+(?:the\s+final\s+outcome|who\s+will\s+succeed|the\s+future)\b', 'Denial of divine omniscience', False),
         (r'\bislam\s+teaches\s+unconditional\s+salvation\s+regardless\s+of\s+(?:belief|faith|leaving\s+islam)\b', 'Unconditional salvation regardless of faith misattributed to Islam', False),
         (r'لا\s+يعني\s+أن\s+الله\s+واحد(?:اً|ًا|ا)?\s+لا\s+ي[\u064f]?ولد\s+له\s+أبناء', 'صياغة عربية تنفي التوحيد خطأً', False),
+
+        # 10. Orthodox Jannah realism & scriptural accuracy (ban modernist/Batini symbolic denial & Christian apologetic harmonization)
+        (r'\b(?:paradise|jannah|72\s+virgins|houris|rewards?\s+in\s+paradise)\b.{0,55}\b(?:is|are)\s+(?:purely\s+)?(?:symbolic|a\s+metaphor|metaphorical|not\s+(?:a\s+)?literal)\b', 'Modernist denial of literal Paradise rewards contradicting orthodox Sunni Aqeedah', False),
+        (r'\bnot\s+a\s+literal\b.{0,35}\b(?:paradise|reward|virgins|houris|act)\b', 'Denial of literal Hereafter recompense contradicting Sunni Aqeedah', False),
+        (r'\b(?:explicit(?:ly)?\s+mention(?:ed|s)?\s+(?:of\s+)?72\s+virgins\s+in\s+the\s+quran|72\s+virgins\s+(?:is|are)\s+explicitly\s+mentioned\s+in\s+the\s+quran)\b', 'Factual error: the Quran never explicitly mentions the number 72 virgins', False),
+        (r"\b(?:is\s+a\s+misinterpretation\s+of\s+(?:1\s+john|2\s+john|romans|galatians|ephesians|hebrews|matthew|mark|luke|john)\s+\d+:\d+|born[- ]again\b.{0,55}\b(?:not\s+defined\s+by\s+sin|transformation\s+of\s+the\s+heart|can\s+still\s+make\s+mistakes\s+and\s+seek\s+forgiveness))\b", 'Christian evangelical exegesis/harmonization presented instead of Islamic refutation', False),
     ]
 
     texts_to_check = [
@@ -953,7 +959,12 @@ def check_theological_bias(unit: Dict[str, Any], a_turn: Optional[Dict[str, Any]
         str(unit.get("analogy_or_metaphor_ar") or ""),
     ]
 
-    for pk in ("logical_premises", "logical_premises_ar", "analogies", "analogies_ar", "analogies_json"):
+    for pk in (
+        "logical_premises", "logical_premises_json",
+        "logical_premises_ar", "logical_premises_ar_json",
+        "analogies", "analogies_json",
+        "analogies_ar", "analogies_ar_json",
+    ):
         val = unit.get(pk)
         if isinstance(val, str) and val.strip().startswith("["):
             try:

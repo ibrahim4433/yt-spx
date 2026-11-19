@@ -1330,12 +1330,65 @@ class Stage1AudioPipeline:
             self.workspace.atomic_write_json(scen_path, scenario_payload)
             srt_path.write_text(format_diarized_srt(final_turns), encoding="utf-8-sig")
 
+            flicker_smoothings = sum(
+                1 for a, b in zip(mapped_words, realigned_words) if a.get("speaker_id") != b.get("speaker_id")
+            )
+            tot_w = sum(len((ft.get("text_original") or "").split()) for ft in final_turns)
+            inter_w = sum(
+                len((ft.get("text_original") or "").split())
+                for ft in final_turns
+                if str(ft.get("speaker_role") or "").upper() == "INTERLOCUTOR"
+            )
+            daee_w = sum(
+                len((ft.get("text_original") or "").split())
+                for ft in final_turns
+                if str(ft.get("speaker_role") or "").upper() in ("MAIN_DAEE", "CO_DAEE")
+            )
+            diar_health_status = "HEALTHY"
+            try:
+                from core.debug_tracer import classify_diarization_health, record_video_trace_section
+                diar_health = classify_diarization_health(
+                    dur_sec, len(speakers_meta), tot_w, inter_w, turns_count=len(final_turns)
+                )
+                diar_health_status = diar_health["status"]
+                record_video_trace_section(
+                    self.workspace,
+                    vid,
+                    "stage1_m5",
+                    {
+                        "duration_sec": dur_sec,
+                        "detected_language": detected_lang,
+                        "speakers_count": len(speakers_meta),
+                        "turns_count": len(final_turns),
+                        "total_words": tot_w,
+                        "daee_words": daee_w,
+                        "interlocutor_words": inter_w,
+                        "overlap_windows_count": len(overlaps),
+                        "flicker_smoothings": flicker_smoothings,
+                        "diarization_health": diar_health,
+                        "speakers": [
+                            {
+                                "speaker_id": s.get("speaker_id"),
+                                "role": s.get("role"),
+                                "display_name_en": s.get("display_name_en"),
+                                "speaking_sec": s.get("speaking_sec"),
+                                "turn_count": s.get("turn_count"),
+                                "mean_rms_db": s.get("mean_rms_db"),
+                            }
+                            for s in speakers_meta
+                        ],
+                    },
+                    title_ar=video_record.get("title_ar", ""),
+                )
+            except Exception:
+                pass
+
             total_elapsed = round(time.time() - t0, 1)
             print(f"[DONE] ({len(final_turns)} verified turns assembled)")
             print("   " + "-" * 70)
             print(f"   >>> [VERIFIED] Scenario M5_SCENARIO_BUILT in {total_elapsed}s:")
             print(f"       * Video: {vid} | Language: {detected_lang} | Duration: {round(dur_sec/60.0, 1)}m")
-            print(f"       * Diarization: {len(speakers_meta)} speakers | {len(final_turns)} turns | {len(overlaps)} overlap window(s)")
+            print(f"       * Diarization: {len(speakers_meta)} speakers | {len(final_turns)} turns | {len(overlaps)} overlap window(s) | Interlocutor: {inter_w}/{tot_w}w ({(inter_w/max(1,tot_w)):.1%}) [{diar_health_status}]")
             print(f"       * Integrity: 100% PASSED -> Saved to Drive scenarios/{vid}.json")
             print("   " + "=" * 70, flush=True)
 

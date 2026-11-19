@@ -677,6 +677,12 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     # Sync newly built scenarios into SQLite immediately if compactor lock is free
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 1 Summary] Completed {completed_count} scenario(s). Compactor synced: {sync_stats}", flush=True)
+    try:
+        from core.debug_tracer import generate_session_debug_report
+        rep_p = generate_session_debug_report(workspace)
+        print(f"[Debug Report] Updated forensic trace summary -> {rep_p}", flush=True)
+    except Exception:
+        pass
 
     return exit_code
 
@@ -818,6 +824,12 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
 
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 2 Summary] Extracted {completed_count} video(s). Compactor synced: {sync_stats}", flush=True)
+    try:
+        from core.debug_tracer import generate_session_debug_report
+        rep_p = generate_session_debug_report(workspace)
+        print(f"[Debug Report] Updated forensic trace summary -> {rep_p}", flush=True)
+    except Exception:
+        pass
     return exit_code
 
 
@@ -987,6 +999,11 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
 
             synced = workspace.sync_completed_shards_to_sqlite()
             print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
+            try:
+                from core.debug_tracer import generate_session_debug_report
+                generate_session_debug_report(workspace)
+            except Exception:
+                pass
 
             if s1_failed:
                 print(
