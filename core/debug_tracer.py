@@ -10,6 +10,7 @@ excerpts & repair diffs, retry loops, exact anchor drop sub-reasons, and final v
 and generates a human-readable `debug_traces/session_debug_report.md` after every batch.
 """
 
+import json
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -56,7 +57,18 @@ def record_video_trace_section(
     trace["updated_at_iso"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     p = _trace_path(workspace, video_id)
     workspace.atomic_write_json(p, trace)
+    if section in ("stage1_m5", "stage2_m6"):
+        emit_video_trace_to_stdout(workspace, video_id, stage_label=section)
     return p
+
+
+def emit_video_trace_to_stdout(workspace: Any, video_id: str, stage_label: str = "") -> None:
+    """Appends a video's complete trace to stdout after a major stage completes."""
+    trace = load_video_trace(workspace, video_id)
+    header = f"VIDEO TRACE JSON: {video_id}" + (f" [{stage_label}]" if stage_label else "")
+    print(f"\n{'=' * 20} {header} {'=' * 20}", flush=True)
+    print(json.dumps(trace, ensure_ascii=False, indent=2), flush=True)
+    print(f"{'=' * 20} END {header} {'=' * 20}\n", flush=True)
 
 
 def extract_think_excerpt(raw_llm_output: str, max_chars: int = 1200) -> str:
@@ -306,4 +318,14 @@ def generate_session_debug_report(workspace: Any) -> Path:
         lines.append("")
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
+def emit_session_debug_report_to_stdout(workspace: Any, stage_label: str = "STAGE COMPLETE") -> Path:
+    """Regenerates the session report and appends its full Markdown to stdout."""
+    report_path = generate_session_debug_report(workspace)
+    content = report_path.read_text(encoding="utf-8")
+    print(f"\n{'#' * 24} SESSION DEBUG REPORT ({stage_label}) {'#' * 24}", flush=True)
+    print(content, flush=True)
+    print(f"{'#' * 24} END SESSION DEBUG REPORT ({stage_label}) {'#' * 24}\n", flush=True)
     return report_path

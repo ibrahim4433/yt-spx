@@ -2582,6 +2582,104 @@ class Stage2ScenarioExtractor:
                 context_length=context_length,
             )
 
+    def _try_recover_collapsed_turns(
+        self,
+        video_id: str,
+        turns: List[Dict[str, Any]],
+        dur_sec: float,
+        spk_count: int,
+        verbose: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
+        """Recover collapsed speaker roles before Stage 2 gives up on a video."""
+        total_words = sum(len((t.get("text_original") or "").split()) for t in turns)
+
+        if spk_count >= 2:
+            role_words: Dict[str, int] = {}
+            for turn in turns:
+                role = _canon_speaker_role(turn.get("speaker_role"), "")
+                role_words[role] = role_words.get(role, 0) + len((turn.get("text_original") or "").split())
+            co_words = role_words.get("CO_DAEE", 0)
+            if total_words > 0 and co_words / total_words >= 0.08:
+                promoted = []
+                for turn in turns:
+                    updated = dict(turn)
+                    if _canon_speaker_role(updated.get("speaker_role"), "") == "CO_DAEE":
+                        updated["speaker_role"] = "INTERLOCUTOR"
+                    promoted.append(updated)
+                inter_words = sum(
+                    len((turn.get("text_original") or "").split())
+                    for turn in promoted
+                    if _canon_speaker_role(turn.get("speaker_role"), "") == "INTERLOCUTOR"
+                )
+                health = classify_diarization_health(
+                    dur_sec, spk_count, total_words, inter_words, len(promoted)
+                )
+                if health["status"] != "COLLAPSED":
+                    if verbose:
+                        print(
+                            f"[Stage 2 Recovery] [{video_id}] Recovered via CO_DAEE->INTERLOCUTOR "
+                            f"role promotion ({inter_words}/{total_words} words).",
+                            flush=True,
+                        )
+                    return promoted, health, "role_promotion_co_daee"
+
+        numbered_lines = [
+            f"[{idx}] {(turn.get('text_original') or '').strip()}"
+            for idx, turn in enumerate(turns)
+            if (turn.get("text_original") or "").strip()
+        ]
+        if not numbered_lines:
+            return turns, classify_diarization_health(
+                dur_sec, spk_count, total_words, 0, len(turns)
+            ), None
+
+        recovered = [dict(turn) for turn in turns]
+        for start in range(0, len(numbered_lines), 120):
+            prompt = (
+                "The audio diarizer collapsed speakers in this street dawah transcript.\n"
+                "Identify which turn indices [i] are spoken by the INTERLOCUTOR "
+                "(non-Muslim / questioner / guest) versus MAIN_DAEE.\n"
+                'Return ONLY valid JSON: {"interlocutor_indices": [int, ...]}.\n'
+                "If this is genuinely a solo monologue, return "
+                '{"interlocutor_indices": []}.\n\n'
+                + "\n".join(numbered_lines[start:start + 120])
+            )
+            try:
+                kwargs: Dict[str, Any] = {}
+                if _supports_kwarg(self.client.extract, "enable_thinking"):
+                    kwargs["enable_thinking"] = False
+                if _supports_kwarg(self.client.extract, "max_thinking_tokens"):
+                    kwargs["max_thinking_tokens"] = 256
+                raw = self.client.extract(prompt, **kwargs)
+                match = re.search(r"\{.*\}", raw or "", flags=re.DOTALL)
+                parsed = json.loads(match.group(0)) if match else {}
+                indices = parsed.get("interlocutor_indices") or []
+                for index in indices:
+                    if isinstance(index, int) and 0 <= index < len(recovered):
+                        recovered[index]["speaker_role"] = "INTERLOCUTOR"
+                        recovered[index]["speaker_id"] = "SPEAKER_LLM_INTERLOCUTOR"
+            except Exception as exc:
+                if verbose:
+                    print(f"[Stage 2 Recovery] [{video_id}] LLM re-diarization failed: {exc}", flush=True)
+
+        inter_words = sum(
+            len((turn.get("text_original") or "").split())
+            for turn in recovered
+            if _canon_speaker_role(turn.get("speaker_role"), "") == "INTERLOCUTOR"
+        )
+        health = classify_diarization_health(
+            dur_sec, 2 if inter_words > 0 else spk_count, total_words, inter_words, len(recovered)
+        )
+        if health["status"] != "COLLAPSED":
+            if verbose:
+                print(
+                    f"[Stage 2 Recovery] [{video_id}] Recovered via LLM text re-diarization "
+                    f"({inter_words}/{total_words} words = {health['interlocutor_word_ratio']:.1%}).",
+                    flush=True,
+                )
+            return recovered, health, "llm_text_rediarization"
+        return turns, health, None
+
     def extract_video_m6(self, video_id: str, verbose: bool = True) -> Optional[List[Dict[str, Any]]]:
         t0_video = time.time()
         scen_path = self.workspace.scenarios_dir / f"{video_id}.json"
@@ -2636,6 +2734,16 @@ class Stage2ScenarioExtractor:
             interlocutor_words=inter_turn_words,
             turns_count=len(turns),
         )
+        recovery_method = None
+        if diar_health["status"] == "COLLAPSED":
+            turns, diar_health, recovery_method = self._try_recover_collapsed_turns(
+                video_id, turns, dur_sec_meta, spk_count_meta, verbose
+            )
+            if recovery_method:
+                scenario["turns"] = turns
+                scenario["diarization_recovery_method"] = recovery_method
+                self.workspace.atomic_write_json(scen_path, scenario)
+
         if diar_health["status"] == "COLLAPSED":
             skip_reason = diar_health["reason"]
             zero_card_reason = f"pre_stage2_skip={skip_reason}"

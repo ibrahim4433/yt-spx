@@ -26,6 +26,7 @@ import random
 import argparse
 import traceback
 import subprocess
+import signal
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -268,7 +269,7 @@ def select_stage2_candidates(
     return candidates
 
 
-def run_stage1_worker(args: argparse.Namespace) -> int:
+def _run_stage1_worker_impl(args: argparse.Namespace) -> int:
     """
     Runs inside an isolated Python process so Stage 1 audio models own the GPU cleanly.
     Executes horizontal phase batching with immediate M5 priority:
@@ -677,17 +678,31 @@ def run_stage1_worker(args: argparse.Namespace) -> int:
     # Sync newly built scenarios into SQLite immediately if compactor lock is free
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 1 Summary] Completed {completed_count} scenario(s). Compactor synced: {sync_stats}", flush=True)
-    try:
-        from core.debug_tracer import generate_session_debug_report
-        rep_p = generate_session_debug_report(workspace)
-        print(f"[Debug Report] Updated forensic trace summary -> {rep_p}", flush=True)
-    except Exception:
-        pass
 
     return exit_code
 
 
-def run_stage2_worker(args: argparse.Namespace) -> int:
+def run_stage1_worker(args: argparse.Namespace) -> int:
+    """Runs Stage 1 and always emits the latest forensic report."""
+    workspace = SharedWorkspace(worker_name=args.worker_id)
+    interrupted = False
+    try:
+        result = _run_stage1_worker_impl(args)
+        interrupted = result == 130
+        return result
+    except KeyboardInterrupt:
+        interrupted = True
+        raise
+    finally:
+        try:
+            from core.debug_tracer import emit_session_debug_report_to_stdout
+            label = "STAGE 1 STOPPED" if interrupted else "STAGE 1 COMPLETE"
+            emit_session_debug_report_to_stdout(workspace, stage_label=label)
+        except Exception as exc:
+            print(f"[Debug Report] Failed to emit Stage 1 report: {exc}", flush=True)
+
+
+def _run_stage2_worker_impl(args: argparse.Namespace) -> int:
     """Runs inside an isolated Python process so Qwen 2.5 14B Q5_K_M gets full 15 GB T4 VRAM."""
     from core.scenario_extractor import Stage2ScenarioExtractor
     from core.colab_runner import log_extracted_unit_live
@@ -824,13 +839,22 @@ def run_stage2_worker(args: argparse.Namespace) -> int:
 
     sync_stats = workspace.sync_completed_shards_to_sqlite()
     print(f"\n[Stage 2 Summary] Extracted {completed_count} video(s). Compactor synced: {sync_stats}", flush=True)
-    try:
-        from core.debug_tracer import generate_session_debug_report
-        rep_p = generate_session_debug_report(workspace)
-        print(f"[Debug Report] Updated forensic trace summary -> {rep_p}", flush=True)
-    except Exception:
-        pass
     return exit_code
+
+
+def run_stage2_worker(args: argparse.Namespace) -> int:
+    """Runs Stage 2 and always emits the latest forensic report."""
+    workspace = SharedWorkspace(worker_name=args.worker_id)
+    try:
+        return _run_stage2_worker_impl(args)
+    finally:
+        try:
+            from core.debug_tracer import emit_session_debug_report_to_stdout
+            emit_session_debug_report_to_stdout(
+                workspace, stage_label="STAGE 2 COMPLETE / STOPPED"
+            )
+        except Exception as exc:
+            print(f"[Debug Report] Failed to emit Stage 2 report: {exc}", flush=True)
 
 
 def print_status_report(workspace: SharedWorkspace) -> None:
@@ -938,7 +962,7 @@ def _get_subprocess_env() -> Dict[str, str]:
     return sub_env
 
 
-def run_auto_orchestrator(args: argparse.Namespace) -> int:
+def _run_auto_orchestrator_impl(args: argparse.Namespace) -> int:
     """
     Coordinates Stage 1 (Audio/Diarization/Overlaps) and Stage 2 (Qwen 2.5 14B Extraction)
     in isolated GPU child processes so 100% of T4 VRAM is reclaimed between stages.
@@ -1065,6 +1089,23 @@ def run_auto_orchestrator(args: argparse.Namespace) -> int:
     print(f"\n[Orchestrator] Final SQLite Shard Compaction: {synced}")
     print_status_report(workspace)
     return exit_code
+
+
+def run_auto_orchestrator(args: argparse.Namespace) -> int:
+    """Runs the multi-stage orchestrator and emits a final combined report."""
+    workspace = SharedWorkspace(worker_name=args.worker_id or None)
+    try:
+        return _run_auto_orchestrator_impl(args)
+    finally:
+        try:
+            synced = workspace.sync_completed_shards_to_sqlite()
+            print(f"\n[Orchestrator] Final SQLite Shard Compaction: {synced}", flush=True)
+            from core.debug_tracer import emit_session_debug_report_to_stdout
+            emit_session_debug_report_to_stdout(
+                workspace, stage_label="ALL-IN-ONE SESSION FINAL"
+            )
+        except Exception as exc:
+            print(f"[Debug Report] Failed to emit final report: {exc}", flush=True)
 
 
 def run_cookie_tests(args: argparse.Namespace) -> int:
@@ -1294,6 +1335,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    def _handle_sigterm(signum, frame):
+        raise KeyboardInterrupt("SIGTERM received")
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
