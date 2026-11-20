@@ -47,6 +47,8 @@ def setup_colab_drive() -> bool:
         return False
 
     print("[1/3] Detected Google Colab runtime...", flush=True)
+    from core.drive_sync import SharedWorkspace, _drive_accessible, _probe_path_accessible
+
     try:
         from google.colab import drive
 
@@ -56,7 +58,6 @@ def setup_colab_drive() -> bool:
     except Exception as exc:
         print(f"   [-] Note on Drive mount: {exc}", flush=True)
 
-    from core.drive_sync import SharedWorkspace, _drive_accessible, _probe_path_accessible
 
     ws = SharedWorkspace()
     # Cache model weights on local fast NVMe to keep Google Drive 100% clean of hash chunks
