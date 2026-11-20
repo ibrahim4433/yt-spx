@@ -46,46 +46,44 @@ def resolve_drive_root() -> Optional[Path]:
         return p
 
     candidates: List[Path] = []
-
-    # 1. Check Shared Drives if mounted
-    shared_drives_root = Path("/content/drive/Shareddrives")
-    if shared_drives_root.exists():
-        try:
+    try:
+        # 1. Check Shared Drives if mounted
+        shared_drives_root = Path("/content/drive/Shareddrives")
+        if shared_drives_root.exists():
             for sd in shared_drives_root.iterdir():
                 if sd.is_dir() and (sd / "yt-spx").exists():
                     candidates.append(sd / "yt-spx")
-        except Exception:
-            pass
 
-    # 2. Check Colab Drive shortcut targets (.shortcut-targets-by-id) for shared shortcuts
-    for base_parent in [Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")]:
-        shortcuts_dir = base_parent / ".shortcut-targets-by-id"
-        if shortcuts_dir.exists():
-            try:
+        # 2. Check Colab Drive shortcut targets (.shortcut-targets-by-id) for shared shortcuts
+        for base_parent in [Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")]:
+            shortcuts_dir = base_parent / ".shortcut-targets-by-id"
+            if shortcuts_dir.exists():
                 for target in shortcuts_dir.iterdir():
                     if (target / "yt-spx").is_dir():
                         candidates.append(target / "yt-spx")
                     elif target.is_dir() and target.name == "yt-spx":
                         candidates.append(target)
-            except Exception:
-                pass
 
-    # 3. Standard MyDrive candidates
-    candidates.extend([
-        Path("/content/drive/MyDrive/yt-spx"),
-        Path("/content/drive/My Drive/yt-spx"),
-    ])
+        # 3. Standard MyDrive candidates
+        candidates.extend([
+            Path("/content/drive/MyDrive/yt-spx"),
+            Path("/content/drive/My Drive/yt-spx"),
+        ])
 
-    # 4. Check if ANY candidate already exists (prioritize existing shared workspace)
-    for cand in candidates:
-        if cand.exists():
-            return cand
+        # 4. Check if ANY candidate already exists (prioritize existing shared workspace)
+        for cand in candidates:
+            if cand.exists():
+                return cand
 
-    # 5. Fallback: create candidate in an existing parent Drive root
-    for cand in candidates:
-        if cand.parent.exists():
-            cand.mkdir(parents=True, exist_ok=True)
-            return cand
+        # 5. Fallback: create candidate in an existing parent Drive root
+        for cand in candidates:
+            if cand.parent.exists():
+                cand.mkdir(parents=True, exist_ok=True)
+                return cand
+    except OSError:
+        # Google Drive FUSE mount is inaccessible / wedged: degrade gracefully to local
+        # storage instead of hanging or crashing the Colab cell with no error.
+        return None
 
     return None
 
