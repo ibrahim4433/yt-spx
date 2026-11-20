@@ -15,10 +15,48 @@ import time
 import uuid
 import socket
 import random
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Maximum seconds to wait for a single Google Drive FUSE filesystem probe before
+# declaring the Drive mount inaccessible/wedged and falling back to local storage.
+_DRIVE_PROBE_TIMEOUT_SEC = 3.0
+
+
+def _probe_path_accessible(path: Path, timeout_sec: float = _DRIVE_PROBE_TIMEOUT_SEC) -> bool:
+    """
+    Quickly probe whether a filesystem path is stat-able without blocking indefinitely.
+    Runs os.stat() in a daemon thread with a join timeout so a wedged Google Drive FUSE
+    mount cannot hang the Colab cell forever.
+    """
+    result = {"ok": False}
+
+    def _probe() -> None:
+        try:
+            os.stat(str(path))
+            result["ok"] = True
+        except Exception:
+            result["ok"] = False
+
+    t = threading.Thread(target=_probe, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+    # If the thread is still alive after the timeout, the path is blocked (wedged FUSE).
+    return result["ok"] and not t.is_alive()
+
+
+def _drive_accessible() -> bool:
+    """Returns True when /content/drive (or either MyDrive variant) is stat-able."""
+    for candidate in (Path("/content/drive"), Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")):
+        try:
+            if candidate.exists() and _probe_path_accessible(candidate, timeout_sec=_DRIVE_PROBE_TIMEOUT_SEC):
+                return True
+        except Exception:
+            pass
+    return False
 
 # Micro-step progression order (strictly monotonic per video)
 MICRO_STEPS = [
@@ -38,12 +76,21 @@ def resolve_drive_root() -> Optional[Path]:
     """
     Resolves the shared 'yt-spx' workspace on Google Drive across both the primary
     5 TB owner account and collaborator Colab accounts using 'Add shortcut to My Drive'.
+    Returns None (degrading to local storage) when the Google Drive FUSE mount is
+    inaccessible or wedged, so Colab cells never hang indefinitely with no error.
     """
     env_override = os.environ.get("YT_SPX_DRIVE_DIR", "").strip()
     if env_override:
         p = Path(env_override)
-        p.mkdir(parents=True, exist_ok=True)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         return p
+
+    if not _drive_accessible():
+        # Google Drive FUSE mount is wedged / inaccessible: degrade to local storage.
+        return None
 
     candidates: List[Path] = []
     try:
@@ -80,9 +127,8 @@ def resolve_drive_root() -> Optional[Path]:
             if cand.parent.exists():
                 cand.mkdir(parents=True, exist_ok=True)
                 return cand
-    except OSError:
-        # Google Drive FUSE mount is inaccessible / wedged: degrade gracefully to local
-        # storage instead of hanging or crashing the Colab cell with no error.
+    except Exception:
+        # Any Drive FUSE error (including wedged mount): fall back to local storage.
         return None
 
     return None
@@ -129,7 +175,12 @@ class SharedWorkspace:
             self.logs_dir,
             self.debug_traces_dir,
         ):
-            d.mkdir(parents=True, exist_ok=True)
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                # Drive FUSE may be wedged mid-construction: keep going, individual
+                # operations will degrade gracefully when Drive is unavailable.
+                pass
 
         host = socket.gethostname()[:16]
         short_uid = uuid.uuid4().hex[:6]
