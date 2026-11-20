@@ -764,9 +764,13 @@ def _detect_requested_mode(argv: List[str]) -> str:
 
 
 def main() -> int:
+    print("[DEBUG] run_colab_all_in_one.main(): started", flush=True)
     argv = sys.argv[1:]
+    print(f"[DEBUG] run_colab_all_in_one.main(): argv={argv}", flush=True)
     mode = _detect_requested_mode(argv)
+    print(f"[DEBUG] run_colab_all_in_one.main(): mode={mode}", flush=True)
     is_colab = setup_colab_drive()
+    print(f"[DEBUG] run_colab_all_in_one.main(): setup_colab_drive done, is_colab={is_colab}", flush=True)
 
     constraints_path = Path(CURRENT_DIR) / "constraints_colab.txt"
     if is_colab and mode == "test-cookies":
