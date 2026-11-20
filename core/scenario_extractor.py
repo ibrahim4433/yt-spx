@@ -1359,6 +1359,37 @@ def _ground_dialogue_exchange(
     return enriched_exchange, any_diarized_turn_matched
 
 
+def _extend_quote_to_sentence_end(quote: str, transcript_lower: str) -> str:
+    """
+    Repairs INTERLOCUTOR_QUOTE_TRUNCATION: when `quote` is found in the GT interlocator
+    transcript but stops mid-sentence (next GT chars continue the spoken sentence without
+    a sentence-ending punctuation), extend the quote through the spoken sentence end
+    (bounded at 40 words). Used in _sync_single for interlocator quotes.
+    """
+    q_low = (quote or "").strip().lower()
+    t_low = (transcript_lower or "").lower()
+    if not q_low or q_low not in t_low:
+        return (quote or "").strip()
+    end = t_low.find(q_low) + len(q_low)
+    ext = q_low
+    ext_words = 0
+    while end < len(t_low) and ext_words < 20:
+        while end < len(t_low) and t_low[end].isspace():
+            end += 1
+        if end >= len(t_low) or not t_low[end].isalpha():
+            break
+        wm = re.match(r"[\w']+", t_low[end:])
+        if not wm:
+            break
+        ext += " " + wm.group(0)
+        end += len(wm.group(0))
+        ext_words += 1
+        if end < len(t_low) and t_low[end] in ".!?؟":
+            ext += t_low[end]
+            break
+    return ext.strip()
+
+
 def _sync_role_quotes_in_item(
     item: Dict[str, Any],
     q_turn: Optional[Dict[str, Any]],
@@ -1466,6 +1497,14 @@ def _sync_role_quotes_in_item(
                     if ex.get("role") in allowed_roles and ex.get("text_ar"):
                         item[quote_ar_key] = clean_dangling_quote(ex["text_ar"].strip())
                         break
+
+        # Golden-result repair: extend truncated interlocutor quotes to the spoken sentence end
+        if "INTERLOCUTOR" in allowed_roles:
+            final_q = (item.get(quote_key) or "").strip()
+            if final_q:
+                extended_q = _extend_quote_to_sentence_end(final_q, role_transcript_lower)
+                if extended_q and extended_q != final_q:
+                    item[quote_key] = extended_q
 
     _sync_single("verbatim_quote", "verbatim_quote_ar", a_turn, a_tid, daee_transcript.lower(), ("MAIN_DAEE", "CO_DAEE"), True)
     _sync_single("interlocutor_verbatim_quote", "interlocutor_verbatim_quote_ar", q_turn, q_tid, inter_transcript.lower(), ("INTERLOCUTOR",), False)
@@ -1670,6 +1709,80 @@ def _preground_round1_unit(
     return u
 
 
+def _enforce_trajectory_integrity(
+    item: Dict[str, Any],
+    enriched_exchange: List[Dict[str, Any]],
+    raw_turns_by_id: Dict[str, Dict[str, Any]],
+    anchor_ts_ms: Optional[int] = None,
+    window_pad_lo_ms: int = 60_000,
+    window_pad_hi_ms: int = 120_000,
+    max_trajectory_turns: int = 12,
+) -> List[Dict[str, Any]]:
+    """
+    Golden-result guarantee: repairs dialogue_exchange to be exactly grounded in scenario_turns.
+    1. Repairs DIALOGUE_TURN_TEXT_SHIFTED: every ex[].text_en := scenario_turns[turn_id].text_original
+       (GT is authoritative; text_ar filled when available).
+    2. Appends missing INTERLOCUTOR GT turns within the anchor window exactly once (MISSING_GT_TURNS),
+       so every scenario_turn_id in the window appears in the trajectory and interlocator share is healthy.
+    3. Drops trajectory entries whose turn_id is not in GT turns (HALLUCINATED_ANSWER_TURN_ID guard).
+    """
+    if not isinstance(enriched_exchange, list):
+        return enriched_exchange
+    repaired: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    for ex in enriched_exchange:
+        if not isinstance(ex, dict):
+            continue
+        tid = str(ex.get("turn_id") or "").strip()
+        gt = raw_turns_by_id.get(tid) if tid else None
+        if gt is not None:
+            seen_ids.add(tid)
+            ex = dict(ex)
+            gt_en = (gt.get("text_original") or "").strip()
+            txt_en = str(ex.get("text_en") or "").strip()
+            if gt_en and txt_en != gt_en:
+                # DIALOGUE_TURN_TEXT_SHIFTED repair: GT text is authoritative
+                ex["text_en"] = gt_en
+                gt_ar = (gt.get("text_ar") or "").strip()
+                if gt_ar and not str(ex.get("text_ar") or "").strip():
+                    ex["text_ar"] = gt_ar
+            repaired.append(ex)
+    # Append missing GT INTERLOCUTOR turns inside the anchor window
+    if anchor_ts_ms is not None:
+        lo = anchor_ts_ms - window_pad_lo_ms
+        hi = anchor_ts_ms + window_pad_hi_ms
+    else:
+        lo, hi = -1, float("inf")
+    cand: List[Tuple[int, str, Dict[str, Any]]] = []
+    for tid, gt in raw_turns_by_id.items():
+        if tid in seen_ids:
+            continue
+        if _canon_speaker_role(gt.get("speaker_role"), "") != "INTERLOCUTOR":
+            continue
+        words = len((gt.get("text_original") or "").split())
+        if words < 4:
+            continue
+        start_ms = int(gt.get("start_ms") or 0)
+        if not (lo <= start_ms <= hi):
+            continue
+        cand.append((start_ms, tid, gt))
+    cand.sort(key=lambda x: (x[0], x[1]))
+    for start_ms, tid, gt in cand[:max_trajectory_turns]:
+        repaired.append({
+            "turn_id": tid,
+            "role": "INTERLOCUTOR",
+            "speaker_label_en": str(gt.get("speaker_label_en") or "Interlocator"),
+            "speaker_label_ar": str(gt.get("speaker_label_ar") or "المحاور"),
+            "timestamp_seconds": int(start_ms // 1000),
+            "timestamp_formatted": str(gt.get("start_fmt") or "00:00"),
+            "move_type": "Turn",
+            "text_en": (gt.get("text_original") or "").strip(),
+            "text_ar": (gt.get("text_ar") or "").strip(),
+        })
+    repaired.sort(key=lambda x: int(x.get("timestamp_seconds") or 0))
+    return repaired[:max_trajectory_turns]
+
+
 def anchor_and_enrich_extracted_unit(
     raw_unit: Dict[str, Any],
     scenario: Dict[str, Any],
@@ -1792,13 +1905,21 @@ def anchor_and_enrich_extracted_unit(
     enriched_exchange, _ = _ground_dialogue_exchange(
         raw_exchange, cohesive_turns_by_id, raw_turns_by_id, daee_name_en, daee_name_ar, inter_spk_id, ts_sec
     )
+    # Golden-result enforcement: repair dialogue_exchange text to GT, append missing GT interlocator turns
+    enriched_exchange = _enforce_trajectory_integrity(
+        item, enriched_exchange, raw_turns_by_id, anchor_ts_ms=int(ts_sec * 1000)
+    )
 
+    # Build source_turn_ids FROM the dialogue trajectory itself (plan: "Build source_turn_ids from
+    # dialogue_exchange turn_ids rather than a separate anchor list"), then assert q_tid/a_tid present.
     src_tids: List[str] = []
-    for cand_id in [q_tid, a_tid] + [
-        str(ex.get("turn_id") or "").strip()
-        for ex in enriched_exchange
-        if isinstance(ex, dict)
-    ]:
+    for ex in enriched_exchange:
+        if not isinstance(ex, dict):
+            continue
+        tid = str(ex.get("turn_id") or "").strip()
+        if tid and tid not in src_tids and tid in raw_turns_by_id:
+            src_tids.append(tid)
+    for cand_id in [q_tid, a_tid]:
         t_found = _lookup_turn(cand_id, cohesive_turns_by_id, raw_turns_by_id)
         if t_found is not None:
             resolved_tid = str(t_found.get("turn_id") or cand_id)
@@ -2736,9 +2857,21 @@ class Stage2ScenarioExtractor:
         )
         recovery_method = None
         if diar_health["status"] == "COLLAPSED":
+            diar_health_pre = diar_health
             turns, diar_health, recovery_method = self._try_recover_collapsed_turns(
                 video_id, turns, dur_sec_meta, spk_count_meta, verbose
             )
+            # Golden-result guard: when the initial health was FUNCTIONAL_DIARIZATION_COLLAPSE
+            # and the "recovery" was just promoting CO_DAEE->INTERLOCUTOR, that promotion is a
+            # FALSE interlocator (the voice-silent speaker labeled the Da'ee as a separate
+            # interlocator). Hard-reject: turn functional collapse back into a skip.
+            if (
+                recovery_method == "role_promotion_co_daee"
+                and str(diar_health_pre.get("reason") or "").startswith("FUNCTIONAL_DIARIZATION_COLLAPSE")
+            ):
+                diar_health = diar_health_pre
+                recovery_method = None
+                turns = turns  # keep turns untouched; Stage 2 will skip below
             if recovery_method:
                 scenario["turns"] = turns
                 scenario["diarization_recovery_method"] = recovery_method

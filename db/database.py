@@ -1419,6 +1419,22 @@ def _insert_qa_unit_in_tx(conn: sqlite3.Connection, unit: Dict[str, Any]) -> Non
     if daee_spk and inter_spk and daee_spk == inter_spk:
         inter_spk = ""
 
+    # Golden-result hydration: if the card leaves interlocutor_speaker_id empty but the video has
+    # real diarized INTERLOCUTOR turns, anchor it to the first substantive INTERLOCUTOR turn
+    # (fixes EMPTY_INTERLOCUTOR_SPEAKER_ID / M3-recovered false interlocators).
+    if not inter_spk and unit.get("video_id"):
+        isrow = conn.execute(
+            """
+            SELECT speaker_id FROM scenario_turns
+            WHERE video_id = ? AND speaker_role = 'INTERLOCUTOR'
+              AND length(trim(text_original)) >= 4
+            ORDER BY start_ms ASC LIMIT 1
+            """,
+            (unit["video_id"],),
+        ).fetchone()
+        if isrow and isrow[0] and isrow[0] != daee_spk:
+            inter_spk = isrow[0]
+
     # Interrogative Syntax Normalization
     q_en = str(unit.get("question_en") or "").strip()
     if q_en and not q_en.endswith("?"):

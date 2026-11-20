@@ -19,6 +19,15 @@ When auditing a batch of cards, execute these 4 steps **manually for every singl
      - **Single-speaker diarization collapse** (two speakers fused inside ~30s `SPK_00` chunks),
      - **Socratic role reversal** (the Muslim Da'ee attacking Christian/Atheist scripture, mistakenly reframed as `question_en`),
      - **Quote swapping** (Da'ee's argument placed in `interlocutor_verbatim_quote` or opponent's objection placed in `verbatim_quote`).
+   - **Extraction-correctness verification** (deep semantic read, not just keyword overlap):
+     - `question_en`/`question_ar` must be the *objection/claim of the opponent or the seeker's authentic inquiry*, not a paraphrase of the Da'ee's own counter-question. Cross-check against the interlocutor's actual spoken text in `scenario_turns`.
+     - `interlocutor_verbatim_quote` (and `interlocutor_verbatim_quote_ar`) must be a *complete spoken objection sentence* of the interlocutor — verify word-for-word containment against the `INTERLOCUTOR` turns; reject paraphrase, truncation, or quotes copied from Da'ee turns.
+     - `verbatim_quote` (and `verbatim_quote_ar`) must be a *focused 15–65 word Da'ee proof sentence* — verify word-for-word containment against `MAIN_DAEE`/`CO_DAEE` turns.
+     - `core_answer_summary_en/_ar` must state the *direct Islamic proof the Da'ee actually spoke*, no invented analogies/citations, no meta-narration ("The Da'ee explains..."), no Tracy-Lurking invented content.
+     - `logical_premises`/_ar must form a valid 3-step deductive syllogism faithful to the spoken proof; `socratic_question` must be the Da'ee's *decisive counter-question turning the table*, distinct from `question_en`.
+     - `dialogue_exchange`: every turn's `text_en` must equal the exact `text_original` of its `turn_id` in `scenario_turns` (flag `DIALOGUE_TURN_TEXT_SHIFTED` otherwise); roles must match `speaker_role` from the diarized roster; timestamps must be monotonic (NON_MONOTONIC_DIALOGUE_TIMESTAMPS).
+     - Timestamps: `answer_timestamp_seconds >= timestamp_seconds`; both should equal the ground-truth `start_ms/1000` of their anchored turns (QUESTION_TS_MISMATCH / ANSWER_TS_MISMATCH / TIMESTAMP_ORDER_VIOLATION, Dim 5).
+   - If available, cross-check against the LLM reasoning trail in `debug_traces/{video_id}.trace.json` (`stage2_m6.windows[*].units[*].r2_think_excerpt`, `r2_en_repairs`, `r2_retries`) to confirm Round-2 English repairs were applied and Round-2 thinking was genuine.
 
 3. **Audit Every Field Against `RUBRIC.md` v3.2 (100 Pts + 7 Hard-Fail Gates, `PASS >= 75`)**:
    - Evaluate Dimensions 1–5 (`20 + 25 + 20 + 20 + 15 = 100 pts`). Score `raw_unclamped_estimate` strictly on the rubric point deductions BEFORE clamping `total_score` to `0` on hard-fail gates. Tier 3 (`50–74`) is **`FAIL` (`DO_NOT_PUBLISH / NEEDS_REGEN`)**; only Tier 1 (`90–100`) and Tier 2 (`75–89`) earn `status = "PASS"`.

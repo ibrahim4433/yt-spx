@@ -750,16 +750,16 @@ def audit_single_card(
                 recommendations.append("Include substantive INTERLOCUTOR objection/follow-up turns in dialogue_exchange.")
 
     # Topical Grounding Check: [GATE-UNGROUNDED]
+    anchor_ts_ms: Optional[int] = None
+    card_ts = card.get("timestamp_seconds")
+    if card_ts is not None:
+        try:
+            anchor_ts_ms = int(float(card_ts) * 1000)
+        except (TypeError, ValueError):
+            anchor_ts_ms = None
+    if anchor_ts_ms is None and a_tid in turns_by_id:
+        anchor_ts_ms = int(turns_by_id[a_tid].get("start_ms", 0))
     if len(turns) >= 4:
-        card_ts = card.get("timestamp_seconds")
-        anchor_ts_ms: Optional[int] = None
-        if card_ts is not None:
-            try:
-                anchor_ts_ms = int(float(card_ts) * 1000)
-            except (TypeError, ValueError):
-                anchor_ts_ms = None
-        if anchor_ts_ms is None and a_tid in turns_by_id:
-            anchor_ts_ms = int(turns_by_id[a_tid].get("start_ms", 0))
         if anchor_ts_ms is not None:
             local_text = " ".join(
                 (t.get("text_original") or "")
@@ -958,6 +958,29 @@ def audit_single_card(
     if require_arabic and not inter_id and inter_transcript:
         dim_scores["attribution_timestamps"] -= 3
         defects.append({"code": "MISSING_INTERLOCUTOR_SPEAKER_ID", "severity": "MEDIUM", "description": "interlocutor_speaker_id is empty despite INTERLOCUTOR turns existing in video."})
+
+    # --- Website presentation / timestamp fidelity (Website/DB Hydration stage) ---
+    q_turn = turns_by_id.get(q_tid) if q_tid else None
+    a_turn = turns_by_id.get(a_tid) if a_tid else None
+    a_sec = card.get("answer_timestamp_seconds")
+    a_ts_valid = isinstance(a_sec, (int, float)) and a_sec >= 0
+    if ts_sec is not None and ts_sec >= 0 and a_ts_valid and a_sec < ts_sec:
+        dim_scores["attribution_timestamps"] -= 5
+        defects.append({"code": "TIMESTAMP_ORDER_VIOLATION", "severity": "MEDIUM", "description": f"answer_timestamp_seconds ({a_sec}) is before timestamp_seconds ({ts_sec})."})
+        recommendations.append("Swap question/answer timestamps or re-anchor both to their ground-truth turn start times.")
+    if q_turn is not None and anchor_ts_ms is not None and abs(int(q_turn["start_ms"]) - anchor_ts_ms) > 15_000:
+        dim_scores["attribution_timestamps"] -= 5
+        defects.append({"code": "QUESTION_TS_MISMATCH", "severity": "MEDIUM", "description": f"question_turn_id '{q_tid}' starts at {q_turn['start_ms']}ms but card timestamp is {anchor_ts_ms}ms (>15s drift)."})
+        recommendations.append("Reset card timestamp_seconds to the exact start_ms of the question turn / 1000.")
+    if a_turn is not None and a_ts_valid and abs(int(a_turn["start_ms"]) - int(a_sec * 1000)) > 15_000:
+        dim_scores["attribution_timestamps"] -= 5
+        defects.append({"code": "ANSWER_TS_MISMATCH", "severity": "MEDIUM", "description": f"answer_turn_id '{a_tid}' starts at {a_turn['start_ms']}ms but card answer_timestamp_seconds is {a_sec}s (>15s drift)."})
+        recommendations.append("Reset answer_timestamp_seconds to the exact start_ms of the answer turn / 1000.")
+    q_turn_role = turn_roles_by_id.get(q_tid) if q_tid else None
+    if q_turn_role in ("MAIN_DAEE", "CO_DAEE"):
+        dim_scores["attribution_timestamps"] -= 5
+        defects.append({"code": "QUESTION_TURN_ON_DAEE", "severity": "HIGH", "description": f"question_turn_id '{q_tid}' is spoken by Da'ee ({q_turn_role}) instead of an INTERLOCUTOR turn."})
+        recommendations.append("Re-anchor question_turn_id to the INTERLOCUTOR turn voicing the seeker objection.")
 
     # Clamp scores
     for d in dim_scores:

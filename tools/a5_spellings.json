@@ -1,0 +1,9 @@
+{
+  "db_interloc_cols": [
+    "interlocutor_speaker_id",
+    "interlocutor_type",
+    "interlocutor_verbatim_quote",
+    "interlocutor_verbatim_quote_ar"
+  ],
+  "db_interlocator_speaker_id_col_exact": "interlocutor_speaker_id"
+}
