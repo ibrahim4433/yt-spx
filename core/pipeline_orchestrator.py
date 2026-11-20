@@ -30,6 +30,23 @@ import signal
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+# Drive FUSE probe helper (from drive_sync) to detect wedged Google Drive mounts
+# before doing heavy Drive I/O in the orchestrator (added to prevent Colab cell hangs).
+try:
+    from core.drive_sync import _drive_accessible as _drive_probe
+except Exception:
+    _drive_probe = None
+
+
+def _drive_ok() -> bool:
+    """Returns True when Google Drive is accessible; True on non-Colab platforms."""
+    if _drive_probe is not None:
+        try:
+            return _drive_probe()
+        except Exception:
+            return False
+    return True
+
 os.environ["USE_TF"] = "0"
 os.environ["TRANSFORMERS_NO_TF"] = "1"
 os.environ["TRANSFORMERS_NO_FLAX"] = "1"
@@ -187,6 +204,8 @@ def select_stage1_candidates(
     Orders Stage 1 candidates so partially completed videos (M4 -> M3 -> M2 -> M1)
     on Drive are ALWAYS resumed first before downloading any new M0 video from YouTube!
     """
+    if _drive_probe is not None and not _drive_ok():
+        return []
     in_progress = []
     unstarted = []
 
@@ -236,6 +255,9 @@ def select_stage2_candidates(
     Finds all videos with completed M5_SCENARIO_BUILT scenarios that have not yet finished M6_LLM_EXTRACTED.
     Prioritizes videos with partial episode checkpoints in extractions/partial/ first!
     """
+    if _drive_probe is not None and not _drive_ok():
+        # Google Drive FUSE is wedged/inaccessible: skip to avoid indefinite hang.
+        return []
     manifest_by_id = {v["video_id"]: v for v in manifest}
     partial_vids = {
         p.name.split("_win")[0]
@@ -1021,8 +1043,12 @@ def _run_auto_orchestrator_impl(args: argparse.Namespace) -> int:
                     exit_code = s2_res.returncode
                     print(f"[Orchestrator] Stage 2 note: exited with code {s2_res.returncode}.", flush=True)
 
-            synced = workspace.sync_completed_shards_to_sqlite()
-            print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
+            if _drive_probe is not None and not _drive_ok():
+                print("   -> [Orchestrator] Google Drive not accessible after Stage 1; skipping SQLite compaction for this round.", flush=True)
+                synced = {"scenarios_synced": 0, "qa_videos_synced": 0, "qa_units_synced": 0}
+            else:
+                synced = workspace.sync_completed_shards_to_sqlite()
+                print(f"\n[Orchestrator] Round #{round_num} SQLite Compaction: {synced}", flush=True)
             try:
                 from core.debug_tracer import generate_session_debug_report
                 generate_session_debug_report(workspace)
@@ -1040,6 +1066,10 @@ def _run_auto_orchestrator_impl(args: argparse.Namespace) -> int:
             s1_after = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
             s2_after = len(select_stage2_candidates(workspace, manifest))
             if s1_after >= s1_before and s2_after >= s2_before:
+                if _drive_probe is not None and not _drive_ok():
+                    print("   -> [Orchestrator Standby] Google Drive not accessible; sleeping 60s before re-checking.", flush=True)
+                    time.sleep(60)
+                    continue
                 # Check if YouTube circuit breaker / rate-limit cooldown is active
                 allowed, wait_sec, reason = workspace.check_youtube_download_slot()
                 active_locks = list(workspace.locks_dir.glob("*.lock.json"))
