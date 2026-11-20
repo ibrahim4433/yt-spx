@@ -999,17 +999,23 @@ def _run_auto_orchestrator_impl(args: argparse.Namespace) -> int:
     total_budget_min = float(args.max_session_minutes)
     workspace = SharedWorkspace(worker_name=args.worker_id or None)
     exit_code = 0
+    print("[DEBUG] _run_auto_orchestrator_impl: start", flush=True)
 
     # Auto-clear any previous circuit breaker cooldown so new orchestrator session starts unblocked
     workspace.clear_youtube_circuit_breaker()
+    print("[DEBUG] _run_auto_orchestrator_impl: after clear_youtube_circuit_breaker", flush=True)
 
     if total_budget_min <= 0:
         round_num = 0
         while True:
             round_num += 1
+            print(f"[DEBUG] Round #{round_num} start", flush=True)
             manifest = load_or_create_manifest(workspace)
+            print(f"[DEBUG] Round #{round_num}: manifest loaded ({len(manifest)} videos)", flush=True)
             s1_before = len(select_stage1_candidates(workspace, manifest, include_shorts=not args.debates_only))
+            print(f"[DEBUG] Round #{round_num}: s1_before={s1_before}", flush=True)
             s2_before = len(select_stage2_candidates(workspace, manifest))
+            print(f"[DEBUG] Round #{round_num}: s2_before={s2_before}", flush=True)
             if s1_before == 0 and s2_before == 0:
                 print("\n[Orchestrator] All candidate videos have completed Stage 1 & Stage 2!", flush=True)
                 break
@@ -1033,18 +1039,23 @@ def _run_auto_orchestrator_impl(args: argparse.Namespace) -> int:
                     exit_code = s1_res.returncode
                     print(f"[Orchestrator] Stage 1 note: exited with code {s1_res.returncode}; checking Stage 2 backlog...", flush=True)
 
+            print(f"[DEBUG] Round #{round_num}: checking select_stage2_candidates after Stage 1...", flush=True)
             s2_ready = len(select_stage2_candidates(workspace, manifest))
+            print(f"[DEBUG] Round #{round_num}: s2_ready={s2_ready}", flush=True)
             if s2_ready > 0:
                 print(
                     f"\n[Orchestrator] Launching Isolated Stage 2 LLM Subprocess "
                     f"(batch={args.stage2_batch_videos}, budget=unlimited)...",
                     flush=True,
                 )
+                print(f"[DEBUG] Round #{round_num}: launching Stage 2 subprocess...", flush=True)
                 s2_res = subprocess.run(_build_stage2_subcmd(args, 0), env=_get_subprocess_env(), check=False)
+                print(f"[DEBUG] Round #{round_num}: Stage 2 subprocess returned code={s2_res.returncode}", flush=True)
                 if s2_res.returncode != 0:
                     exit_code = s2_res.returncode
                     print(f"[Orchestrator] Stage 2 note: exited with code {s2_res.returncode}.", flush=True)
 
+            print(f"[DEBUG] Round #{round_num}: before sync_completed_shards_to_sqlite, checking _drive_ok()...", flush=True)
             if _drive_probe is not None and not _drive_ok():
                 print("   -> [Orchestrator] Google Drive not accessible after Stage 1; skipping SQLite compaction for this round.", flush=True)
                 synced = {"scenarios_synced": 0, "qa_videos_synced": 0, "qa_units_synced": 0}
