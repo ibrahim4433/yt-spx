@@ -37,26 +37,26 @@ if CURRENT_DIR not in sys.path:
 
 
 def setup_colab_drive() -> bool:
-    print("=" * 74)
-    print("  DAWAH DIALECTICS V2 (YT-SPX): MULTI-STAGE ACOUSTIC & LLM PIPELINE")
-    print("=" * 74)
+    print("=" * 74, flush=True)
+    print("  DAWAH DIALECTICS V2 (YT-SPX): MULTI-STAGE ACOUSTIC & LLM PIPELINE", flush=True)
+    print("=" * 74, flush=True)
 
     is_colab = "google.colab" in sys.modules or os.path.exists("/content")
     if not is_colab:
-        print("[1/3] Running in standard local environment.")
+        print("[1/3] Running in standard local environment.", flush=True)
         return False
 
-    print("[1/3] Detected Google Colab runtime...")
+    print("[1/3] Detected Google Colab runtime...", flush=True)
     try:
         from google.colab import drive
 
-        if not os.path.exists("/content/drive/MyDrive") and not os.path.exists("/content/drive/My Drive"):
-            print("   -> Mounting Google Drive...")
+        if not _probe_path_accessible(Path("/content/drive/MyDrive")) and not _probe_path_accessible(Path("/content/drive/My Drive")):
+            print("   -> Mounting Google Drive...", flush=True)
             drive.mount("/content/drive")
     except Exception as exc:
-        print(f"   [-] Note on Drive mount: {exc}")
+        print(f"   [-] Note on Drive mount: {exc}", flush=True)
 
-    from core.drive_sync import SharedWorkspace
+    from core.drive_sync import SharedWorkspace, _drive_accessible, _probe_path_accessible
 
     ws = SharedWorkspace()
     # Cache model weights on local fast NVMe to keep Google Drive 100% clean of hash chunks
@@ -65,16 +65,22 @@ def setup_colab_drive() -> bool:
     os.environ.setdefault("TORCH_HOME", str(local_torch_cache))
 
     # Clean up any legacy v1 experimental model tar archive on Drive
-    if ws.is_drive:
+    if ws.is_drive and _drive_accessible():
         legacy_models_tar = ws.root / ".cache" / "models" / "stage1_models.tar"
-        if legacy_models_tar.exists():
-            try:
+        try:
+            if legacy_models_tar.exists():
                 legacy_models_tar.unlink()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-    print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})")
-    print(f"   -> Active Code Directory : {CURRENT_DIR}")
+    print(f"   -> Shared 5 TB Workspace : {ws.root} (Drive={ws.is_drive})", flush=True)
+    print(f"   -> Active Code Directory : {CURRENT_DIR}", flush=True)
+
+    # If Drive became inaccessible after SharedWorkspace(), skip Drive-only cookie work.
+    if not _drive_accessible():
+        print("   -> Ingestion strategy  : Anonymous first (Google Drive not accessible)", flush=True)
+        return True
+
     try:
         from core.cookie_pool import CookiePool, validate_cookie_file_offline
 
@@ -84,15 +90,15 @@ def setup_colab_drive() -> bool:
         pool.reset_quarantine()
         discovered = pool.discover()
         healthy = pool.healthy_cookies()
-        print(f"   -> Ingestion strategy  : HLS 234/233 stream (anti-bot) (fallback cookies: {len(healthy)} healthy / {len(discovered)} total)")
+        print(f"   -> Ingestion strategy  : HLS 234/233 stream (anti-bot) (fallback cookies: {len(healthy)} healthy / {len(discovered)} total)", flush=True)
         if healthy:
-            print(f"   -> Active cookie order : {', '.join(pool.cookie_key(p) for p in healthy)}")
+            print(f"   -> Active cookie order : {', '.join(pool.cookie_key(p) for p in healthy)}", flush=True)
         for p in discovered:
             ok_off, off_reason = validate_cookie_file_offline(p)
             if not ok_off:
-                print(f"   -> Skipped cookie      : {pool.cookie_key(p)} ({off_reason})")
+                print(f"   -> Skipped cookie      : {pool.cookie_key(p)} ({off_reason})", flush=True)
     except Exception as exc:
-        print(f"   -> Ingestion strategy  : Anonymous first ({exc})")
+        print(f"   -> Ingestion strategy  : Anonymous first ({exc})", flush=True)
     return True
 
 

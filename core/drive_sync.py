@@ -187,6 +187,12 @@ class SharedWorkspace:
         env_worker = os.environ.get("YT_SPX_WORKER_ID", "").strip()
         self.worker_id = worker_name or env_worker or f"colab-{host}-{os.getpid()}-{short_uid}"
 
+        # If Drive turned inaccessible between resolve_drive_root() and now,
+        # fall back to local storage rather than hanging on Drive FUSE mkdirs.
+        if self.is_drive and not _drive_accessible():
+            self.is_drive = False
+            self.root = BASE_DIR / "data"
+
     # ------------------------------------------------------------------
     # Atomic JSON Read/Write Helpers (Safe on Google Drive FUSE)
     # ------------------------------------------------------------------
