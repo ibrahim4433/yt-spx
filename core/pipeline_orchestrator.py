@@ -77,6 +77,8 @@ def _normalize_error_signature(vid: str, exc: Exception) -> str:
 
 def load_or_create_manifest(workspace: SharedWorkspace) -> List[Dict[str, Any]]:
     """Loads the canonical 2,640-video manifest from Drive data_dir or local repo."""
+    if _drive_probe is not None and not _drive_ok():
+        return []
     drive_manifest = workspace.data_dir / "video_manifest.json"
     repo_manifest = BASE_DIR / "data" / "video_manifest.json"
 

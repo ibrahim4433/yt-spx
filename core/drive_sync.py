@@ -52,7 +52,9 @@ def _drive_accessible() -> bool:
     """Returns True when /content/drive (or either MyDrive variant) is stat-able."""
     for candidate in (Path("/content/drive"), Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")):
         try:
-            if candidate.exists() and _probe_path_accessible(candidate, timeout_sec=_DRIVE_PROBE_TIMEOUT_SEC):
+            # NOTE: candidate.exists() is itself a FUSE stat that can block —
+            # so we must go through the threaded probe for the existence check too.
+            if _probe_path_accessible(candidate, timeout_sec=_DRIVE_PROBE_TIMEOUT_SEC):
                 return True
         except Exception:
             pass
